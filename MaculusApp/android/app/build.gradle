@@ -22,6 +22,11 @@ android {
         versionCode 1
         versionName "1.0"
     }
+
+    // Do not compress the TFLite model — it must be mmap-able from the APK.
+    androidResources {
+        noCompress "tflite"
+    }
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -44,6 +49,11 @@ android {
 
 dependencies {
     implementation("com.facebook.react:react-android")
+
+    // On-device inference (YOLO11n int8 @ 320) — runs entirely offline.
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

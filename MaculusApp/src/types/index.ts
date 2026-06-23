@@ -11,14 +11,26 @@ export interface DistanceReading {
   threshold_cm: number;
 }
 
-export interface DetectionResult {
+/**
+ * A single detection returned by the native MaculusVision module.
+ * Coordinates are normalized [0,1] in the original (un-letterboxed) image:
+ *   cx,cy = box center, w,h = box size. `cx` drives left/ahead/right zoning.
+ */
+export interface Detection {
   label: string;
-  confidence: number;
-  bbox: [number, number, number, number]; // x1, y1, x2, y2
+  score: number; // 0..1
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
 }
 
-export interface ProcessedImage {
-  base64: string;
-  width: number;
-  height: number;
+export interface ModelInfo {
+  backend: string; // "NNAPI" | "GPU" | "CPU"
+  inputSize?: number;
+  numAnchors?: number;
+  quantized?: boolean;
+  alreadyLoaded?: boolean;
 }
+
+export type Zone = 'left' | 'ahead' | 'right';

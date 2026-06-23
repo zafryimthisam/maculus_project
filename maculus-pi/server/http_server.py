@@ -1,6 +1,5 @@
 """Flask-based HTTP server for Maculus Pi"""
 import logging
-import time
 from flask import Flask, Response, jsonify, request
 
 logger = logging.getLogger(__name__)
@@ -29,15 +28,14 @@ def index():
 def capture():
     if _camera is None or not getattr(_camera, 'is_available', lambda: False)():
         return jsonify({"error": "Camera not available"}), 503
-    frame = None
-    for _ in range(6):
-        frame = _camera.get_frame()
-        if frame is not None:
-            break
-        time.sleep(0.5)
+    # get_frame() now returns the latest buffered JPEG immediately (only a brief
+    # cold-start wait before the first frame). No more multi-second retry stalls.
+    frame = _camera.get_frame()
     if frame is None:
         return jsonify({"error": "No frame available"}), 503
-    return Response(frame, mimetype='image/jpeg')
+    resp = Response(frame, mimetype='image/jpeg')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 @app.route('/stream.mjpg')
 def stream():

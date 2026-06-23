@@ -30,23 +30,16 @@ jest.mock('react-native-tts', () => ({
   removeEventListener: jest.fn(),
 }));
 
-// Mock react-native-fast-tflite
-jest.mock('react-native-fast-tflite', () => ({
-  loadTensorflowModel: jest.fn().mockResolvedValue({
-    run: jest.fn().mockResolvedValue([new Float32Array(84 * 8400)]),
+// Mock the native MaculusVision module (on-device TFLite inference)
+NativeModules.MaculusVision = {
+  loadModel: jest.fn().mockResolvedValue({
+    backend: 'CPU',
+    inputSize: 320,
+    numAnchors: 2100,
+    quantized: true,
   }),
-}));
-
-// Mock custom NativeModules.ImageProcessor
-NativeModules.ImageProcessor = {
-  preprocessYOLO: jest.fn().mockResolvedValue({
-    base64: Buffer.from(new Float32Array(640 * 640 * 3).buffer).toString('base64'),
-    width: 640,
-    height: 640,
-  }),
-  preprocessScene: jest.fn().mockResolvedValue({
-    base64: Buffer.from(new Float32Array(224 * 224 * 3).buffer).toString('base64'),
-    width: 224,
-    height: 224,
-  }),
+  detect: jest.fn().mockResolvedValue([
+    { label: 'chair', score: 0.82, cx: 0.25, cy: 0.5, w: 0.2, h: 0.4 },
+    { label: 'person', score: 0.91, cx: 0.55, cy: 0.5, w: 0.3, h: 0.7 },
+  ]),
 };

@@ -1,94 +1,92 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Vibration } from 'react-native';
 import BackgroundTimer from 'react-native-background-timer';
-import { fetchDistance, fetchFrameBase64, setPiUrl, getPiUrl, fetchStatus } from '../api/piClient';
+import {
+  fetchDistance,
+  fetchFrameBase64,
+  setPiUrl,
+  getPiUrl,
+  fetchStatus,
+  triggerBuzzer,
+} from '../api/piClient';
 import { detectionService } from '../services/DetectionService';
+import { buildGuidance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
-import { DistanceReading, DetectionResult } from '../types';
+import { DistanceReading, Detection } from '../types';
 
-const AUTO_INTERVAL_MS = 3000;
-const DISTANCE_INTERVAL_MS = 1000;
-const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 3000;
-const OBSTACLE_DISTANCE_THRESHOLD_CM = 20;
+const DISTANCE_INTERVAL_MS = 700;
+const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 2500;
+const OBSTACLE_DISTANCE_DELTA_CM = 20;
+const LOOP_IDLE_DELAY_MS = 80; // small breather between inference iterations
+const LOOP_ERROR_DELAY_MS = 500;
 
 export function useVisionAssistant() {
   // ─── UI State ───
   const [piUrl, setPiUrlState] = useState(getPiUrl());
   const [isConnected, setIsConnected] = useState(false);
-  const [isAutoMode, setIsAutoMode] = useState(false);
+  const [isGuiding, setIsGuiding] = useState(false);
   const [distance, setDistance] = useState<DistanceReading | null>(null);
   const [lastObjects, setLastObjects] = useState<string>('');
-  const [lastScene, setLastScene] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('Not connected');
+  const [statusMessage, setStatusMessage] = useState('Loading AI…');
   const [cameraAvailable, setCameraAvailable] = useState(false);
+  const [backend, setBackend] = useState<string>('');
+  const [fps, setFps] = useState(0);
 
-  // ─── Refs for latest values (prevents stale closures) ───
+  // ─── Refs (avoid stale closures) ───
   const distanceRef = useRef<DistanceReading | null>(null);
-  const isAutoModeRef = useRef(isAutoMode);
-  const isConnectedRef = useRef(isConnected);
-  const isProcessingRef = useRef(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const isConnectedRef = useRef(false);
   const cameraAvailableRef = useRef(false);
+  const isGuidingRef = useRef(false);
+  const oneShotBusyRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
-  // ─── TTS throttling refs ───
+  // TTS throttling for distance-only obstacle pings
   const lastObstacleTimeRef = useRef(0);
-  const lastObstacleDistRef = useRef<number>(999);
-  const lastAutoCycleTimeRef = useRef(0);
-  const narrationActiveRef = useRef(false);
+  const lastObstacleDistRef = useRef(999);
 
-  // ─── Timer refs ───
   const distanceTimerRef = useRef<number | null>(null);
-  const autoTimerRef = useRef<number | null>(null);
 
-  // Keep refs in sync with state
-  useEffect(() => { isAutoModeRef.current = isAutoMode; }, [isAutoMode]);
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
   useEffect(() => { distanceRef.current = distance; }, [distance]);
   useEffect(() => { cameraAvailableRef.current = cameraAvailable; }, [cameraAvailable]);
 
-  // ─── Initialization ───
+  // ─── Init: load native model + TTS ───
   useEffect(() => {
     let cancelled = false;
-
     const init = async () => {
       try {
         await tts.init();
-        if (!cancelled) {
-          setStatusMessage('Models loading...');
-          tts.speak('Loading artificial intelligence models.', 1);
-        }
-        await detectionService.loadModels();
-        if (!cancelled) {
-          setStatusMessage('Ready. Enter Pi IP to connect.');
-          tts.speak('Models loaded. Ready. Enter server address to connect.', 1);
-        }
-      } catch (e) {
+        if (cancelled) return;
+        setStatusMessage('Loading vision model…');
+        tts.speak('Loading vision model.', 1);
+        const info = await detectionService.loadModels();
+        if (cancelled) return;
+        setBackend(info.backend);
+        setStatusMessage(`Ready (${info.backend}). Enter Pi address to connect.`);
+        tts.speak(`Vision ready on ${info.backend}. Enter server address to connect.`, 1);
+      } catch (e: any) {
         console.error('[Init] Error:', e);
-        if (!cancelled) {
-          setStatusMessage('Failed to load AI models. Restart app.');
-          tts.speak('Failed to load AI models. Please restart the app.', 2, true);
-        }
+        if (cancelled) return;
+        setStatusMessage('Failed to load vision model. Restart app.');
+        tts.speak('Failed to load vision model. Please restart the app.', 2, true);
       }
     };
-
     init();
-
     return () => {
       cancelled = true;
+      isGuidingRef.current = false;
       tts.destroy();
     };
   }, []);
 
-  // ─── Cancel helper ───
   const cancelInFlight = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
     }
   }, []);
 
-  // ─── URL update ───
   const updatePiUrl = useCallback((url: string) => {
     setPiUrlState(url);
     setPiUrl(url);
@@ -96,48 +94,30 @@ export function useVisionAssistant() {
 
   // ─── Connection test ───
   const testConnection = useCallback(async (): Promise<boolean> => {
-    cancelInFlight();
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
     try {
-      setStatusMessage('Connecting...');
+      setStatusMessage('Connecting…');
       setIsConnected(false);
-
-      // Check Pi status first to see what's available
-      const status = await fetchStatus(controller.signal);
-      if (controller.signal.aborted) return false;
-
+      const status = await fetchStatus();
       setCameraAvailable(!!status.camera);
       setIsConnected(true);
-
-      // Also fetch initial distance
-      const d = await fetchDistance(controller.signal);
-      if (!controller.signal.aborted) {
+      try {
+        const d = await fetchDistance();
         setDistance(d);
-      }
-
+      } catch { /* distance optional at connect time */ }
       setStatusMessage('Connected to Maculus Pi');
-      Vibration.vibrate([0, 40, 100, 40]); // Double tap for success
+      Vibration.vibrate([0, 40, 100, 40]);
       tts.speak('Connected to Maculus device', 2, true);
       return true;
     } catch (e: any) {
-      if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') {
-        return false;
-      }
       setIsConnected(false);
       setStatusMessage('Connection failed. Check IP and WiFi.');
-      Vibration.vibrate(400); // Long pulse for failure
+      Vibration.vibrate(400);
       tts.speak('Connection failed', 1, true);
       return false;
-    } finally {
-      if (abortControllerRef.current === controller) {
-        abortControllerRef.current = null;
-      }
     }
-  }, [cancelInFlight]);
+  }, []);
 
-  // ─── Distance polling ───
+  // ─── Distance polling (independent of vision loop) ───
   useEffect(() => {
     if (!isConnected) {
       if (distanceTimerRef.current) {
@@ -147,39 +127,27 @@ export function useVisionAssistant() {
       return;
     }
 
-    const doPoll = async () => {
+    const poll = async () => {
       try {
         const d = await fetchDistance();
         setDistance(d);
-
-        if (d.obstacle && !narrationActiveRef.current) {
+        // When NOT running the full guidance loop, still warn on close obstacles.
+        if (!isGuidingRef.current && d.obstacle) {
           const now = Date.now();
-          const timeSinceLast = now - lastObstacleTimeRef.current;
-          const distDiff = Math.abs(d.distance_cm - lastObstacleDistRef.current);
-
-          if (
-            timeSinceLast > OBSTACLE_ANNOUNCE_COOLDOWN_MS ||
-            distDiff > OBSTACLE_DISTANCE_THRESHOLD_CM
-          ) {
+          const dt = now - lastObstacleTimeRef.current;
+          const dd = Math.abs(d.distance_cm - lastObstacleDistRef.current);
+          if (dt > OBSTACLE_ANNOUNCE_COOLDOWN_MS || dd > OBSTACLE_DISTANCE_DELTA_CM) {
             lastObstacleTimeRef.current = now;
             lastObstacleDistRef.current = d.distance_cm;
-            tts.speak(
-              `Obstacle ahead, ${Math.round(d.distance_cm)} centimeters`,
-              1
-            );
+            tts.speak(`Obstacle ahead, ${Math.round(d.distance_cm)} centimeters`, 1);
           }
         }
-      } catch (e) {
-        // Silent fail on polling
-      }
+      } catch { /* silent on polling */ }
     };
 
-    doPoll();
-
+    poll();
     distanceTimerRef.current = BackgroundTimer.setInterval(() => {
-      if (isConnectedRef.current) {
-        doPoll();
-      }
+      if (isConnectedRef.current) poll();
     }, DISTANCE_INTERVAL_MS);
 
     return () => {
@@ -190,237 +158,164 @@ export function useVisionAssistant() {
     };
   }, [isConnected]);
 
-  // ─── Core processing cycle ───
-  const runCycle = useCallback(async (): Promise<void> => {
-    if (isProcessingRef.current) return;
-    isProcessingRef.current = true;
-    setIsProcessing(true);
+  // ─── One inference iteration: frame -> detect -> guide ───
+  const runOnce = useCallback(async (signal: AbortSignal): Promise<Detection[]> => {
+    const frame = await fetchFrameBase64(signal);
+    if (signal.aborted) return [];
+    const detections = await detectionService.detectObjects(frame);
+    if (signal.aborted) return [];
+    setLastObjects(summarizeObjects(detections));
+    return detections;
+  }, []);
 
-    try {
-      // If no camera, skip AI and just report distance
+  // ─── Continuous guidance loop (pipelined, runs as fast as inference allows) ───
+  const guidanceLoop = useCallback(async () => {
+    let lastFrameTime = Date.now();
+    let smoothedFps = 0;
+
+    while (isGuidingRef.current && isConnectedRef.current) {
       if (!cameraAvailableRef.current) {
-        const currentDist = distanceRef.current;
-        if (currentDist?.obstacle) {
-          tts.speak(
-            `Caution, obstacle ${Math.round(currentDist.distance_cm)} centimeters ahead.`,
-            0
-          );
-        } else {
-          tts.speak('No camera available for scene analysis.', 0);
+        // No camera: degrade to distance-only guidance.
+        const d = distanceRef.current;
+        if (d?.obstacle) {
+          tts.speak(`Caution, obstacle ${Math.round(d.distance_cm)} centimeters ahead.`, 1);
         }
-        return;
+        await sleep(800);
+        continue;
       }
 
-      cancelInFlight();
       const controller = new AbortController();
-      abortControllerRef.current = controller;
+      abortRef.current = controller;
+      try {
+        const detections = await runOnce(controller.signal);
+        if (!isGuidingRef.current) break;
 
-      const frameB64 = await fetchFrameBase64(controller.signal);
+        const guidance = buildGuidance(detections, distanceRef.current);
+        tts.speak(guidance.text, guidance.priority);
+        if (guidance.buzz) {
+          triggerBuzzer('obstacle').catch(() => {});
+        }
 
-      if (controller.signal.aborted) return;
+        // FPS (exponential smoothing)
+        const now = Date.now();
+        const dt = now - lastFrameTime;
+        lastFrameTime = now;
+        if (dt > 0) {
+          const inst = 1000 / dt;
+          smoothedFps = smoothedFps === 0 ? inst : smoothedFps * 0.7 + inst * 0.3;
+          setFps(Math.round(smoothedFps * 10) / 10);
+        }
 
-      const [detections, scene] = await Promise.all([
-        detectionService.detectObjects(frameB64).catch((err) => {
-          if (err.name === 'AbortError') return [] as DetectionResult[];
-          console.warn('[Detect] Error:', err);
-          return [] as DetectionResult[];
-        }),
-        detectionService.classifyScene(frameB64).catch((err) => {
-          if (err.name === 'AbortError') return 'unknown';
-          console.warn('[Scene] Error:', err);
-          return 'unknown';
-        }),
-      ]);
-
-      if (controller.signal.aborted) return;
-
-      setLastScene(scene);
-
-      const objectNames = detections.map((d) => d.label);
-      const uniqueObjects = [...new Set(objectNames)];
-      setLastObjects(uniqueObjects.join(', '));
-
-      const currentDist = distanceRef.current;
-
-      let narration = `Scene: ${scene}.`;
-      if (uniqueObjects.length > 0) {
-        narration += ` Detected: ${uniqueObjects.join(', ')}.`;
-      } else {
-        narration += ' No objects detected.';
-      }
-
-      if (currentDist?.obstacle) {
-        narration += ` Caution, obstacle ${Math.round(currentDist.distance_cm)} centimeters ahead.`;
-      }
-
-      narrationActiveRef.current = true;
-      tts.speak(narration, 0);
-      setTimeout(() => { narrationActiveRef.current = false; }, 5000);
-    } catch (e: any) {
-      if (e.name !== 'AbortError' && e.code !== 'ERR_CANCELED') {
-        console.error('[Cycle] Error:', e);
-        // Check if it's a camera error
-        if (e.message?.includes('CAPTURE_ERROR')) {
+        await sleep(LOOP_IDLE_DELAY_MS);
+      } catch (e: any) {
+        if (e?.name === 'AbortError' || e?.code === 'ERR_CANCELED') break;
+        if (typeof e?.message === 'string' && e.message.includes('CAPTURE_ERROR')) {
           setCameraAvailable(false);
           tts.speak('Camera not available. Distance monitoring active.', 1);
+        }
+        await sleep(LOOP_ERROR_DELAY_MS);
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+    }
+    setFps(0);
+  }, [runOnce]);
+
+  const startGuiding = useCallback(() => {
+    if (isGuidingRef.current) return;
+    if (!isConnectedRef.current) {
+      tts.speak('Not connected', 1, true);
+      return;
+    }
+    isGuidingRef.current = true;
+    setIsGuiding(true);
+    setIsProcessing(true);
+    tts.speak('Guidance started', 1, true);
+    guidanceLoop().finally(() => {
+      isGuidingRef.current = false;
+      setIsGuiding(false);
+      setIsProcessing(false);
+    });
+  }, [guidanceLoop]);
+
+  const stopGuiding = useCallback(() => {
+    if (!isGuidingRef.current) return;
+    isGuidingRef.current = false;
+    setIsGuiding(false);
+    cancelInFlight();
+    tts.stop();
+    tts.speak('Guidance stopped', 1, true);
+  }, [cancelInFlight]);
+
+  const toggleGuiding = useCallback(() => {
+    if (isGuidingRef.current) stopGuiding();
+    else startGuiding();
+  }, [startGuiding, stopGuiding]);
+
+  // ─── One-shot "What's around me?" ───
+  const describeOnce = useCallback(async () => {
+    if (!isConnectedRef.current) {
+      tts.speak('Not connected', 1, true);
+      return;
+    }
+    if (isGuidingRef.current || oneShotBusyRef.current) return;
+    if (!cameraAvailableRef.current) {
+      tts.speak('Camera not available.', 1);
+      return;
+    }
+    oneShotBusyRef.current = true;
+    setIsProcessing(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const detections = await runOnce(controller.signal);
+      if (controller.signal.aborted) return;
+      const guidance = buildGuidance(detections, distanceRef.current);
+      tts.speak(guidance.text, Math.max(guidance.priority, 0), true);
+      if (guidance.buzz) triggerBuzzer('obstacle').catch(() => {});
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        if (typeof e?.message === 'string' && e.message.includes('CAPTURE_ERROR')) {
+          setCameraAvailable(false);
+          tts.speak('Camera not available.', 1);
         } else {
-          tts.speak('Analysis error', 1);
+          tts.speak('Detection failed', 1);
         }
       }
     } finally {
-      isProcessingRef.current = false;
+      oneShotBusyRef.current = false;
       setIsProcessing(false);
-      if (abortControllerRef.current?.signal.aborted === false) {
-        abortControllerRef.current = null;
-      }
+      if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [cancelInFlight]);
+  }, [runOnce]);
 
-  // ─── Auto mode ───
+  // Stop guiding if disconnected
   useEffect(() => {
-    if (!isConnected || !isAutoMode) {
-      if (autoTimerRef.current) {
-        BackgroundTimer.clearInterval(autoTimerRef.current);
-        autoTimerRef.current = null;
-      }
-      return;
-    }
-
-    tts.speak('Auto mode on', 1, true);
-
-    autoTimerRef.current = BackgroundTimer.setInterval(() => {
-      if (!isConnectedRef.current || !isAutoModeRef.current) return;
-
-      const now = Date.now();
-      if (now - lastAutoCycleTimeRef.current < AUTO_INTERVAL_MS) return;
-      lastAutoCycleTimeRef.current = now;
-
-      runCycle();
-    }, AUTO_INTERVAL_MS);
-
-    return () => {
-      if (autoTimerRef.current) {
-        BackgroundTimer.clearInterval(autoTimerRef.current);
-        autoTimerRef.current = null;
-      }
-    };
-  }, [isConnected, isAutoMode, runCycle]);
-
-  // ─── Manual actions ───
-  const manualDescribe = useCallback(async () => {
-    if (!isConnectedRef.current) {
-      tts.speak('Not connected', 1, true);
-      return;
-    }
-    if (isProcessingRef.current) return;
-
-    if (!cameraAvailableRef.current) {
-      tts.speak('Camera not available. Cannot analyze scene.', 1);
-      return;
-    }
-
-    isProcessingRef.current = true;
-    setIsProcessing(true);
-
-    try {
+    if (!isConnected && isGuidingRef.current) {
+      isGuidingRef.current = false;
+      setIsGuiding(false);
       cancelInFlight();
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      const frameB64 = await fetchFrameBase64(controller.signal);
-      if (controller.signal.aborted) return;
-
-      const scene = await detectionService.classifyScene(frameB64);
-      if (controller.signal.aborted) return;
-
-      setLastScene(scene);
-      narrationActiveRef.current = true;
-      tts.speak(`You are in ${scene}`, 0);
-      setTimeout(() => { narrationActiveRef.current = false; }, 3000);
-    } catch (e: any) {
-      if (e.name !== 'AbortError') {
-        if (e.message?.includes('CAPTURE_ERROR')) {
-          setCameraAvailable(false);
-          tts.speak('Camera not available.', 1);
-        } else {
-          tts.speak('Scene analysis failed', 1);
-        }
-      }
-    } finally {
-      isProcessingRef.current = false;
-      setIsProcessing(false);
-      abortControllerRef.current = null;
     }
-  }, [cancelInFlight]);
-
-  const manualDetect = useCallback(async () => {
-    if (!isConnectedRef.current) {
-      tts.speak('Not connected', 1, true);
-      return;
-    }
-    if (isProcessingRef.current) return;
-
-    if (!cameraAvailableRef.current) {
-      tts.speak('Camera not available. Cannot detect objects.', 1);
-      return;
-    }
-
-    isProcessingRef.current = true;
-    setIsProcessing(true);
-
-    try {
-      cancelInFlight();
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      const frameB64 = await fetchFrameBase64(controller.signal);
-      if (controller.signal.aborted) return;
-
-      const detections = await detectionService.detectObjects(frameB64);
-      if (controller.signal.aborted) return;
-
-      const names = detections.map((d) => d.label);
-      const unique = [...new Set(names)];
-      setLastObjects(unique.join(', '));
-
-      narrationActiveRef.current = true;
-      if (unique.length > 0) {
-        tts.speak(`Detected: ${unique.join(', ')}`, 0);
-      } else {
-        tts.speak('No objects detected', 0);
-      }
-      setTimeout(() => { narrationActiveRef.current = false; }, 3000);
-    } catch (e: any) {
-      if (e.name !== 'AbortError') {
-        if (e.message?.includes('CAPTURE_ERROR')) {
-          setCameraAvailable(false);
-          tts.speak('Camera not available.', 1);
-        } else {
-          tts.speak('Object detection failed', 1);
-        }
-      }
-    } finally {
-      isProcessingRef.current = false;
-      setIsProcessing(false);
-      abortControllerRef.current = null;
-    }
-  }, [cancelInFlight]);
+  }, [isConnected, cancelInFlight]);
 
   return {
     piUrl,
     updatePiUrl,
     isConnected,
-    isAutoMode,
-    setIsAutoMode,
+    isGuiding,
     distance,
     lastObjects,
-    lastScene,
     isProcessing,
     statusMessage,
     cameraAvailable,
+    backend,
+    fps,
     testConnection,
-    manualDescribe,
-    manualDetect,
-    runCycle,
+    toggleGuiding,
+    describeOnce,
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }

@@ -6,23 +6,29 @@ interface Props {
   isConnected: boolean;
   statusMessage: string;
   distance: DistanceReading | null;
-  lastScene: string;
   lastObjects: string;
   isProcessing: boolean;
+  isGuiding: boolean;
 }
 
 export const StatusPanel: React.FC<Props> = ({
   isConnected,
   statusMessage,
   distance,
-  lastScene,
   lastObjects,
   isProcessing,
+  isGuiding,
 }) => {
+  const statusText = isGuiding
+    ? 'Guiding…'
+    : isProcessing
+    ? 'Processing…'
+    : statusMessage;
+
   return (
     <View style={styles.container} accessibilityRole="summary">
       <Text style={[styles.status, isConnected ? styles.connected : styles.disconnected]}>
-        {isProcessing ? 'Processing...' : statusMessage}
+        {statusText}
       </Text>
 
       {distance && (
@@ -30,12 +36,6 @@ export const StatusPanel: React.FC<Props> = ({
           Distance: {distance.distance_cm} cm {distance.obstacle ? '(OBSTACLE)' : ''}
         </Text>
       )}
-
-      {lastScene ? (
-        <Text style={styles.info} accessibilityLiveRegion="polite">
-          Scene: {lastScene}
-        </Text>
-      ) : null}
 
       {lastObjects ? (
         <Text style={styles.info} accessibilityLiveRegion="polite">

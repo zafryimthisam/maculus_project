@@ -1,40 +1,50 @@
-# Model Files
+# On-Device Model — YOLO11n (int8, 320)
 
-Place your `.tflite` model files in this directory before building the app.
+The app now runs **one** detector entirely in native code (Kotlin + TFLite), with
+hardware acceleration (NNAPI → GPU → CPU/XNNPACK fallback). There is **no JS-side
+inference and no scene-classification model** anymore — spoken guidance is
+synthesized from object detections + the ultrasonic distance (see
+`src/services/GuidanceEngine.ts`), which is far more useful than the old
+ImageNet place-name guess.
 
-## Required Models
+## The model is loaded from the Android assets folder, NOT from here
 
-### 1. YOLOv8n (Object Detection)
-- **File:** `yolov8n.tflite`
-- **Input:** 640x640 RGB, float32 normalized [0,1]
-- **Output:** [1, 84, 8400] float32
-- **Download:**
-  - Official Ultralytics: https://github.com/ultralytics/ultralytics
-  - Pre-converted TFLite: https://github.com/ultralytics/assets/releases (search yolov8n.tflite)
-  - Or convert yourself:
-    ```bash
-    pip install ultralytics
-    yolo export model=yolov8n.pt format=tflite imgsz=640
-    ```
-- **Size:** ~6.2 MB
-- **Speed:** ~30ms per frame on modern phones
+> ⚠️ Place the model at:
+> `MaculusApp/android/app/src/main/assets/yolo11n.tflite`
+>
+> The label file is already there: `assets/coco-labels.txt`.
 
-### 2. EfficientNet-Lite0 (Scene Classification)
-- **File:** `efficientnet-lite0.tflite`
-- **Input:** 224x224 RGB, float32 [0, 255]
-- **Output:** 1000-class logits (ImageNet)
-- **Download:**
-  - TensorFlow Hub: https://tfhub.dev/tensorflow/efficientnet/lite0/lite/2
-  - Direct: https://storage.googleapis.com/tfhub-lite-models/tensorflow/lite-model/efficientnet/lite0/fp32/2.tflite
-  - Rename downloaded file to `efficientnet-lite0.tflite`
-- **Size:** ~16 MB
-- **Speed:** ~15ms per frame on modern phones
+The old `.tflite` files in this `src/models/` folder are no longer used and can be
+deleted (`yolov8n.tflite`, `efficientnet-lite0.tflite`).
 
-## Alternative: MobileNetV3 Scene Classifier (smaller)
-- If EfficientNet is too large, use MobileNetV3-Large from TF Hub:
-  - https://tfhub.dev/google/imagenet/mobilenet_v3_large_100_224/classification/5
+## How to export `yolo11n.tflite` (int8, 320×320)
 
-## Notes
-- Both models run entirely on-device with `react-native-fast-tflite`.
-- No internet connection is required after models are bundled.
-- Total app size increase: ~22 MB.
+```bash
+pip install ultralytics
+yolo export model=yolo11n.pt format=tflite imgsz=320 int8=True
+```
+
+This produces `yolo11n_saved_model/yolo11n_full_integer_quant.tflite`.
+Rename it and drop it into the assets folder:
+
+```bash
+cp yolo11n_saved_model/yolo11n_full_integer_quant.tflite \
+   MaculusApp/android/app/src/main/assets/yolo11n.tflite
+```
+
+### Notes
+- **Input:** 320×320 RGB. The native module letterboxes (aspect-preserving, gray
+  pad) and quantizes using the model's own input quant params — so a `float32`
+  export also works; the module auto-detects quantized vs float tensors.
+- **Output:** `[1, 84, 2100]` (4 box coords + 80 COCO classes; 2100 anchors at
+  320). The native decoder reads the output quant `scale`/`zeroPoint` and the real
+  anchor count from the interpreter, so minor export differences are tolerated.
+- **Size:** int8 ≈ 3 MB. `noCompress "tflite"` is set in `build.gradle` so the
+  model stays mmap-able inside the APK.
+- A plain `float32` export (`int8=False`) also runs but is larger/slower — int8 is
+  recommended for the Pi-Zero-paired real-time loop.
+
+## Want a different/newer model?
+Any YOLOv8/YOLO11 `*n`/`*s` TFLite export with the standard `[1, 84, N]` head will
+work without code changes. For a different class set, also replace
+`assets/coco-labels.txt` (one label per line, in model index order).

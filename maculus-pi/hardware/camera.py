@@ -67,13 +67,19 @@ class Camera:
             self.picam2 = None
             
     def get_frame(self):
+        """Return the latest JPEG frame immediately.
+
+        The MJPEG encoder pushes frames continuously into the StreamingOutput,
+        so a recent frame is almost always already buffered. We only block
+        (briefly) on a cold start before the very first frame arrives — this
+        avoids the old per-request 2s+ condition waits that stalled /capture.
+        """
         if not self._available:
             return None
-        with self.output.condition:
-            self.output.condition.wait(timeout=2.0)
-            if self.output.frame is not None:
-                return self.output.frame
-        # Second attempt if first frame not ready yet
+        # Fast path: a frame is already buffered.
+        if self.output.frame is not None:
+            return self.output.frame
+        # Cold start: wait briefly for the first frame.
         with self.output.condition:
             self.output.condition.wait(timeout=2.0)
             return self.output.frame
