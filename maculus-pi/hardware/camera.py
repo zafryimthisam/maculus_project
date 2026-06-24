@@ -1,6 +1,7 @@
 """Picamera2 wrapper for Maculus - handles missing camera gracefully"""
 import io
 import logging
+import time
 from threading import Condition
 
 try:
@@ -13,15 +14,21 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
 class StreamingOutput(io.BufferedIOBase):
     def __init__(self):
         self.frame = None
+        self.frame_id = 0
+        self.timestamp = 0.0
         self.condition = Condition()
 
     def write(self, buf):
         with self.condition:
             self.frame = buf
+            self.frame_id += 1
+            self.timestamp = time.time()
             self.condition.notify_all()
+
 
 class Camera:
     def __init__(self, resolution=(640, 480), fps=10):
@@ -67,7 +74,7 @@ class Camera:
             self.picam2 = None
             
     def get_frame(self):
-        """Return the latest JPEG frame immediately.
+        """Return the latest JPEG frame and metadata immediately.
 
         The MJPEG encoder pushes frames continuously into the StreamingOutput,
         so a recent frame is almost always already buffered. We only block
@@ -78,11 +85,23 @@ class Camera:
             return None
         # Fast path: a frame is already buffered.
         if self.output.frame is not None:
-            return self.output.frame
+            return {
+                "bytes": self.output.frame,
+                "frame_id": self.output.frame_id,
+                "timestamp": self.output.timestamp,
+                "resolution": self.resolution,
+            }
         # Cold start: wait briefly for the first frame.
         with self.output.condition:
             self.output.condition.wait(timeout=2.0)
-            return self.output.frame
+            if self.output.frame is None:
+                return None
+            return {
+                "bytes": self.output.frame,
+                "frame_id": self.output.frame_id,
+                "timestamp": self.output.timestamp,
+                "resolution": self.resolution,
+            }
             
     def get_stream_output(self):
         return self.output

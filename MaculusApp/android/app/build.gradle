@@ -25,7 +25,7 @@ android {
 
     // Do not compress the TFLite model — it must be mmap-able from the APK.
     androidResources {
-        noCompress "tflite"
+        noCompress "tflite", "onnx"
     }
     signingConfigs {
         debug {
@@ -54,6 +54,9 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // Optional slow-path scene description runtime for SmolVLM ONNX assets.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

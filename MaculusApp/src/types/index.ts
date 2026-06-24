@@ -11,6 +11,28 @@ export interface DistanceReading {
   threshold_cm: number;
 }
 
+export interface CapturedFrame {
+  base64: string;
+  frameId: number | null;
+  capturedAt: number | null;
+  resolution: string | null;
+}
+
+export interface SceneAnalysisOptions {
+  distanceCm?: number | null;
+  obstacle?: boolean;
+  requestCaption?: boolean;
+}
+
+export interface SceneAnalysis {
+  detections: Detection[];
+  frameId?: number | null;
+  capturedAt?: number | null;
+  caption?: string | null;
+  captionError?: string | null;
+  captionStatus: 'disabled' | 'unavailable' | 'grounded' | 'ready' | 'error';
+  inferenceMs?: number;
+}
 /**
  * A single detection returned by the native MaculusVision module.
  * All coordinates are normalized [0,1] in the original image.

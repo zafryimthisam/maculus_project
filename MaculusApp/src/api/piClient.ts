@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { Buffer } from 'buffer';
-import { DistanceReading, PiStatus } from '../types';
+import { CapturedFrame, DistanceReading, PiStatus } from '../types';
 
 let PI_BASE_URL = 'http://192.168.1.100:8000';
 
@@ -20,11 +20,12 @@ export const fetchDistance = async (signal?: AbortSignal): Promise<DistanceReadi
   return res.data;
 };
 
-export const fetchFrameBase64 = async (signal?: AbortSignal): Promise<string> => {
+export const fetchFrame = async (signal?: AbortSignal): Promise<CapturedFrame> => {
   const res = await axios.get(`${PI_BASE_URL}/capture`, {
     responseType: 'arraybuffer',
     timeout: 8000,
     signal,
+    headers: { Accept: 'image/jpeg' },
   });
 
   // CRITICAL FIX: Check if server returned an error (e.g. 503 camera not available)
@@ -32,7 +33,6 @@ export const fetchFrameBase64 = async (signal?: AbortSignal): Promise<string> =>
   // but the content will be JSON text, not binary JPEG.
   const contentType = (res.headers['content-type'] as string) || '';
   if (!contentType.includes('image')) {
-    // Server returned JSON error instead of JPEG
     const text = new TextDecoder().decode(res.data);
     let msg = 'Camera not available';
     try {
@@ -42,8 +42,19 @@ export const fetchFrameBase64 = async (signal?: AbortSignal): Promise<string> =>
     throw new Error(`CAPTURE_ERROR: ${msg}`);
   }
 
-  // Robust, high-performance base64 for React Native binary data
-  return Buffer.from(res.data).toString('base64');
+  const frameIdRaw = res.headers['x-maculus-frame-id'];
+  const capturedAtRaw = res.headers['x-maculus-captured-at'];
+  return {
+    base64: Buffer.from(res.data).toString('base64'),
+    frameId: frameIdRaw ? Number(frameIdRaw) : null,
+    capturedAt: capturedAtRaw ? Number(capturedAtRaw) : null,
+    resolution: (res.headers['x-maculus-resolution'] as string) || null,
+  };
+};
+
+export const fetchFrameBase64 = async (signal?: AbortSignal): Promise<string> => {
+  const frame = await fetchFrame(signal);
+  return frame.base64;
 };
 
 export const triggerBuzzer = async (pattern: string, signal?: AbortSignal): Promise<void> => {

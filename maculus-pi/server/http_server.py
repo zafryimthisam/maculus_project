@@ -33,8 +33,11 @@ def capture():
     frame = _camera.get_frame()
     if frame is None:
         return jsonify({"error": "No frame available"}), 503
-    resp = Response(frame, mimetype='image/jpeg')
+    resp = Response(frame["bytes"], mimetype='image/jpeg')
     resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Maculus-Frame-Id'] = str(frame["frame_id"])
+    resp.headers['X-Maculus-Captured-At'] = f'{frame["timestamp"]:.6f}'
+    resp.headers['X-Maculus-Resolution'] = f'{frame["resolution"][0]}x{frame["resolution"][1]}'
     return resp
 
 @app.route('/stream.mjpg')

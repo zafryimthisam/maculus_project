@@ -26,6 +26,7 @@ export default function App() {
     statusMessage,
     cameraAvailable,
     backend,
+    sceneModelStatus,
     fps,
     testConnection,
     toggleGuiding,
@@ -59,7 +60,7 @@ export default function App() {
             Maculus
           </Text>
           <Text style={styles.subheader}>
-            AI Vision Assistant{backend ? ` · ${backend}` : ''}
+            AI Vision Assistant{backend ? ` · ${backend}` : ''}{sceneModelStatus ? ` · ${sceneModelStatus}` : ''}
           </Text>
 
           <View style={styles.inputRow}>

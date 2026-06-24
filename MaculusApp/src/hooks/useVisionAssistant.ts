@@ -3,7 +3,7 @@ import { Vibration } from 'react-native';
 import BackgroundTimer from 'react-native-background-timer';
 import {
   fetchDistance,
-  fetchFrameBase64,
+  fetchFrame,
   setPiUrl,
   getPiUrl,
   fetchStatus,
@@ -31,6 +31,7 @@ export function useVisionAssistant() {
   const [statusMessage, setStatusMessage] = useState('Loading AI…');
   const [cameraAvailable, setCameraAvailable] = useState(false);
   const [backend, setBackend] = useState<string>('');
+  const [sceneModelStatus, setSceneModelStatus] = useState<string>('grounded detector mode');
   const [fps, setFps] = useState(0);
 
   // ─── Refs (avoid stale closures) ───
@@ -63,7 +64,10 @@ export function useVisionAssistant() {
         const info = await detectionService.loadModels();
         if (cancelled) return;
         setBackend(info.backend);
-        setStatusMessage(`Ready (${info.backend}). Enter Pi address to connect.`);
+        const sceneInfo = await detectionService.getSceneModelInfo();
+        if (cancelled) return;
+        setSceneModelStatus(sceneInfo.available ? 'SmolVLM ready' : 'grounded detector mode');
+        setStatusMessage(`Ready (${info.backend}, ${sceneInfo.available ? 'SmolVLM' : 'grounded descriptions'}). Enter Pi address to connect.`);
         tts.speak(`Vision ready on ${info.backend}. Enter server address to connect.`, 1);
       } catch (e: any) {
         console.error('[Init] Error:', e);
@@ -159,13 +163,27 @@ export function useVisionAssistant() {
   }, [isConnected]);
 
   // ─── One inference iteration: frame -> detect -> guide ───
-  const runOnce = useCallback(async (signal: AbortSignal): Promise<Detection[]> => {
-    const frame = await fetchFrameBase64(signal);
-    if (signal.aborted) return [];
-    const detections = await detectionService.detectObjects(frame);
-    if (signal.aborted) return [];
-    setLastObjects(summarizeObjects(detections));
-    return detections;
+  const runOnce = useCallback(async (
+    signal: AbortSignal,
+    requestCaption: boolean = false,
+  ): Promise<{ detections: Detection[]; caption?: string | null }> => {
+    const frame = await fetchFrame(signal);
+    if (signal.aborted) return { detections: [] };
+    const currentDistance = distanceRef.current;
+    const analysis = await detectionService.analyzeScene(frame.base64, {
+      distanceCm: currentDistance?.distance_cm ?? null,
+      obstacle: !!currentDistance?.obstacle,
+      requestCaption,
+    });
+    if (signal.aborted) return { detections: [] };
+    if (requestCaption && analysis.captionStatus !== 'ready') {
+      console.warn('[SmolVLM] Caption fallback:', analysis.captionStatus, analysis.captionError || 'no native error');
+    }
+    setLastObjects(summarizeObjects(analysis.detections));
+    return {
+      detections: analysis.detections,
+      caption: analysis.caption,
+    };
   }, []);
 
   // ─── Continuous guidance loop (pipelined, runs as fast as inference allows) ───
@@ -187,10 +205,10 @@ export function useVisionAssistant() {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const detections = await runOnce(controller.signal);
+        const analysis = await runOnce(controller.signal, false);
         if (!isGuidingRef.current) break;
 
-        const guidance = buildGuidance(detections, distanceRef.current);
+        const guidance = buildGuidance(analysis.detections, distanceRef.current);
         tts.speak(guidance.text, guidance.priority);
         if (guidance.buzz) {
           triggerBuzzer('obstacle').catch(() => {});
@@ -272,10 +290,12 @@ export function useVisionAssistant() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const detections = await runOnce(controller.signal);
+      const analysis = await runOnce(controller.signal, true);
       if (controller.signal.aborted) return;
-      // Use the rich scene description, not the brief continuous-guidance text.
-      const guidance = describeScene(detections, distanceRef.current);
+      // Prefer a native VLM caption when available, otherwise use grounded narration.
+      const guidance = analysis.caption
+        ? { text: analysis.caption, priority: 1, buzz: false }
+        : describeScene(analysis.detections, distanceRef.current);
       // Force immediate speech at high priority.
       tts.speak(guidance.text, Math.max(guidance.priority, 1), true);
       if (guidance.buzz) triggerBuzzer('obstacle').catch(() => {});
@@ -315,6 +335,7 @@ export function useVisionAssistant() {
     statusMessage,
     cameraAvailable,
     backend,
+    sceneModelStatus,
     fps,
     testConnection,
     toggleGuiding,
