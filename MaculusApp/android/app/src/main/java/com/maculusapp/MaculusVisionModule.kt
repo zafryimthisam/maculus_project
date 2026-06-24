@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.util.Base64
+import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -37,6 +38,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     companion object {
+        private const val TAG = "MaculusVision"
         private const val INPUT_SIZE = 320
         private const val NUM_CLASSES = 80
         private const val CONF_THRESHOLD = 0.30f
@@ -199,6 +201,20 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             val detections = decodeYolo(outBuffer, lb)
             val result = nms(detections)
 
+            // Debug: log top detections with normalized coordinates for zone verification.
+            if (result.isNotEmpty()) {
+                val top = result.take(3)
+                for (d in top) {
+                    val lbl = if (d.classId < labels.size) labels[d.classId] else "?"
+                    Log.d(TAG, "detection: $lbl score=${"%.2f".format(d.score)} " +
+                        "cx=${"%.3f".format(d.cx)} cy=${"%.3f".format(d.cy)} " +
+                        "w=${"%.3f".format(d.w)} h=${"%.3f".format(d.h)} " +
+                        "x1=${"%.3f".format(d.x1)} x2=${"%.3f".format(d.x2)}")
+                }
+            } else {
+                Log.d(TAG, "detect: no objects above threshold")
+            }
+
             bitmap.recycle()
             lb.bitmap.recycle()
 
@@ -212,6 +228,10 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
                 m.putDouble("cy", d.cy.toDouble())
                 m.putDouble("w", d.w.toDouble())
                 m.putDouble("h", d.h.toDouble())
+                m.putDouble("x1", d.x1.toDouble())
+                m.putDouble("y1", d.y1.toDouble())
+                m.putDouble("x2", d.x2.toDouble())
+                m.putDouble("y2", d.y2.toDouble())
                 arr.pushMap(m)
             }
             promise.resolve(arr)

@@ -10,7 +10,7 @@ import {
   triggerBuzzer,
 } from '../api/piClient';
 import { detectionService } from '../services/DetectionService';
-import { buildGuidance, summarizeObjects } from '../services/GuidanceEngine';
+import { buildGuidance, describeScene, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
 import { DistanceReading, Detection } from '../types';
 
@@ -265,13 +265,19 @@ export function useVisionAssistant() {
     }
     oneShotBusyRef.current = true;
     setIsProcessing(true);
+
+    // Stop any lingering speech so the one-shot result plays immediately.
+    tts.stop();
+
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       const detections = await runOnce(controller.signal);
       if (controller.signal.aborted) return;
-      const guidance = buildGuidance(detections, distanceRef.current);
-      tts.speak(guidance.text, Math.max(guidance.priority, 0), true);
+      // Use the rich scene description, not the brief continuous-guidance text.
+      const guidance = describeScene(detections, distanceRef.current);
+      // Force immediate speech at high priority.
+      tts.speak(guidance.text, Math.max(guidance.priority, 1), true);
       if (guidance.buzz) triggerBuzzer('obstacle').catch(() => {});
     } catch (e: any) {
       if (e?.name !== 'AbortError') {

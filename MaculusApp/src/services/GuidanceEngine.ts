@@ -1,150 +1,281 @@
 import { Detection, DistanceReading, Zone } from '../types';
 
 /**
- * GuidanceEngine — turns raw detections + the ultrasonic distance reading into a
- * short, prioritized spoken instruction for a blind/low-vision user.
+ * GuidanceEngine v2 — fuses camera detections with the ultrasonic distance to
+ * produce natural, actionable spoken guidance for blind/low-vision users.
  *
- * Design principles:
- *  - The ultrasonic sensor is AUTHORITATIVE for urgency ("how close / stop").
- *  - The camera is AUTHORITATIVE for identity + direction ("what / where").
- *  - Speak little. One urgent fact beats five labels. Cap to the 1-2 items that
- *    matter, ordered by danger (closeness + central position + class hazard).
+ * Two outputs:
+ *  - buildGuidance()  — continuous-stream mode, brief, priority-driven
+ *  - describeScene()  — "What's around me?" one-shot, rich narration
  */
 
-// TTS priority levels (match TTSService.speak): 0 normal, 1 high, 2 emergency.
-export const PRIORITY = { NORMAL: 0, HIGH: 1, EMERGENCY: 2 } as const;
+export const PRIORITY = { NORMAL: 0, HIGH: 1, EMERGENCY: 2 };
 
 export interface Guidance {
   text: string;
   priority: number;
-  // true when something close enough to warrant a buzzer pulse on the Pi
   buzz: boolean;
 }
 
-// Classes that matter most for navigation safety get a head start in ranking.
-const HAZARD_WEIGHT: Record<string, number> = {
-  person: 1.0,
-  bicycle: 1.0,
-  car: 1.2,
-  motorcycle: 1.2,
-  bus: 1.2,
-  truck: 1.2,
-  train: 1.2,
-  'traffic light': 0.6,
-  'stop sign': 0.6,
-  'fire hydrant': 0.7,
-  bench: 0.8,
-  chair: 0.8,
-  couch: 0.8,
-  'dining table': 0.8,
-  bed: 0.7,
-  'potted plant': 0.7,
-  dog: 0.9,
-  cat: 0.7,
-  door: 0.9,
-  stairs: 1.3,
-};
+const MIN_SCORE = 0.30;
 
-const DEFAULT_HAZARD = 0.5;
+// ── Zone system (fuzzy, uses bbox extent not just center) ──────────────
 
-// Min detection score we bother announcing.
-const MIN_SCORE = 0.35;
+/**
+ * Returns a human-readable position phrase. Uses both the bbox center AND
+ * whether the bbox spans across the image centerline — a large object
+ * straddling the midline is "ahead" even if its center is off-center.
+ *
+ * The camera Pi is a "chest cam" — objects near the image center are what
+ * the user is facing. Zones use generous thresholds because YOLO at 320px
+ * has ~10-15 % positional variance.
+ */
+function describePosition(cx: number, x1?: number, x2?: number): string {
+  // If the bbox spans the centerline, it's ahead regardless of center.
+  if (x1 !== undefined && x2 !== undefined && x1 < 0.45 && x2 > 0.55) {
+    return 'ahead of you';
+  }
 
-function zoneOf(cx: number): Zone {
-  if (cx < 0.38) return 'left';
-  if (cx > 0.62) return 'right';
+  if (cx < 0.20) return 'far to your left';
+  if (cx < 0.32) return 'to your left';
+  if (cx < 0.42) return 'slightly to your left';
+  if (cx <= 0.58) return 'directly ahead of you';
+  if (cx <= 0.68) return 'slightly to your right';
+  if (cx <= 0.80) return 'to your right';
+  return 'far to your right';
+}
+
+/** Simple 3-zone bucket for the continuous-guidance ranking. */
+function zoneOf(cx: number, x1?: number, x2?: number): Zone {
+  if (x1 !== undefined && x2 !== undefined && x1 < 0.45 && x2 > 0.55) return 'ahead';
+  if (cx < 0.30) return 'left';
+  if (cx > 0.70) return 'right';
   return 'ahead';
 }
 
-function zonePhrase(zone: Zone): string {
-  switch (zone) {
-    case 'left':
-      return 'on your left';
-    case 'right':
-      return 'on your right';
-    default:
-      return 'ahead';
-  }
+// ── Box-size → proximity (larger box ≈ closer) ─────────────────────────
+
+function boxArea(d: Detection): number {
+  return Math.max(0.001, d.w) * Math.max(0.001, d.h);
 }
 
-// Rough proximity from box size: a larger box => closer object. Combined with the
-// ultrasonic reading (which only sees straight ahead) for ranking.
-function proximityScore(d: Detection): number {
-  const area = Math.max(0, d.w) * Math.max(0, d.h);
-  return Math.min(1, area * 4); // boxes are normalized; tune factor empirically
+function proximityHint(d: Detection): string {
+  const area = boxArea(d);
+  if (area > 0.25) return 'very close';
+  if (area > 0.12) return 'close';
+  return '';
+}
+
+// ── Hazard weighting ────────────────────────────────────────────────────
+
+const HAZARD: Record<string, number> = {
+  person: 1.0, bicycle: 1.0, car: 1.3, motorcycle: 1.3, bus: 1.4,
+  truck: 1.4, train: 1.4, 'traffic light': 0.6, 'stop sign': 0.7,
+  'fire hydrant': 0.7, bench: 0.8, chair: 0.8, couch: 0.8,
+  'dining table': 0.8, bed: 0.7, 'potted plant': 0.6, dog: 1.0,
+  cat: 0.6, door: 0.9, stairs: 1.5, curb: 0.8,
+};
+
+function hazard(d: Detection): number {
+  return HAZARD[d.label] ?? 0.5;
 }
 
 function rank(d: Detection): number {
-  const hazard = HAZARD_WEIGHT[d.label] ?? DEFAULT_HAZARD;
-  const central = 1 - Math.abs(d.cx - 0.5) * 1.4; // central objects are in the path
-  return hazard * (0.5 + 0.5 * d.score) * (0.6 + 0.8 * proximityScore(d)) *
-    (0.5 + 0.5 * Math.max(0, central));
+  const centrality = 1 - Math.abs(d.cx - 0.5) * 1.0;
+  return hazard(d) * (0.4 + 0.6 * d.score) *
+    (0.3 + 0.7 * Math.min(1, boxArea(d) * 5)) *
+    (0.4 + 0.6 * Math.max(0, centrality));
 }
 
+// ── Scene context inference (heuristic, zero-cost, no model needed) ─────
+
+interface SceneContext {
+  type: string;       // e.g. "an indoor room", "a kitchen"
+  confidence: number; // rough 0-1
+}
+
+function inferScene(detections: Detection[]): SceneContext {
+  const labels = new Set(detections.filter(d => d.score >= MIN_SCORE).map(d => d.label));
+
+  const KITCHEN = ['refrigerator','sink','oven','microwave','dining table','bowl','cup','bottle','fork','knife','spoon','toaster','wine glass'];
+  const OFFICE = ['laptop','keyboard','mouse','book','clock'];
+  const BEDROOM = ['bed','teddy bear','hair drier'];
+  const LIVING = ['couch','tv','remote','potted plant','vase'];
+  const BATHROOM = ['toilet','sink','hair drier','toothbrush'];
+  const STREET = ['car','truck','bus','traffic light','stop sign','fire hydrant','bicycle','motorcycle','parking meter'];
+  const STORE = ['bottle','cup','bowl','banana','apple','orange','broccoli','carrot','hot dog','pizza','donut','cake','sandwich'];
+  const OUTDOOR = ['bench','bird','kite','skis','snowboard','sports ball','frisbee'];
+
+  function score(cats: string[]): number {
+    return cats.filter(c => labels.has(c)).length;
+  }
+
+  const scores: [string, number][] = [
+    ['a kitchen', score(KITCHEN)],
+    ['an office', score(OFFICE)],
+    ['a bedroom', score(BEDROOM)],
+    ['a living room', score(LIVING)],
+    ['a bathroom', score(BATHROOM)],
+    ['a street or roadway', score(STREET)],
+    ['a store or market', score(STORE)],
+    ['an outdoor area', score(OUTDOOR)],
+  ];
+
+  const best = scores.reduce((a, b) => (b[1] > a[1] ? b : a), ['a space', 0]);
+  if (best[1] >= 2) return { type: best[0], confidence: Math.min(1, best[1] / 4) };
+  if (labels.size >= 3) return { type: 'an indoor space', confidence: 0.3 };
+  return { type: 'a space', confidence: 0.0 };
+}
+
+// ── Natural language helpers ────────────────────────────────────────────
+
+function aOrAn(word: string): string {
+  if (!word) return word;
+  return /^[aeiou]/i.test(word) ? `an ${word}` : `a ${word}`;
+}
+function cap(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+// ── Public API ──────────────────────────────────────────────────────────
+
 /**
- * Build the spoken guidance from the latest detections and distance.
+ * Brief guidance for the continuous loop — one clear sentence about what
+ * matters most RIGHT NOW. Designed to not overwhelm.
  */
 export function buildGuidance(
   detections: Detection[],
-  distance: DistanceReading | null
+  distance: DistanceReading | null,
 ): Guidance {
-  const strong = detections.filter((d) => d.score >= MIN_SCORE);
+  const strong = detections.filter(d => d.score >= MIN_SCORE);
 
-  // ── 1. Emergency: ultrasonic says something is very close, straight ahead ──
-  if (distance && distance.obstacle) {
+  // 1. Emergency — ultrasonic says something is dangerously close.
+  if (distance?.obstacle) {
     const cm = Math.round(distance.distance_cm);
-    // If we can name what's ahead, include it.
-    const aheadObj = strong
-      .filter((d) => zoneOf(d.cx) === 'ahead')
+    const ahead = strong
+      .filter(d => zoneOf(d.cx, d.x1, d.x2) === 'ahead')
       .sort((a, b) => rank(b) - rank(a))[0];
-
-    const veryClose = cm <= Math.min(50, distance.threshold_cm);
-    if (veryClose) {
-      const what = aheadObj ? `${aheadObj.label} ` : 'obstacle ';
-      return {
-        text: `Stop. ${capitalize(what)}${cm} centimeters ahead.`,
-        priority: PRIORITY.EMERGENCY,
-        buzz: true,
-      };
-    }
-    const what = aheadObj ? aheadObj.label : 'obstacle';
+    const what = ahead ? ahead.label : 'obstacle';
+    const emergency = cm <= 40;
     return {
-      text: `Caution, ${what} ${cm} centimeters ahead.`,
-      priority: PRIORITY.HIGH,
-      buzz: cm <= distance.threshold_cm * 0.6,
+      text: emergency
+        ? `Stop! ${cap(what)}, ${cm} centimeters ahead.`
+        : `Caution — ${what}, ${cm} centimeters ahead.`,
+      priority: emergency ? PRIORITY.EMERGENCY : PRIORITY.HIGH,
+      buzz: cm <= 80,
     };
   }
 
-  // ── 2. No vision detections and clear path ──
+  // 2. Clear path.
   if (strong.length === 0) {
     return { text: 'Path clear.', priority: PRIORITY.NORMAL, buzz: false };
   }
 
-  // ── 3. Describe the 1-2 most relevant objects with direction ──
+  // 3. Top 1-2 objects, brief.
   const ranked = [...strong].sort((a, b) => rank(b) - rank(a)).slice(0, 2);
-
-  const parts = ranked.map((d) => {
-    const prox = proximityScore(d) > 0.45 ? 'close, ' : '';
-    return `${d.label} ${prox}${zonePhrase(zoneOf(d.cx))}`;
+  const parts = ranked.map(d => {
+    const prox = proximityHint(d);
+    const pos = describePosition(d.cx, d.x1, d.x2);
+    return `${prox ? prox + ' ' : ''}${d.label} ${pos}`;
   });
 
-  // If the top object is central + close, raise priority a notch.
   const top = ranked[0];
-  const elevated = zoneOf(top.cx) === 'ahead' && proximityScore(top) > 0.45;
+  const elevated =
+    zoneOf(top.cx, top.x1, top.x2) === 'ahead' && boxArea(top) > 0.10;
 
   return {
-    text: capitalize(parts.join(', and ')) + '.',
+    text: cap(parts.join('; ')) + '.',
     priority: elevated ? PRIORITY.HIGH : PRIORITY.NORMAL,
     buzz: false,
   };
 }
 
-function capitalize(s: string): string {
-  if (!s) return s;
-  return s.charAt(0).toUpperCase() + s.slice(1);
+/**
+ * Full scene narration — for the "What's around me?" one-shot.
+ * Speaks naturally: "You are in a kitchen. There is a chair to your left,
+ * a person ahead, and a dining table to your right."
+ */
+export function describeScene(
+  detections: Detection[],
+  distance: DistanceReading | null,
+): Guidance {
+  const strong = detections.filter(d => d.score >= MIN_SCORE);
+  const scene = inferScene(strong);
+
+  let body = '';
+  let priority: number = PRIORITY.NORMAL;
+  let buzz = false;
+
+  if (strong.length === 0) {
+    if (distance?.obstacle) {
+      body = `I don't see any objects clearly, but the sensor shows something ${Math.round(distance.distance_cm)} centimeters ahead.`;
+      priority = PRIORITY.HIGH;
+      buzz = true;
+    } else {
+      body = `I don't see any distinct objects around you. The path appears clear.`;
+    }
+  } else {
+    // Group by zone with distinct object identities.
+    const groups: Record<string, Detection[]> = {};
+    for (const d of strong) {
+      const z = describePosition(d.cx, d.x1, d.x2);
+      if (!groups[z]) groups[z] = [];
+      // Only add if this label isn't already in the zone (dedup by label).
+      if (!groups[z].some(e => e.label === d.label)) {
+        groups[z].push(d);
+      }
+    }
+
+    // Build natural sentence per zone.
+    const sentences: string[] = [];
+    const zoneOrder = ['directly ahead of you', 'ahead of you', 'slightly to your left',
+      'to your left', 'slightly to your right', 'to your right',
+      'far to your left', 'far to your right'];
+
+    for (const z of zoneOrder) {
+      const objs = groups[z];
+      if (!objs || objs.length === 0) continue;
+      const labels = objs.map(d => d.label);
+      if (labels.length === 1) {
+        const prox = proximityHint(objs[0]);
+        const detail = prox ? `, ${prox}` : '';
+        sentences.push(`there is ${aOrAn(labels[0])}${detail} ${z}`);
+      } else if (labels.length === 2) {
+        sentences.push(`there is ${aOrAn(labels[0])} and ${aOrAn(labels[1])} ${z}`);
+      } else {
+        const last = labels.pop();
+        sentences.push(`there are ${labels.join(', ')} and ${aOrAn(last!)} ${z}`);
+      }
+    }
+
+    if (sentences.length === 0) {
+      body = `I can see some objects but I'm having trouble placing them precisely.`;
+    } else {
+      // Scene intro
+      const intro = scene.confidence > 0.3
+        ? `You appear to be in ${scene.type}. `
+        : 'Looking around, ';
+
+      body = cap(intro + sentences.join('. ') + '.');
+
+      // Distance warning
+      if (distance?.obstacle) {
+        const cm = Math.round(distance.distance_cm);
+        body += ` Also, the sensor shows an obstacle ${cm} centimeters ahead.`;
+        priority = Math.max(priority, PRIORITY.HIGH);
+        if (cm <= 50) {
+          body += ' Be careful.';
+          priority = PRIORITY.EMERGENCY;
+          buzz = true;
+        }
+      }
+    }
+  }
+
+  return { text: body, priority, buzz };
 }
 
-/** Compact summary for the on-screen status panel. */
+/** Compact on-screen status. */
 export function summarizeObjects(detections: Detection[]): string {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -152,7 +283,10 @@ export function summarizeObjects(detections: Detection[]): string {
     if (d.score < MIN_SCORE) continue;
     if (seen.has(d.label)) continue;
     seen.add(d.label);
-    out.push(`${d.label} (${zoneOf(d.cx)})`);
+    const pos = describePosition(d.cx, d.x1, d.x2);
+    const prox = proximityHint(d);
+    const extra = [pos, prox].filter(Boolean).join(', ');
+    out.push(`${d.label} (${extra})`);
   }
-  return out.join(', ');
+  return out.join(' · ');
 }

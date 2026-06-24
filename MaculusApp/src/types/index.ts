@@ -13,8 +13,8 @@ export interface DistanceReading {
 
 /**
  * A single detection returned by the native MaculusVision module.
- * Coordinates are normalized [0,1] in the original (un-letterboxed) image:
- *   cx,cy = box center, w,h = box size. `cx` drives left/ahead/right zoning.
+ * All coordinates are normalized [0,1] in the original image.
+ * cx,cy = box center; w,h = box size; x1,y1,x2,y2 = axis-aligned corners.
  */
 export interface Detection {
   label: string;
@@ -23,6 +23,10 @@ export interface Detection {
   cy: number;
   w: number;
   h: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
 }
 
 export interface ModelInfo {
