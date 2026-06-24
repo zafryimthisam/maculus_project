@@ -222,6 +222,33 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun describeWithSmolVlm(
+        base64Jpeg: String,
+        distanceCm: Double,
+        obstacle: Boolean,
+        promise: Promise
+    ) {
+        val started = System.nanoTime()
+        try {
+            val sceneInfo = buildSceneModelInfo()
+            val vlmCaption = buildSmolVlmCaption(base64Jpeg)
+            val caption = vlmCaption ?: buildSensorOnlyCaption(distanceCm, obstacle)
+            val map = Arguments.createMap()
+            map.putArray("detections", Arguments.createArray())
+            map.putDouble("distanceCm", distanceCm)
+            map.putBoolean("obstacle", obstacle)
+            map.putMap("sceneModel", sceneInfo)
+            map.putString("captionStatus", if (vlmCaption != null) "ready" else "error")
+            map.putString("caption", caption)
+            map.putString("captionError", lastSmolVlmError)
+            map.putDouble("inferenceMs", (System.nanoTime() - started) / 1_000_000.0)
+            promise.resolve(map)
+        } catch (e: Exception) {
+            promise.reject("SMOLVLM_DESCRIBE_ERROR", e.message, e)
+        }
+    }
+
+    @ReactMethod
     fun analyzeScene(
         base64Jpeg: String,
         distanceCm: Double,
@@ -238,7 +265,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             val result = runDetector(base64Jpeg)
             val sceneInfo = buildSceneModelInfo()
             val vlmCaption = if (requestCaption) {
-                buildSmolVlmCaption(base64Jpeg, result, distanceCm, obstacle)
+                buildSmolVlmCaption(base64Jpeg)
             } else null
             val caption = if (requestCaption) {
                 vlmCaption ?: buildGroundedCaption(result, distanceCm, obstacle)
@@ -316,10 +343,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     }
 
     private fun buildSmolVlmCaption(
-        base64Jpeg: String,
-        detections: List<Det>,
-        distanceCm: Double,
-        obstacle: Boolean
+        base64Jpeg: String
     ): String? {
         lastSmolVlmError = null
 
@@ -349,13 +373,12 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             return null
         }
         return try {
-            val context = buildDetectorContext(detections, distanceCm, obstacle)
             if (smolVlmEngine == null || smolVlmVisionAsset != selectedVision) {
                 smolVlmEngine?.close()
                 smolVlmEngine = SmolVlmEngine(reactApplicationContext, selectedVision)
                 smolVlmVisionAsset = selectedVision
             }
-            val caption = smolVlmEngine?.describe(base64Jpeg, context)?.takeIf { it.isNotBlank() }
+            val caption = smolVlmEngine?.describe(base64Jpeg)?.takeIf { it.isNotBlank() }
             if (caption == null) lastSmolVlmError = "empty-smolvlm-caption"
             caption
         } catch (t: Throwable) {
@@ -387,6 +410,14 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
 
     private fun canAttemptSmolVlm(memory: DeviceMemoryInfo): Boolean {
         return !memory.lowRamDevice && memory.totalRamBytes >= MIN_SMOLVLM_TOTAL_RAM_BYTES
+    }
+
+    private fun buildSensorOnlyCaption(distanceCm: Double, obstacle: Boolean): String {
+        return if (obstacle && distanceCm > 0) {
+            "SmolVLM description is unavailable. The distance sensor reports an obstacle about ${Math.round(distanceCm)} centimeters ahead."
+        } else {
+            "SmolVLM description is unavailable."
+        }
     }
 
     private fun buildDetectorContext(

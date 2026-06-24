@@ -14,12 +14,17 @@ const { MaculusVision } = NativeModules as {
     loadModel(): Promise<ModelInfo>;
     detect(base64Jpeg: string): Promise<Detection[]>;
     getSceneModelInfo?(): Promise<{
-      asset: string;
+      asset?: string;
       available: boolean;
       runtime: string;
       status: string;
       note?: string;
     }>;
+    describeWithSmolVlm?(
+      base64Jpeg: string,
+      distanceCm: number,
+      obstacle: boolean,
+    ): Promise<SceneAnalysis>;
     analyzeScene?(
       base64Jpeg: string,
       distanceCm: number,
@@ -80,6 +85,21 @@ class DetectionService {
     return MaculusVision.getSceneModelInfo();
   }
 
+
+  async describeWithSmolVlm(
+    base64Jpeg: string,
+    options: SceneAnalysisOptions = {},
+  ): Promise<SceneAnalysis> {
+    if (!MaculusVision) throw new Error('MaculusVision native module not found');
+    if (!MaculusVision.describeWithSmolVlm) {
+      throw new Error('SmolVLM native caption method not found. Rebuild the Android app.');
+    }
+    return MaculusVision.describeWithSmolVlm(
+      base64Jpeg,
+      options.distanceCm ?? -1,
+      !!options.obstacle,
+    );
+  }
   async analyzeScene(
     base64Jpeg: string,
     options: SceneAnalysisOptions = {},

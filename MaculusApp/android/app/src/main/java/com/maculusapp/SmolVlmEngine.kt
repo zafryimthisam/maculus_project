@@ -53,7 +53,7 @@ class SmolVlmEngine(
     private var decoderSession: OrtSession? = null
     private var tokenizer: Gpt2BpeTokenizer? = null
 
-    fun describe(base64Jpeg: String, detectorContext: String): String? {
+    fun describe(base64Jpeg: String): String? {
         ensureLoaded()
         val tokenizer = tokenizer ?: return null
         val vision = visionSession ?: return null
@@ -61,7 +61,7 @@ class SmolVlmEngine(
         val decoder = decoderSession ?: return null
 
         val imageInputs = preprocessImage(base64Jpeg)
-        val promptIds = buildPromptIds(tokenizer, detectorContext)
+        val promptIds = buildPromptIds(tokenizer)
         val generated = ArrayList<Long>()
         var firstToken: Long? = null
 
@@ -199,14 +199,11 @@ class SmolVlmEngine(
         }
     }
 
-    private fun buildPromptIds(tokenizer: Gpt2BpeTokenizer, detectorContext: String): LongArray {
+    private fun buildPromptIds(tokenizer: Gpt2BpeTokenizer): LongArray {
         val prefix = "<|im_start|>User:"
-        val contextHint = detectorContext.takeIf { it.isNotBlank() }
-            ?.let { " Sensor and detector context: $it." }
-            ?: ""
         val question = "Describe the camera image in one short sentence for a blind person. " +
             "Mention only visible important objects and their layout; do not invent details." +
-            contextHint + "<end_of_utterance>\nAssistant:"
+            "<end_of_utterance>\nAssistant:"
         val ids = ArrayList<Long>()
         ids.addAll(tokenizer.encode(prefix))
         ids.add(FAKE_IMAGE_BOUNDARY_TOKEN_ID)

@@ -12,7 +12,7 @@ import {
 import { detectionService } from '../services/DetectionService';
 import { buildGuidance, describeScene, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
-import { DistanceReading, Detection } from '../types';
+import { DistanceReading, Detection, VisionMode } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
 const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 2500;
@@ -32,12 +32,15 @@ export function useVisionAssistant() {
   const [cameraAvailable, setCameraAvailable] = useState(false);
   const [backend, setBackend] = useState<string>('');
   const [sceneModelStatus, setSceneModelStatus] = useState<string>('grounded detector mode');
+  const [visionMode, setVisionModeState] = useState<VisionMode>('yolo');
+  const [smolVlmAvailable, setSmolVlmAvailable] = useState(false);
   const [fps, setFps] = useState(0);
 
   // ─── Refs (avoid stale closures) ───
   const distanceRef = useRef<DistanceReading | null>(null);
   const isConnectedRef = useRef(false);
   const cameraAvailableRef = useRef(false);
+  const visionModeRef = useRef<VisionMode>('yolo');
   const isGuidingRef = useRef(false);
   const oneShotBusyRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -51,6 +54,7 @@ export function useVisionAssistant() {
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
   useEffect(() => { distanceRef.current = distance; }, [distance]);
   useEffect(() => { cameraAvailableRef.current = cameraAvailable; }, [cameraAvailable]);
+  useEffect(() => { visionModeRef.current = visionMode; }, [visionMode]);
 
   // ─── Init: load native model + TTS ───
   useEffect(() => {
@@ -66,8 +70,10 @@ export function useVisionAssistant() {
         setBackend(info.backend);
         const sceneInfo = await detectionService.getSceneModelInfo();
         if (cancelled) return;
-        setSceneModelStatus(sceneInfo.available ? 'SmolVLM ready' : 'grounded detector mode');
-        setStatusMessage(`Ready (${info.backend}, ${sceneInfo.available ? 'SmolVLM' : 'grounded descriptions'}). Enter Pi address to connect.`);
+        setSmolVlmAvailable(!!sceneInfo.available);
+        setVisionModeState(sceneInfo.available ? 'smolvlm' : 'yolo');
+        setSceneModelStatus(sceneInfo.available ? 'SmolVLM ready' : 'YOLO mode');
+        setStatusMessage(`Ready (${info.backend}, ${sceneInfo.available ? 'SmolVLM mode' : 'YOLO mode'}). Enter Pi address to connect.`);
         tts.speak(`Vision ready on ${info.backend}. Enter server address to connect.`, 1);
       } catch (e: any) {
         console.error('[Init] Error:', e);
@@ -95,6 +101,17 @@ export function useVisionAssistant() {
     setPiUrlState(url);
     setPiUrl(url);
   }, []);
+
+  const setVisionMode = useCallback((mode: VisionMode) => {
+    if (mode === 'smolvlm' && !smolVlmAvailable) {
+      tts.speak('SmolVLM is not available on this phone.', 1, true);
+      return;
+    }
+    setVisionModeState(mode);
+    visionModeRef.current = mode;
+    setSceneModelStatus(mode === 'smolvlm' ? 'SmolVLM mode' : 'YOLO mode');
+    tts.speak(mode === 'smolvlm' ? 'SmolVLM mode selected.' : 'YOLO mode selected.', 1, true);
+  }, [smolVlmAvailable]);
 
   // ─── Connection test ───
   const testConnection = useCallback(async (): Promise<boolean> => {
@@ -162,10 +179,9 @@ export function useVisionAssistant() {
     };
   }, [isConnected]);
 
-  // ─── One inference iteration: frame -> detect -> guide ───
-  const runOnce = useCallback(async (
+  // One YOLO iteration: frame -> detector only.
+  const runYoloOnce = useCallback(async (
     signal: AbortSignal,
-    requestCaption: boolean = false,
   ): Promise<{ detections: Detection[]; caption?: string | null }> => {
     const frame = await fetchFrame(signal);
     if (signal.aborted) return { detections: [] };
@@ -173,19 +189,32 @@ export function useVisionAssistant() {
     const analysis = await detectionService.analyzeScene(frame.base64, {
       distanceCm: currentDistance?.distance_cm ?? null,
       obstacle: !!currentDistance?.obstacle,
-      requestCaption,
+      requestCaption: false,
     });
     if (signal.aborted) return { detections: [] };
-    if (requestCaption && analysis.captionStatus !== 'ready') {
-      console.warn('[SmolVLM] Caption fallback:', analysis.captionStatus, analysis.captionError || 'no native error');
-    }
     setLastObjects(summarizeObjects(analysis.detections));
-    return {
-      detections: analysis.detections,
-      caption: analysis.caption,
-    };
+    return { detections: analysis.detections, caption: null };
   }, []);
 
+  // One SmolVLM iteration: frame -> VLM caption only. No YOLO labels enter this path.
+  const runSmolVlmOnce = useCallback(async (
+    signal: AbortSignal,
+  ): Promise<{ detections: Detection[]; caption?: string | null }> => {
+    const frame = await fetchFrame(signal);
+    if (signal.aborted) return { detections: [] };
+    const currentDistance = distanceRef.current;
+    const analysis = await detectionService.describeWithSmolVlm(frame.base64, {
+      distanceCm: currentDistance?.distance_cm ?? null,
+      obstacle: !!currentDistance?.obstacle,
+      requestCaption: true,
+    });
+    if (signal.aborted) return { detections: [] };
+    if (analysis.captionStatus !== 'ready') {
+      console.warn('[SmolVLM] Caption failed:', analysis.captionError || 'no native error');
+    }
+    setLastObjects(analysis.caption ? 'SmolVLM scene description' : '');
+    return { detections: [], caption: analysis.caption };
+  }, []);
   // ─── Continuous guidance loop (pipelined, runs as fast as inference allows) ───
   const guidanceLoop = useCallback(async () => {
     let lastFrameTime = Date.now();
@@ -205,10 +234,15 @@ export function useVisionAssistant() {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const analysis = await runOnce(controller.signal, false);
+        const mode = visionModeRef.current;
+        const analysis = mode === 'smolvlm'
+          ? await runSmolVlmOnce(controller.signal)
+          : await runYoloOnce(controller.signal);
         if (!isGuidingRef.current) break;
 
-        const guidance = buildGuidance(analysis.detections, distanceRef.current);
+        const guidance = mode === 'smolvlm'
+          ? { text: analysis.caption || 'SmolVLM description is unavailable.', priority: 1, buzz: false }
+          : buildGuidance(analysis.detections, distanceRef.current);
         tts.speak(guidance.text, guidance.priority);
         if (guidance.buzz) {
           triggerBuzzer('obstacle').catch(() => {});
@@ -237,7 +271,7 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [runOnce]);
+  }, [runSmolVlmOnce, runYoloOnce]);
 
   const startGuiding = useCallback(() => {
     if (isGuidingRef.current) return;
@@ -290,11 +324,13 @@ export function useVisionAssistant() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const analysis = await runOnce(controller.signal, true);
+      const mode = visionModeRef.current;
+      const analysis = mode === 'smolvlm'
+        ? await runSmolVlmOnce(controller.signal)
+        : await runYoloOnce(controller.signal);
       if (controller.signal.aborted) return;
-      // Prefer a native VLM caption when available, otherwise use grounded narration.
-      const guidance = analysis.caption
-        ? { text: analysis.caption, priority: 1, buzz: false }
+      const guidance = mode === 'smolvlm'
+        ? { text: analysis.caption || 'SmolVLM description is unavailable.', priority: 1, buzz: false }
         : describeScene(analysis.detections, distanceRef.current);
       // Force immediate speech at high priority.
       tts.speak(guidance.text, Math.max(guidance.priority, 1), true);
@@ -313,7 +349,7 @@ export function useVisionAssistant() {
       setIsProcessing(false);
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [runOnce]);
+  }, [runSmolVlmOnce, runYoloOnce]);
 
   // Stop guiding if disconnected
   useEffect(() => {
@@ -327,6 +363,7 @@ export function useVisionAssistant() {
   return {
     piUrl,
     updatePiUrl,
+    setVisionMode,
     isConnected,
     isGuiding,
     distance,
@@ -336,6 +373,8 @@ export function useVisionAssistant() {
     cameraAvailable,
     backend,
     sceneModelStatus,
+    visionMode,
+    smolVlmAvailable,
     fps,
     testConnection,
     toggleGuiding,

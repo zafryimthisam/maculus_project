@@ -18,6 +18,7 @@ export default function App() {
   const {
     piUrl,
     updatePiUrl,
+    setVisionMode,
     isConnected,
     isGuiding,
     distance,
@@ -27,6 +28,8 @@ export default function App() {
     cameraAvailable,
     backend,
     sceneModelStatus,
+    visionMode,
+    smolVlmAvailable,
     fps,
     testConnection,
     toggleGuiding,
@@ -98,6 +101,26 @@ export default function App() {
             </View>
           )}
 
+          <View style={styles.modeRow}>
+            <AccessibleButton
+              title="SmolVLM"
+              onPress={() => setVisionMode('smolvlm')}
+              disabled={!smolVlmAvailable || isGuiding || isProcessing}
+              accessibilityHint="Use only SmolVLM image captioning. YOLO labels will not be used."
+              color={visionMode === 'smolvlm' ? '#7C3AED' : '#374151'}
+              style={styles.modeBtn}
+              textStyle={styles.modeBtnText}
+            />
+            <AccessibleButton
+              title="YOLO"
+              onPress={() => setVisionMode('yolo')}
+              disabled={isGuiding || isProcessing}
+              accessibilityHint="Use only YOLO object detection and distance guidance. SmolVLM will not be used."
+              color={visionMode === 'yolo' ? '#2563EB' : '#374151'}
+              style={styles.modeBtn}
+              textStyle={styles.modeBtnText}
+            />
+          </View>
           <StatusPanel
             isConnected={isConnected}
             statusMessage={statusMessage}
@@ -173,6 +196,9 @@ const styles = StyleSheet.create({
   chipGreen: { backgroundColor: '#064E3B' },
   chipRed: { backgroundColor: '#7F1D1D' },
   chipText: { color: '#F3F4F6', fontSize: 14, fontWeight: '600' },
+  modeRow: { flexDirection: 'row', width: '100%', gap: 8, marginBottom: 4 },
+  modeBtn: { flex: 1, minHeight: 52, paddingVertical: 12, marginVertical: 4 },
+  modeBtnText: { fontSize: 16 },
   primaryBtn: { minHeight: 84, marginTop: 8 },
   primaryBtnText: { fontSize: 24 },
   footer: { marginTop: 20, fontSize: 14, color: '#6B7280' },

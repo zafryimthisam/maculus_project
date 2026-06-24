@@ -18,6 +18,8 @@ export interface CapturedFrame {
   resolution: string | null;
 }
 
+export type VisionMode = 'smolvlm' | 'yolo';
+
 export interface SceneAnalysisOptions {
   distanceCm?: number | null;
   obstacle?: boolean;
