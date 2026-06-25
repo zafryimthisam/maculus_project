@@ -18,7 +18,6 @@ export default function App() {
   const {
     piUrl,
     updatePiUrl,
-    setVisionMode,
     isConnected,
     isGuiding,
     distance,
@@ -27,9 +26,6 @@ export default function App() {
     statusMessage,
     cameraAvailable,
     backend,
-    sceneModelStatus,
-    visionMode,
-    smolVlmAvailable,
     fps,
     testConnection,
     toggleGuiding,
@@ -44,7 +40,9 @@ export default function App() {
   }, [piUrl]);
 
   const handleConnect = async () => {
-    if (isConnecting) return;
+    if (isConnecting) {
+      return;
+    }
     setIsConnecting(true);
     updatePiUrl(inputUrl);
     await new Promise((r) => setTimeout(r, 50));
@@ -67,7 +65,7 @@ export default function App() {
             Maculus
           </Text>
           <Text style={styles.subheader}>
-            AI Vision Assistant{backend ? ` · ${backend}` : ''}{sceneModelStatus ? ` · ${sceneModelStatus}` : ''}
+            YOLO Vision Assistant{backend ? ' - ' + backend : ''}
           </Text>
 
           <View style={styles.inputRow}>
@@ -99,32 +97,12 @@ export default function App() {
           {isConnected && (
             <View style={[styles.chip, cameraAvailable ? styles.chipGreen : styles.chipRed]}>
               <Text style={styles.chipText}>
-                {cameraAvailable ? '📷 Camera Ready' : '📷 No Camera'}
-                {isGuiding && fps > 0 ? `  ·  ${fps} FPS` : ''}
+                {cameraAvailable ? 'Camera Ready' : 'No Camera'}
+                {isGuiding && fps > 0 ? '  -  ' + fps + ' FPS' : ''}
               </Text>
             </View>
           )}
 
-          <View style={styles.modeRow}>
-            <AccessibleButton
-              title="SmolVLM"
-              onPress={() => setVisionMode('smolvlm')}
-              disabled={!smolVlmAvailable || isGuiding || isProcessing}
-              accessibilityHint="Use only SmolVLM image captioning. YOLO labels will not be used."
-              color={visionMode === 'smolvlm' ? '#7C3AED' : '#374151'}
-              style={styles.modeBtn}
-              textStyle={styles.modeBtnText}
-            />
-            <AccessibleButton
-              title="YOLO"
-              onPress={() => setVisionMode('yolo')}
-              disabled={isGuiding || isProcessing}
-              accessibilityHint="Use only YOLO object detection and distance guidance. SmolVLM will not be used."
-              color={visionMode === 'yolo' ? '#2563EB' : '#374151'}
-              style={styles.modeBtn}
-              textStyle={styles.modeBtnText}
-            />
-          </View>
           <StatusPanel
             isConnected={isConnected}
             statusMessage={statusMessage}
@@ -134,9 +112,8 @@ export default function App() {
             isGuiding={isGuiding}
           />
 
-          {/* Primary action: continuous guidance */}
           <AccessibleButton
-            title={isGuiding ? '⏹  Stop Guidance' : '▶  Start Guidance'}
+            title={isGuiding ? 'Stop Guidance' : 'Start Guidance'}
             onPress={toggleGuiding}
             disabled={!isConnected}
             accessibilityHint={
@@ -149,7 +126,6 @@ export default function App() {
             textStyle={styles.primaryBtnText}
           />
 
-          {/* Secondary: one-shot describe */}
           <AccessibleButton
             title="What's around me?"
             onPress={describeOnce}
@@ -160,9 +136,9 @@ export default function App() {
 
           <Text style={styles.footer}>
             {isConnected ? 'Connected' : 'Disconnected'}
-            {isGuiding ? ' · Guiding' : ''}
-            {cameraAvailable ? ' · Camera OK' : ''}
-            {backend ? ` · ${backend}` : ''}
+            {isGuiding ? ' - Guiding' : ''}
+            {cameraAvailable ? ' - Camera OK' : ''}
+            {backend ? ' - ' + backend : ''}
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -200,9 +176,6 @@ const styles = StyleSheet.create({
   chipGreen: { backgroundColor: '#064E3B' },
   chipRed: { backgroundColor: '#7F1D1D' },
   chipText: { color: '#F3F4F6', fontSize: 14, fontWeight: '600' },
-  modeRow: { flexDirection: 'row', width: '100%', gap: 8, marginBottom: 4 },
-  modeBtn: { flex: 1, minHeight: 52, paddingVertical: 12, marginVertical: 4 },
-  modeBtnText: { fontSize: 16 },
   primaryBtn: { minHeight: 84, marginTop: 8 },
   primaryBtnText: { fontSize: 24 },
   footer: { marginTop: 20, fontSize: 14, color: '#6B7280' },

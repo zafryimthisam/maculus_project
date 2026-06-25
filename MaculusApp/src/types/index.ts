@@ -18,23 +18,6 @@ export interface CapturedFrame {
   resolution: string | null;
 }
 
-export type VisionMode = 'smolvlm' | 'yolo';
-
-export interface SceneAnalysisOptions {
-  distanceCm?: number | null;
-  obstacle?: boolean;
-  requestCaption?: boolean;
-}
-
-export interface SceneAnalysis {
-  detections: Detection[];
-  frameId?: number | null;
-  capturedAt?: number | null;
-  caption?: string | null;
-  captionError?: string | null;
-  captionStatus: 'disabled' | 'unavailable' | 'grounded' | 'ready' | 'error';
-  inferenceMs?: number;
-}
 /**
  * A single detection returned by the native MaculusVision module.
  * All coordinates are normalized [0,1] in the original image.
