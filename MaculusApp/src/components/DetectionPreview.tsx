@@ -46,6 +46,11 @@ export const DetectionPreview: React.FC<Props> = ({
         resizeMode="contain"
       />
       <View style={styles.overlay} pointerEvents="none">
+        <View style={styles.counter}>
+          <Text style={styles.counterText}>
+            {detections.length} {detections.length === 1 ? 'object' : 'objects'}
+          </Text>
+        </View>
         {detections.map((detection, index) => {
           const x1 = clamp01(detection.x1);
           const y1 = clamp01(detection.y1);
@@ -98,11 +103,27 @@ const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
   },
+  counter: {
+    position: 'absolute',
+    right: 8,
+    top: 8,
+    backgroundColor: 'rgba(2, 6, 23, 0.82)',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  counterText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   box: {
     position: 'absolute',
-    borderWidth: 2,
+    minWidth: 28,
+    minHeight: 28,
+    borderWidth: 3,
     borderColor: '#22C55E',
-    backgroundColor: 'rgba(34, 197, 94, 0.08)',
+    backgroundColor: 'rgba(34, 197, 94, 0.10)',
   },
   label: {
     alignSelf: 'flex-start',

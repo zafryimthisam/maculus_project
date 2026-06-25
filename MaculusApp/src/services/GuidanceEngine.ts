@@ -19,41 +19,77 @@ export interface Guidance {
 
 const MIN_SCORE = 0.30;
 
-// ── Zone system (fuzzy, uses bbox extent not just center) ──────────────
+// Raspberry Pi Camera Module v1 / rev 1.3 uses the OV5647 sensor. The Pi
+// server streams a 640x480 4:3 frame, matching the sensor aspect ratio, so
+// normalized x coordinates map cleanly to the full horizontal FoV.
+const CAMERA_HORIZONTAL_FOV_DEGREES = 53.5;
+const CENTERLINE_MIN_OVERLAP = 0.08;
+const DIRECT_AHEAD_DEGREES = 8;
+const SLIGHT_DEGREES = 17;
+const SIDE_DEGREES = 24;
 
-/**
- * Returns a human-readable position phrase. Uses both the bbox center AND
- * whether the bbox spans across the image centerline — a large object
- * straddling the midline is "ahead" even if its center is off-center.
- *
- * The camera Pi is a "chest cam" — objects near the image center are what
- * the user is facing. Zones use generous thresholds because YOLO at 320px
- * has ~10-15 % positional variance.
- */
-function describePosition(cx: number, x1?: number, x2?: number): string {
-  // If the bbox spans the centerline, it's ahead regardless of center.
-  if (x1 !== undefined && x2 !== undefined && x1 < 0.45 && x2 > 0.55) {
-    return 'ahead of you';
+type PositionPhrase =
+  | 'far to your left'
+  | 'to your left'
+  | 'slightly to your left'
+  | 'directly ahead of you'
+  | 'ahead of you'
+  | 'slightly to your right'
+  | 'to your right'
+  | 'far to your right';
+
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+function horizontalAngle(cx: number): number {
+  return (clamp01(cx) - 0.5) * CAMERA_HORIZONTAL_FOV_DEGREES;
+}
+
+function overlapsCenter(x1?: number, x2?: number): boolean {
+  if (x1 === undefined || x2 === undefined) {
+    return false;
+  }
+  const left = clamp01(Math.min(x1, x2));
+  const right = clamp01(Math.max(x1, x2));
+  const centerOverlap = Math.min(right, 0.54) - Math.max(left, 0.46);
+  return centerOverlap >= CENTERLINE_MIN_OVERLAP || (left <= 0.5 && right >= 0.5);
+}
+
+function describePosition(cx: number, x1?: number, x2?: number): PositionPhrase {
+  if (overlapsCenter(x1, x2)) {
+    return 'directly ahead of you';
   }
 
-  if (cx < 0.20) return 'far to your left';
-  if (cx < 0.32) return 'to your left';
-  if (cx < 0.42) return 'slightly to your left';
-  if (cx <= 0.58) return 'directly ahead of you';
-  if (cx <= 0.68) return 'slightly to your right';
-  if (cx <= 0.80) return 'to your right';
+  const angle = horizontalAngle(cx);
+  const absAngle = Math.abs(angle);
+  if (absAngle <= DIRECT_AHEAD_DEGREES) {
+    return 'directly ahead of you';
+  }
+  if (angle < 0) {
+    if (absAngle <= SLIGHT_DEGREES) {
+      return 'slightly to your left';
+    }
+    if (absAngle <= SIDE_DEGREES) {
+      return 'to your left';
+    }
+    return 'far to your left';
+  }
+  if (absAngle <= SLIGHT_DEGREES) {
+    return 'slightly to your right';
+  }
+  if (absAngle <= SIDE_DEGREES) {
+    return 'to your right';
+  }
   return 'far to your right';
 }
 
-/** Simple 3-zone bucket for the continuous-guidance ranking. */
 function zoneOf(cx: number, x1?: number, x2?: number): Zone {
-  if (x1 !== undefined && x2 !== undefined && x1 < 0.45 && x2 > 0.55) return 'ahead';
-  if (cx < 0.30) return 'left';
-  if (cx > 0.70) return 'right';
-  return 'ahead';
+  if (overlapsCenter(x1, x2) || Math.abs(horizontalAngle(cx)) <= DIRECT_AHEAD_DEGREES) {
+    return 'ahead';
+  }
+  return horizontalAngle(cx) < 0 ? 'left' : 'right';
 }
 
-// ── Box-size → proximity (larger box ≈ closer) ─────────────────────────
+// Box-size to proximity (larger box is roughly closer).
 
 function boxArea(d: Detection): number {
   return Math.max(0.001, d.w) * Math.max(0.001, d.h);

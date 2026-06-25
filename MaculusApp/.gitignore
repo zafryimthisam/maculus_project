@@ -19,6 +19,7 @@ DerivedData
 *.ipa
 *.xcuserstate
 ios/.xcode.env.local
+*.onnx
 
 # Android/IntelliJ
 build/
