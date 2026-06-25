@@ -32,6 +32,9 @@ export function useVisionAssistant() {
   const [cameraAvailable, setCameraAvailable] = useState(false);
   const [backend, setBackend] = useState<string>('');
   const [fps, setFps] = useState(0);
+  const [previewFrameBase64, setPreviewFrameBase64] = useState<string | null>(null);
+  const [previewResolution, setPreviewResolution] = useState<string | null>(null);
+  const [previewDetections, setPreviewDetections] = useState<Detection[]>([]);
   const [isVisionReady, setIsVisionReady] = useState(false);
 
   const distanceRef = useRef<DistanceReading | null>(null);
@@ -101,6 +104,9 @@ export function useVisionAssistant() {
     try {
       setStatusMessage('Finding Maculus Pi...');
       setIsConnected(false);
+      setPreviewFrameBase64(null);
+      setPreviewResolution(null);
+      setPreviewDetections([]);
       const discoveredUrl = await discoverPiUrl(getPiUrl(), !silentFailure);
       if (!discoveredUrl) {
         throw new Error('Maculus Pi not found');
@@ -202,6 +208,9 @@ export function useVisionAssistant() {
     if (signal.aborted) {
       return [];
     }
+    setPreviewFrameBase64(frame.base64);
+    setPreviewResolution(frame.resolution);
+    setPreviewDetections(detections);
     setLastObjects(summarizeObjects(detections));
     return detections;
   }, []);
@@ -250,6 +259,9 @@ export function useVisionAssistant() {
         }
         if (typeof e?.message === 'string' && e.message.includes('CAPTURE_ERROR')) {
           setCameraAvailable(false);
+          setPreviewFrameBase64(null);
+          setPreviewResolution(null);
+          setPreviewDetections([]);
           tts.speak('Camera not available. Distance monitoring active.', 1);
         }
         await sleep(LOOP_ERROR_DELAY_MS);
@@ -332,6 +344,9 @@ export function useVisionAssistant() {
       if (e?.name !== 'AbortError') {
         if (typeof e?.message === 'string' && e.message.includes('CAPTURE_ERROR')) {
           setCameraAvailable(false);
+          setPreviewFrameBase64(null);
+          setPreviewResolution(null);
+          setPreviewDetections([]);
           tts.speak('Camera not available.', 1);
         } else {
           tts.speak('Detection failed', 1);
@@ -366,6 +381,9 @@ export function useVisionAssistant() {
     cameraAvailable,
     backend,
     fps,
+    previewFrameBase64,
+    previewResolution,
+    previewDetections,
     testConnection,
     toggleGuiding,
     describeOnce,

@@ -13,6 +13,7 @@ import {
 import { useVisionAssistant } from './src/hooks/useVisionAssistant';
 import { AccessibleButton } from './src/components/AccessibleButton';
 import { StatusPanel } from './src/components/StatusPanel';
+import { DetectionPreview } from './src/components/DetectionPreview';
 
 export default function App() {
   const {
@@ -27,6 +28,9 @@ export default function App() {
     cameraAvailable,
     backend,
     fps,
+    previewFrameBase64,
+    previewResolution,
+    previewDetections,
     testConnection,
     toggleGuiding,
     describeOnce,
@@ -102,6 +106,12 @@ export default function App() {
               </Text>
             </View>
           )}
+
+          <DetectionPreview
+            frameBase64={previewFrameBase64}
+            resolution={previewResolution}
+            detections={previewDetections}
+          />
 
           <StatusPanel
             isConnected={isConnected}

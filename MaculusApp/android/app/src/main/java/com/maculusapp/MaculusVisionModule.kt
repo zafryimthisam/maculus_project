@@ -322,26 +322,51 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             }
             if (bestScore < CONF_THRESHOLD || bestClass < 0) continue
 
-            val cx = data[0 * anchors + a]
-            val cy = data[1 * anchors + a]
-            val w = data[2 * anchors + a]
-            val h = data[3 * anchors + a]
+            val rawCx = data[0 * anchors + a]
+            val rawCy = data[1 * anchors + a]
+            val rawW = data[2 * anchors + a]
+            val rawH = data[3 * anchors + a]
 
-            val origCx = (cx - lb.padX) / lb.scale
-            val origCy = (cy - lb.padY) / lb.scale
-            val origW = w / lb.scale
-            val origH = h / lb.scale
+            // Ultralytics TFLite exports can emit xywh either as 320px model
+            // coordinates or normalized 0..1 coordinates. Normalize both into
+            // letterboxed model pixels before mapping back to the camera frame.
+            val outputIsNormalized = maxOf(
+                Math.abs(rawCx), Math.abs(rawCy), Math.abs(rawW), Math.abs(rawH)
+            ) <= 2f
+            val modelCx = if (outputIsNormalized) rawCx * INPUT_SIZE else rawCx
+            val modelCy = if (outputIsNormalized) rawCy * INPUT_SIZE else rawCy
+            val modelW = if (outputIsNormalized) rawW * INPUT_SIZE else rawW
+            val modelH = if (outputIsNormalized) rawH * INPUT_SIZE else rawH
+
+            val origCx = (modelCx - lb.padX) / lb.scale
+            val origCy = (modelCy - lb.padY) / lb.scale
+            val origW = modelW / lb.scale
+            val origH = modelH / lb.scale
             val origImgW = (INPUT_SIZE - 2 * lb.padX) / lb.scale
             val origImgH = (INPUT_SIZE - 2 * lb.padY) / lb.scale
             val nCx = (origCx / origImgW).coerceIn(0f, 1f)
             val nCy = (origCy / origImgH).coerceIn(0f, 1f)
             val nW = (origW / origImgW).coerceIn(0f, 1f)
             val nH = (origH / origImgH).coerceIn(0f, 1f)
-            val x1 = nCx - nW / 2
-            val y1 = nCy - nH / 2
-            val x2 = nCx + nW / 2
-            val y2 = nCy + nH / 2
-            dets.add(Det(nCx, nCy, nW, nH, bestScore, bestClass, x1, y1, x2, y2))
+            val x1 = (nCx - nW / 2).coerceIn(0f, 1f)
+            val y1 = (nCy - nH / 2).coerceIn(0f, 1f)
+            val x2 = (nCx + nW / 2).coerceIn(0f, 1f)
+            val y2 = (nCy + nH / 2).coerceIn(0f, 1f)
+            val clampedW = x2 - x1
+            val clampedH = y2 - y1
+            if (clampedW <= 0f || clampedH <= 0f) continue
+            dets.add(Det(
+                (x1 + x2) / 2f,
+                (y1 + y2) / 2f,
+                clampedW,
+                clampedH,
+                bestScore,
+                bestClass,
+                x1,
+                y1,
+                x2,
+                y2
+            ))
         }
         return dets
     }
