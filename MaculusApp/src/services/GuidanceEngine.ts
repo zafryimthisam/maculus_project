@@ -18,6 +18,8 @@ export interface Guidance {
 }
 
 const MIN_SCORE = 0.30;
+const CLOSE_DEPTH_SCORE = 0.68;
+const VERY_CLOSE_DEPTH_SCORE = 0.82;
 
 // Raspberry Pi Camera Module v1 / rev 1.3 uses the OV5647 sensor. The Pi
 // server streams a 640x480 4:3 frame, matching the sensor aspect ratio, so
@@ -96,6 +98,10 @@ function boxArea(d: Detection): number {
 }
 
 function proximityHint(d: Detection): string {
+  if (d.nearScore !== undefined) {
+    if (d.nearScore >= VERY_CLOSE_DEPTH_SCORE) return 'very close';
+    if (d.nearScore >= CLOSE_DEPTH_SCORE) return 'close';
+  }
   const area = boxArea(d);
   if (area > 0.25) return 'very close';
   if (area > 0.12) return 'close';
@@ -118,8 +124,9 @@ function hazard(d: Detection): number {
 
 function rank(d: Detection): number {
   const centrality = 1 - Math.abs(d.cx - 0.5) * 1.0;
+  const visualNearness = d.nearScore ?? Math.min(1, boxArea(d) * 5);
   return hazard(d) * (0.4 + 0.6 * d.score) *
-    (0.3 + 0.7 * Math.min(1, boxArea(d) * 5)) *
+    (0.3 + 0.7 * visualNearness) *
     (0.4 + 0.6 * Math.max(0, centrality));
 }
 
@@ -221,7 +228,8 @@ export function buildGuidance(
 
   const top = ranked[0];
   const elevated =
-    zoneOf(top.cx, top.x1, top.x2) === 'ahead' && boxArea(top) > 0.10;
+    zoneOf(top.cx, top.x1, top.x2) === 'ahead' &&
+    (boxArea(top) > 0.10 || (top.nearScore ?? 0) >= CLOSE_DEPTH_SCORE);
 
   return {
     text: cap(parts.join('; ')) + '.',

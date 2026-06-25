@@ -48,4 +48,14 @@ describe('GuidanceEngine camera position logic', () => {
 
     expect(guidance.text).toContain('person, 80 centimeters ahead');
   });
+
+  it('uses relative depth to prioritize visually closer objects', () => {
+    const guidance = buildGuidance([
+      detection({ label: 'chair', cx: 0.5, x1: 0.42, x2: 0.58, nearScore: 0.2 }),
+      detection({ label: 'person', cx: 0.48, x1: 0.4, x2: 0.56, nearScore: 0.92 }),
+    ], null);
+
+    expect(guidance.text).toMatch(/^Very close person directly ahead of you/);
+    expect(guidance.priority).toBeGreaterThanOrEqual(1);
+  });
 });

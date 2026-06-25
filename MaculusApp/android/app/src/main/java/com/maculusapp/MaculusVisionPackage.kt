@@ -8,7 +8,10 @@ import com.facebook.react.uimanager.ViewManager
 class MaculusVisionPackage : ReactPackage {
     override fun createNativeModules(
         reactContext: ReactApplicationContext
-    ): List<NativeModule> = listOf(MaculusVisionModule(reactContext))
+    ): List<NativeModule> = listOf(
+        MaculusVisionModule(reactContext),
+        MaculusDepthModule(reactContext)
+    )
 
     override fun createViewManagers(
         reactContext: ReactApplicationContext

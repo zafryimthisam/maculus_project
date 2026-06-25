@@ -34,6 +34,8 @@ export interface Detection {
   y1: number;
   x2: number;
   y2: number;
+  /** Relative visual nearness from Depth Anything, 0..1. Not metric distance. */
+  nearScore?: number;
 }
 
 export interface ModelInfo {
@@ -42,6 +44,29 @@ export interface ModelInfo {
   numAnchors?: number;
   quantized?: boolean;
   alreadyLoaded?: boolean;
+}
+
+export interface DepthModelInfo {
+  backend: string;
+  inputSize?: number;
+  outputWidth?: number;
+  outputHeight?: number;
+  alreadyLoaded?: boolean;
+  available?: boolean;
+}
+
+export interface ObjectDepthScore {
+  index: number;
+  nearScore: number;
+}
+
+export interface DepthEstimation {
+  width: number;
+  height: number;
+  leftNearScore: number;
+  centerNearScore: number;
+  rightNearScore: number;
+  objectDepths: ObjectDepthScore[];
 }
 
 export type Zone = 'left' | 'ahead' | 'right';

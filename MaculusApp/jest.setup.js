@@ -47,7 +47,29 @@ NativeModules.MaculusVision = {
     quantized: true,
   }),
   detect: jest.fn().mockResolvedValue([
-    { label: 'chair', score: 0.82, cx: 0.25, cy: 0.5, w: 0.2, h: 0.4 },
-    { label: 'person', score: 0.91, cx: 0.55, cy: 0.5, w: 0.3, h: 0.7 },
+    { label: 'chair', score: 0.82, cx: 0.25, cy: 0.5, w: 0.2, h: 0.4, x1: 0.15, y1: 0.3, x2: 0.35, y2: 0.7 },
+    { label: 'person', score: 0.91, cx: 0.55, cy: 0.5, w: 0.3, h: 0.7, x1: 0.4, y1: 0.15, x2: 0.7, y2: 0.85 },
   ]),
+};
+
+// Mock optional Depth Anything module. Missing/failed depth should not block YOLO.
+NativeModules.MaculusDepth = {
+  loadDepthModel: jest.fn().mockResolvedValue({
+    backend: 'ONNX Runtime',
+    inputSize: 256,
+    outputWidth: 252,
+    outputHeight: 252,
+    available: true,
+  }),
+  estimateDepth: jest.fn().mockResolvedValue({
+    width: 252,
+    height: 252,
+    leftNearScore: 0.2,
+    centerNearScore: 0.85,
+    rightNearScore: 0.3,
+    objectDepths: [
+      { index: 0, nearScore: 0.35 },
+      { index: 1, nearScore: 0.9 },
+    ],
+  }),
 };

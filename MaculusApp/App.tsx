@@ -28,6 +28,8 @@ export default function App() {
     cameraAvailable,
     backend,
     fps,
+    isDepthReady,
+    depthStatus,
     previewFrameBase64,
     previewResolution,
     previewDetections,
@@ -69,7 +71,7 @@ export default function App() {
             Maculus
           </Text>
           <Text style={styles.subheader}>
-            YOLO Vision Assistant{backend ? ' - ' + backend : ''}
+            YOLO Vision Assistant{backend ? ' - ' + backend : ''}{isDepthReady ? ' + Depth' : ''}
           </Text>
 
           <View style={styles.inputRow}>
@@ -149,6 +151,7 @@ export default function App() {
             {isGuiding ? ' - Guiding' : ''}
             {cameraAvailable ? ' - Camera OK' : ''}
             {backend ? ' - ' + backend : ''}
+            {' - ' + depthStatus}
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>

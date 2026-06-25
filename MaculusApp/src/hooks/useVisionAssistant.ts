@@ -11,9 +11,10 @@ import {
   discoverPiUrl,
 } from '../api/piClient';
 import { detectionService } from '../services/DetectionService';
+import { depthService } from '../services/DepthService';
 import { buildGuidance, describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
-import { DistanceReading, Detection } from '../types';
+import { DepthEstimation, DistanceReading, Detection } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
 const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 8000;
@@ -21,6 +22,7 @@ const OBSTACLE_DISTANCE_DELTA_CM = 15;
 const OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS = 12000;
 const LOOP_IDLE_DELAY_MS = 80;
 const LOOP_ERROR_DELAY_MS = 500;
+const DEPTH_INTERVAL_MS = 1500;
 
 export function useVisionAssistant() {
   const [piUrl, setPiUrlState] = useState(getPiUrl());
@@ -37,11 +39,14 @@ export function useVisionAssistant() {
   const [previewResolution, setPreviewResolution] = useState<string | null>(null);
   const [previewDetections, setPreviewDetections] = useState<Detection[]>([]);
   const [isVisionReady, setIsVisionReady] = useState(false);
+  const [isDepthReady, setIsDepthReady] = useState(false);
+  const [depthStatus, setDepthStatus] = useState('Depth unavailable');
 
   const distanceRef = useRef<DistanceReading | null>(null);
   const isConnectedRef = useRef(false);
   const cameraAvailableRef = useRef(false);
   const isGuidingRef = useRef(false);
+  const isDepthReadyRef = useRef(false);
   const oneShotBusyRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const lastObstacleTimeRef = useRef(0);
@@ -49,10 +54,14 @@ export function useVisionAssistant() {
   const suppressDistanceSpeechUntilRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const distanceTimerRef = useRef<number | null>(null);
+  const depthBusyRef = useRef(false);
+  const lastDepthTimeRef = useRef(0);
+  const lastDepthResultRef = useRef<DepthEstimation | null>(null);
 
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
   useEffect(() => { distanceRef.current = distance; }, [distance]);
   useEffect(() => { cameraAvailableRef.current = cameraAvailable; }, [cameraAvailable]);
+  useEffect(() => { isDepthReadyRef.current = isDepthReady; }, [isDepthReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,6 +81,19 @@ export function useVisionAssistant() {
         setStatusMessage('YOLO ready (' + info.backend + '). Finding Maculus Pi...');
         setIsVisionReady(true);
         tts.speak('YOLO ready on ' + info.backend + '. Finding Maculus Pi.', 1);
+
+        depthService.loadModel().then((depthInfo) => {
+          if (cancelled) {
+            return;
+          }
+          if (depthInfo.available) {
+            setIsDepthReady(true);
+            setDepthStatus('Depth ready (' + (depthInfo.backend || 'ONNX Runtime') + ')');
+          } else {
+            setIsDepthReady(false);
+            setDepthStatus('Depth unavailable');
+          }
+        });
       } catch (e: any) {
         console.error('[Init] Error:', e);
         if (cancelled) {
@@ -204,20 +226,61 @@ export function useVisionAssistant() {
 
   const runYoloOnce = useCallback(async (
     signal: AbortSignal,
-  ): Promise<Detection[]> => {
+  ): Promise<{ detections: Detection[]; frameBase64: string }> => {
     const frame = await fetchFrame(signal);
     if (signal.aborted) {
-      return [];
+      return { detections: [], frameBase64: frame.base64 };
     }
     const detections = await detectionService.detectObjects(frame.base64);
     if (signal.aborted) {
-      return [];
+      return { detections: [], frameBase64: frame.base64 };
     }
     setPreviewFrameBase64(frame.base64);
     setPreviewResolution(frame.resolution);
     setPreviewDetections(detections);
     setLastObjects(summarizeObjects(detections));
-    return detections;
+    return { detections, frameBase64: frame.base64 };
+  }, []);
+
+  const applyDepthToDetections = useCallback((
+    detections: Detection[],
+    depth: DepthEstimation | null,
+  ): Detection[] => {
+    if (!depth?.objectDepths?.length) {
+      return detections;
+    }
+    const nearByIndex = new Map<number, number>();
+    for (const item of depth.objectDepths) {
+      nearByIndex.set(item.index, Math.max(0, Math.min(1, item.nearScore)));
+    }
+    return detections.map((detection, index) => {
+      const nearScore = nearByIndex.get(index);
+      return nearScore === undefined ? detection : { ...detection, nearScore };
+    });
+  }, []);
+
+  const maybeStartDepthEstimate = useCallback((
+    frameBase64: string,
+    detections: Detection[],
+  ) => {
+    if (!isDepthReadyRef.current || depthBusyRef.current) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastDepthTimeRef.current < DEPTH_INTERVAL_MS) {
+      return;
+    }
+    lastDepthTimeRef.current = now;
+    depthBusyRef.current = true;
+    depthService.estimateDepth(frameBase64, detections)
+      .then((depth) => {
+        if (depth) {
+          lastDepthResultRef.current = depth;
+        }
+      })
+      .finally(() => {
+        depthBusyRef.current = false;
+      });
   }, []);
 
   const guidanceLoop = useCallback(async () => {
@@ -237,12 +300,14 @@ export function useVisionAssistant() {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const detections = await runYoloOnce(controller.signal);
+        const { detections, frameBase64 } = await runYoloOnce(controller.signal);
         if (!isGuidingRef.current) {
           break;
         }
 
-        const guidance = buildGuidance(detections, distanceRef.current);
+        maybeStartDepthEstimate(frameBase64, detections);
+        const depthAdjustedDetections = applyDepthToDetections(detections, lastDepthResultRef.current);
+        const guidance = buildGuidance(depthAdjustedDetections, distanceRef.current);
         tts.speak(guidance.text, guidance.priority);
         if (guidance.buzz) {
           triggerBuzzer('obstacle').catch(() => {});
@@ -277,7 +342,7 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [runYoloOnce]);
+  }, [applyDepthToDetections, maybeStartDepthEstimate, runYoloOnce]);
 
   const startGuiding = useCallback(() => {
     if (isGuidingRef.current) {
@@ -337,7 +402,7 @@ export function useVisionAssistant() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const detections = await runYoloOnce(controller.signal);
+      const { detections } = await runYoloOnce(controller.signal);
       if (controller.signal.aborted) {
         return;
       }
@@ -393,6 +458,8 @@ export function useVisionAssistant() {
     cameraAvailable,
     backend,
     fps,
+    isDepthReady,
+    depthStatus,
     previewFrameBase64,
     previewResolution,
     previewDetections,
