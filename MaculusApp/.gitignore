@@ -20,6 +20,7 @@ DerivedData
 *.xcuserstate
 ios/.xcode.env.local
 *.onnx
+MaculusApp/android/app/src/main/assets/smolvlm/onnx/*.onnx
 
 # Android/IntelliJ
 build/
