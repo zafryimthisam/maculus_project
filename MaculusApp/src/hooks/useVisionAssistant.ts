@@ -16,8 +16,9 @@ import { tts } from '../services/TTSService';
 import { DistanceReading, Detection } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
-const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 2500;
-const OBSTACLE_DISTANCE_DELTA_CM = 10;
+const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 8000;
+const OBSTACLE_DISTANCE_DELTA_CM = 15;
+const OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS = 12000;
 const LOOP_IDLE_DELAY_MS = 80;
 const LOOP_ERROR_DELAY_MS = 500;
 
@@ -45,6 +46,7 @@ export function useVisionAssistant() {
   const abortRef = useRef<AbortController | null>(null);
   const lastObstacleTimeRef = useRef(0);
   const lastObstacleDistRef = useRef(999);
+  const suppressDistanceSpeechUntilRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const distanceTimerRef = useRef<number | null>(null);
 
@@ -170,6 +172,9 @@ export function useVisionAssistant() {
         setDistance(d);
         if (!isGuidingRef.current && d.obstacle) {
           const now = Date.now();
+          if (oneShotBusyRef.current || now < suppressDistanceSpeechUntilRef.current) {
+            return;
+          }
           const dt = now - lastObstacleTimeRef.current;
           const spokenDistance = formatObstacleDistance(d.distance_cm);
           const dd = Math.abs(spokenDistance - lastObstacleDistRef.current);
@@ -325,6 +330,7 @@ export function useVisionAssistant() {
       return;
     }
     oneShotBusyRef.current = true;
+    suppressDistanceSpeechUntilRef.current = Date.now() + OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS;
     setIsProcessing(true);
     tts.stop();
 
@@ -336,6 +342,12 @@ export function useVisionAssistant() {
         return;
       }
       const guidance = describeScene(detections, distanceRef.current);
+      const currentDistance = distanceRef.current;
+      if (currentDistance?.obstacle) {
+        lastObstacleTimeRef.current = Date.now();
+        lastObstacleDistRef.current = formatObstacleDistance(currentDistance.distance_cm);
+      }
+      suppressDistanceSpeechUntilRef.current = Date.now() + OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS;
       tts.speak(guidance.text, Math.max(guidance.priority, 1), true);
       if (guidance.buzz) {
         triggerBuzzer('obstacle').catch(() => {});

@@ -109,8 +109,10 @@ class TTSService {
       return;
     }
 
-    // Deduplication: skip exact same text unless forced or emergency
-    if (!force && priority < 2 && text === this.lastText) {
+    // Deduplication: skip exact same text unless forced or emergency.
+    // Also check pending queue so polling cannot stack the same warning while
+    // a longer scene description is still being spoken.
+    if (!force && priority < 2 && (text === this.lastText || this.queue.some(q => q.text === text))) {
       return;
     }
 
