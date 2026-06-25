@@ -137,6 +137,10 @@ function cap(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
+export function formatObstacleDistance(distanceCm: number): number {
+  return Math.max(10, Math.round(distanceCm / 10) * 10);
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 /**
@@ -151,7 +155,7 @@ export function buildGuidance(
 
   // 1. Emergency — ultrasonic says something is dangerously close.
   if (distance?.obstacle) {
-    const cm = Math.round(distance.distance_cm);
+    const cm = formatObstacleDistance(distance.distance_cm);
     const ahead = strong
       .filter(d => zoneOf(d.cx, d.x1, d.x2) === 'ahead')
       .sort((a, b) => rank(b) - rank(a))[0];
@@ -208,7 +212,7 @@ export function describeScene(
 
   if (strong.length === 0) {
     if (distance?.obstacle) {
-      body = `I don't see any objects clearly, but the sensor shows something ${Math.round(distance.distance_cm)} centimeters ahead.`;
+      body = `I don't see any objects clearly, but the sensor shows something ${formatObstacleDistance(distance.distance_cm)} centimeters ahead.`;
       priority = PRIORITY.HIGH;
       buzz = true;
     } else {
@@ -260,7 +264,7 @@ export function describeScene(
 
       // Distance warning
       if (distance?.obstacle) {
-        const cm = Math.round(distance.distance_cm);
+        const cm = formatObstacleDistance(distance.distance_cm);
         body += ` Also, the sensor shows an obstacle ${cm} centimeters ahead.`;
         priority = Math.max(priority, PRIORITY.HIGH);
         if (cm <= 50) {

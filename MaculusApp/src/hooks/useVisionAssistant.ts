@@ -8,15 +8,16 @@ import {
   getPiUrl,
   fetchStatus,
   triggerBuzzer,
+  discoverPiUrl,
 } from '../api/piClient';
 import { detectionService } from '../services/DetectionService';
-import { buildGuidance, describeScene, summarizeObjects } from '../services/GuidanceEngine';
+import { buildGuidance, describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
 import { DistanceReading, Detection, VisionMode } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
 const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 2500;
-const OBSTACLE_DISTANCE_DELTA_CM = 20;
+const OBSTACLE_DISTANCE_DELTA_CM = 10;
 const LOOP_IDLE_DELAY_MS = 80; // small breather between inference iterations
 const LOOP_ERROR_DELAY_MS = 500;
 
@@ -35,6 +36,7 @@ export function useVisionAssistant() {
   const [visionMode, setVisionModeState] = useState<VisionMode>('yolo');
   const [smolVlmAvailable, setSmolVlmAvailable] = useState(false);
   const [fps, setFps] = useState(0);
+  const [isVisionReady, setIsVisionReady] = useState(false);
 
   // ─── Refs (avoid stale closures) ───
   const distanceRef = useRef<DistanceReading | null>(null);
@@ -48,6 +50,7 @@ export function useVisionAssistant() {
   // TTS throttling for distance-only obstacle pings
   const lastObstacleTimeRef = useRef(0);
   const lastObstacleDistRef = useRef(999);
+  const autoConnectAttemptedRef = useRef(false);
 
   const distanceTimerRef = useRef<number | null>(null);
 
@@ -73,11 +76,13 @@ export function useVisionAssistant() {
         setSmolVlmAvailable(!!sceneInfo.available);
         setVisionModeState(sceneInfo.available ? 'smolvlm' : 'yolo');
         setSceneModelStatus(sceneInfo.available ? 'SmolVLM ready' : 'YOLO mode');
-        setStatusMessage(`Ready (${info.backend}, ${sceneInfo.available ? 'SmolVLM mode' : 'YOLO mode'}). Enter Pi address to connect.`);
-        tts.speak(`Vision ready on ${info.backend}. Enter server address to connect.`, 1);
+        setStatusMessage(`Ready (${info.backend}, ${sceneInfo.available ? 'SmolVLM mode' : 'YOLO mode'}). Finding Maculus Pi...`);
+        setIsVisionReady(true);
+        tts.speak(`Vision ready on ${info.backend}. Finding Maculus Pi.`, 1);
       } catch (e: any) {
         console.error('[Init] Error:', e);
         if (cancelled) return;
+        setIsVisionReady(false);
         setStatusMessage('Failed to load vision model. Restart app.');
         tts.speak('Failed to load vision model. Please restart the app.', 2, true);
       }
@@ -113,11 +118,14 @@ export function useVisionAssistant() {
     tts.speak(mode === 'smolvlm' ? 'SmolVLM mode selected.' : 'YOLO mode selected.', 1, true);
   }, [smolVlmAvailable]);
 
-  // ─── Connection test ───
-  const testConnection = useCallback(async (): Promise<boolean> => {
+  // Connection test
+  const testConnection = useCallback(async (silentFailure: boolean = false): Promise<boolean> => {
     try {
-      setStatusMessage('Connecting…');
+      setStatusMessage('Finding Maculus Pi...');
       setIsConnected(false);
+      const discoveredUrl = await discoverPiUrl(getPiUrl(), !silentFailure);
+      if (!discoveredUrl) throw new Error('Maculus Pi not found');
+      setPiUrlState(discoveredUrl);
       const status = await fetchStatus();
       setCameraAvailable(!!status.camera);
       setIsConnected(true);
@@ -131,14 +139,33 @@ export function useVisionAssistant() {
       return true;
     } catch (e: any) {
       setIsConnected(false);
-      setStatusMessage('Connection failed. Check IP and WiFi.');
-      Vibration.vibrate(400);
-      tts.speak('Connection failed', 1, true);
+      setStatusMessage(silentFailure ? 'Could not auto-find Maculus Pi. Check WiFi or enter the address manually.' : 'Connection failed. Check IP and WiFi.');
+      if (!silentFailure) {
+        Vibration.vibrate(400);
+        tts.speak('Connection failed', 1, true);
+      }
       return false;
     }
   }, []);
 
-  // ─── Distance polling (independent of vision loop) ───
+  useEffect(() => {
+    if (!isVisionReady || autoConnectAttemptedRef.current) return;
+    autoConnectAttemptedRef.current = true;
+    let cancelled = false;
+
+    const autoConnect = async () => {
+      await sleep(900);
+      if (cancelled || isConnectedRef.current) return;
+      await testConnection(true);
+    };
+
+    autoConnect();
+    return () => {
+      cancelled = true;
+    };
+  }, [isVisionReady, testConnection]);
+
+  // Distance polling (independent of vision loop)
   useEffect(() => {
     if (!isConnected) {
       if (distanceTimerRef.current) {
@@ -156,11 +183,12 @@ export function useVisionAssistant() {
         if (!isGuidingRef.current && d.obstacle) {
           const now = Date.now();
           const dt = now - lastObstacleTimeRef.current;
-          const dd = Math.abs(d.distance_cm - lastObstacleDistRef.current);
-          if (dt > OBSTACLE_ANNOUNCE_COOLDOWN_MS || dd > OBSTACLE_DISTANCE_DELTA_CM) {
+          const spokenDistance = formatObstacleDistance(d.distance_cm);
+          const dd = Math.abs(spokenDistance - lastObstacleDistRef.current);
+          if (dt > OBSTACLE_ANNOUNCE_COOLDOWN_MS || dd >= OBSTACLE_DISTANCE_DELTA_CM) {
             lastObstacleTimeRef.current = now;
-            lastObstacleDistRef.current = d.distance_cm;
-            tts.speak(`Obstacle ahead, ${Math.round(d.distance_cm)} centimeters`, 1);
+            lastObstacleDistRef.current = spokenDistance;
+            tts.speak(`Obstacle ahead, ${spokenDistance} centimeters`, 1);
           }
         }
       } catch { /* silent on polling */ }
@@ -225,7 +253,7 @@ export function useVisionAssistant() {
         // No camera: degrade to distance-only guidance.
         const d = distanceRef.current;
         if (d?.obstacle) {
-          tts.speak(`Caution, obstacle ${Math.round(d.distance_cm)} centimeters ahead.`, 1);
+          tts.speak(`Caution, obstacle ${formatObstacleDistance(d.distance_cm)} centimeters ahead.`, 1);
         }
         await sleep(800);
         continue;

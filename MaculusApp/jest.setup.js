@@ -1,3 +1,4 @@
+/* eslint-env jest */
 import { NativeModules } from 'react-native';
 
 // Mock react-native-background-timer
@@ -6,6 +7,13 @@ jest.mock('react-native-background-timer', () => ({
   clearInterval: jest.fn((id) => clearInterval(id)),
   setTimeout: jest.fn((cb, time) => setTimeout(cb, time)),
   clearTimeout: jest.fn((id) => clearTimeout(id)),
+}));
+
+// Mock react-native-network-info
+jest.mock('react-native-network-info', () => ({
+  NetworkInfo: {
+    getIPV4Address: jest.fn().mockResolvedValue('192.168.1.50'),
+  },
 }));
 
 // Mock react-native-tts

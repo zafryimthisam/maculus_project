@@ -38,7 +38,7 @@ class TTSService {
       await new Promise<void>((resolve, reject) => {
         Tts.getInitStatus()
           .then(() => resolve())
-          .catch((err: any) => {
+          .catch((_err: any) => {
             // Some engines need a retry
             Tts.requestInstallData?.();
             setTimeout(() => {

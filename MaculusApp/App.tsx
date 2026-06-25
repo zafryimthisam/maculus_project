@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   SafeAreaView,
   StyleSheet,
@@ -39,6 +39,10 @@ export default function App() {
   const [inputUrl, setInputUrl] = useState(piUrl);
   const [isConnecting, setIsConnecting] = useState(false);
 
+  useEffect(() => {
+    setInputUrl(piUrl);
+  }, [piUrl]);
+
   const handleConnect = async () => {
     if (isConnecting) return;
     setIsConnecting(true);
@@ -71,16 +75,16 @@ export default function App() {
               style={styles.input}
               value={inputUrl}
               onChangeText={setInputUrl}
-              placeholder="http://192.168.1.100:8000"
+              placeholder="http://raspberrypi.local:8000"
               placeholderTextColor="#9CA3AF"
               accessibilityLabel="Pi server address"
-              accessibilityHint="Enter the IP address and port of your Raspberry Pi"
+              accessibilityHint="Optional. The app auto-finds raspberrypi, or you can enter the Pi address manually."
               autoCapitalize="none"
               autoCorrect={false}
               editable={!isConnecting && !isGuiding}
             />
             <AccessibleButton
-              title={isConnected ? 'Reconnect' : 'Connect'}
+              title={isConnected ? 'Reconnect' : 'Find Pi'}
               onPress={handleConnect}
               color={isConnected ? '#059669' : '#2563EB'}
               style={styles.connectBtn}

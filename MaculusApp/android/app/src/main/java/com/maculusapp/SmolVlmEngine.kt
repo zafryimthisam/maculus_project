@@ -201,8 +201,9 @@ class SmolVlmEngine(
 
     private fun buildPromptIds(tokenizer: Gpt2BpeTokenizer): LongArray {
         val prefix = "<|im_start|>User:"
-        val question = "Describe the camera image in one short sentence for a blind person. " +
-            "Mention only visible important objects and their layout; do not invent details." +
+        val question = "Act as a calm navigation guide. Tell me what is directly around me from this image in one short sentence. " +
+            "Focus on path, people, vehicles, doors, stairs, furniture, and obstacles using ahead, left, or right when clear. " +
+            "Do not mention a blind person, do not describe the user, and do not guess uncertain details." +
             "<end_of_utterance>\nAssistant:"
         val ids = ArrayList<Long>()
         ids.addAll(tokenizer.encode(prefix))

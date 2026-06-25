@@ -1,14 +1,97 @@
 import axios from 'axios';
 import { Buffer } from 'buffer';
+import { NetworkInfo } from 'react-native-network-info';
 import { CapturedFrame, DistanceReading, PiStatus } from '../types';
 
-let PI_BASE_URL = 'http://192.168.1.100:8000';
+const PI_PORT = 8000;
+const DEFAULT_PI_URL = `http://raspberrypi.local:${PI_PORT}`;
+const DISCOVERY_TIMEOUT_MS = 350;
+const DISCOVERY_BATCH_SIZE = 24;
+
+let PI_BASE_URL = DEFAULT_PI_URL;
+
+export const normalizePiUrl = (url: string): string => {
+  const trimmed = url.trim();
+  if (!trimmed) return DEFAULT_PI_URL;
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  return withScheme.replace(/\/$/, '');
+};
 
 export const setPiUrl = (url: string) => {
-  PI_BASE_URL = url.replace(/\/$/, '');
+  PI_BASE_URL = normalizePiUrl(url);
 };
 
 export const getPiUrl = () => PI_BASE_URL;
+
+const fetchStatusFromUrl = async (
+  url: string,
+  timeout: number = DISCOVERY_TIMEOUT_MS,
+): Promise<PiStatus> => {
+  const res = await axios.get(`${normalizePiUrl(url)}/status`, { timeout });
+  return res.data;
+};
+
+const isMaculusStatus = (status: any): status is PiStatus =>
+  status &&
+  typeof status === 'object' &&
+  typeof status.camera === 'boolean' &&
+  typeof status.sensor === 'boolean' &&
+  typeof status.buzzer === 'boolean';
+
+const getSubnetCandidates = async (fullScan: boolean): Promise<string[]> => {
+  try {
+    const ip = await NetworkInfo.getIPV4Address();
+    if (!ip) return [];
+    const parts = ip.split('.');
+    if (parts.length !== 4) return [];
+    const prefix = parts.slice(0, 3).join('.');
+    const ownHost = Number(parts[3]);
+    const commonHosts = [2, 3, 4, 5, 10, 20, 50, 80, 100, 101, 150, 200, 254];
+    const hosts = fullScan
+      ? [...commonHosts, ...Array.from({ length: 254 }, (_, i) => i + 1)]
+      : commonHosts;
+    const orderedHosts = hosts
+      .filter((host, index, arr) => host !== ownHost && arr.indexOf(host) === index);
+
+    return orderedHosts.map((host) => `http://${prefix}.${host}:${PI_PORT}`);
+  } catch {
+    return [];
+  }
+};
+
+export const discoverPiUrl = async (preferredUrl?: string, fullScan: boolean = true): Promise<string | null> => {
+  const directCandidates = [
+    preferredUrl,
+    DEFAULT_PI_URL,
+    `http://raspberrypi:${PI_PORT}`,
+  ].filter(Boolean) as string[];
+
+  const candidates = [
+    ...directCandidates,
+    ...(await getSubnetCandidates(fullScan)),
+  ].filter((url, index, arr) => arr.indexOf(url) === index);
+
+  for (let i = 0; i < candidates.length; i += DISCOVERY_BATCH_SIZE) {
+    const batch = candidates.slice(i, i + DISCOVERY_BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(async (candidate) => {
+        try {
+          const status = await fetchStatusFromUrl(candidate);
+          return isMaculusStatus(status) ? normalizePiUrl(candidate) : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const found = results.find(Boolean);
+    if (found) {
+      setPiUrl(found);
+      return found;
+    }
+  }
+
+  return null;
+};
 
 export const fetchStatus = async (signal?: AbortSignal): Promise<PiStatus> => {
   const res = await axios.get(`${PI_BASE_URL}/status`, { timeout: 3000, signal });
