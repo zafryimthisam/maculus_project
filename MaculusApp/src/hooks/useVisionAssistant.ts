@@ -23,6 +23,10 @@ const OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS = 12000;
 const LOOP_IDLE_DELAY_MS = 80;
 const LOOP_ERROR_DELAY_MS = 500;
 const DEPTH_INTERVAL_MS = 1500;
+const NORMAL_GUIDANCE_SPEECH_INTERVAL_MS = 3200;
+const HIGH_GUIDANCE_SPEECH_INTERVAL_MS = 1500;
+const EMERGENCY_GUIDANCE_SPEECH_INTERVAL_MS = 700;
+const BUZZER_COOLDOWN_MS = 3000;
 
 export function useVisionAssistant() {
   const [piUrl, setPiUrlState] = useState(getPiUrl());
@@ -54,6 +58,8 @@ export function useVisionAssistant() {
   const suppressDistanceSpeechUntilRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const distanceTimerRef = useRef<number | null>(null);
+  const buzzerAbortRef = useRef<AbortController | null>(null);
+  const lastBuzzerTimeRef = useRef(0);
   const depthBusyRef = useRef(false);
   const lastDepthTimeRef = useRef(0);
   const lastDepthResultRef = useRef<DepthEstimation | null>(null);
@@ -117,6 +123,40 @@ export function useVisionAssistant() {
       abortRef.current.abort();
       abortRef.current = null;
     }
+  }, []);
+
+  const cancelBuzzer = useCallback((sendStop: boolean = false) => {
+    if (buzzerAbortRef.current) {
+      buzzerAbortRef.current.abort();
+      buzzerAbortRef.current = null;
+    }
+    if (sendStop && isConnectedRef.current) {
+      triggerBuzzer('stop').catch(() => {});
+    }
+  }, []);
+
+  const triggerGuidanceBuzzer = useCallback(() => {
+    if (!isGuidingRef.current || buzzerAbortRef.current) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastBuzzerTimeRef.current < BUZZER_COOLDOWN_MS) {
+      return;
+    }
+    lastBuzzerTimeRef.current = now;
+    const controller = new AbortController();
+    buzzerAbortRef.current = controller;
+    triggerBuzzer('obstacle', controller.signal)
+      .catch((e: any) => {
+        if (e?.name !== 'CanceledError' && e?.code !== 'ERR_CANCELED') {
+          console.warn('[Buzzer] Trigger failed:', e?.message || e);
+        }
+      })
+      .finally(() => {
+        if (buzzerAbortRef.current === controller) {
+          buzzerAbortRef.current = null;
+        }
+      });
   }, []);
 
   const updatePiUrl = useCallback((url: string) => {
@@ -286,12 +326,32 @@ export function useVisionAssistant() {
   const guidanceLoop = useCallback(async () => {
     let lastFrameTime = Date.now();
     let smoothedFps = 0;
+    let lastGuidanceSpeakTime = 0;
+
+    const guidanceSpeechInterval = (priority: number): number => {
+      if (priority >= 2) {
+        return EMERGENCY_GUIDANCE_SPEECH_INTERVAL_MS;
+      }
+      if (priority >= 1) {
+        return HIGH_GUIDANCE_SPEECH_INTERVAL_MS;
+      }
+      return NORMAL_GUIDANCE_SPEECH_INTERVAL_MS;
+    };
+
+    const maybeSpeakGuidance = (textToSpeak: string, priority: number) => {
+      const now = Date.now();
+      if (now - lastGuidanceSpeakTime < guidanceSpeechInterval(priority)) {
+        return;
+      }
+      tts.speakGuidance(textToSpeak, priority);
+      lastGuidanceSpeakTime = now;
+    };
 
     while (isGuidingRef.current && isConnectedRef.current) {
       if (!cameraAvailableRef.current) {
         const d = distanceRef.current;
         if (d?.obstacle) {
-          tts.speak('Caution, obstacle ' + formatObstacleDistance(d.distance_cm) + ' centimeters ahead.', 1);
+          maybeSpeakGuidance('Caution, obstacle ' + formatObstacleDistance(d.distance_cm) + ' centimeters ahead.', 1);
         }
         await sleep(800);
         continue;
@@ -308,9 +368,9 @@ export function useVisionAssistant() {
         maybeStartDepthEstimate(frameBase64, detections);
         const depthAdjustedDetections = applyDepthToDetections(detections, lastDepthResultRef.current);
         const guidance = buildGuidance(depthAdjustedDetections, distanceRef.current);
-        tts.speak(guidance.text, guidance.priority);
+        maybeSpeakGuidance(guidance.text, guidance.priority);
         if (guidance.buzz) {
-          triggerBuzzer('obstacle').catch(() => {});
+          triggerGuidanceBuzzer();
         }
 
         const now = Date.now();
@@ -332,7 +392,7 @@ export function useVisionAssistant() {
           setPreviewFrameBase64(null);
           setPreviewResolution(null);
           setPreviewDetections([]);
-          tts.speak('Camera not available. Distance monitoring active.', 1);
+          tts.speakGuidance('Camera not available. Distance monitoring active.', 1);
         }
         await sleep(LOOP_ERROR_DELAY_MS);
       } finally {
@@ -342,7 +402,7 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [applyDepthToDetections, maybeStartDepthEstimate, runYoloOnce]);
+  }, [applyDepthToDetections, maybeStartDepthEstimate, runYoloOnce, triggerGuidanceBuzzer]);
 
   const startGuiding = useCallback(() => {
     if (isGuidingRef.current) {
@@ -370,9 +430,10 @@ export function useVisionAssistant() {
     isGuidingRef.current = false;
     setIsGuiding(false);
     cancelInFlight();
+    cancelBuzzer(true);
     tts.stop();
     tts.speak('Guidance stopped', 1, true);
-  }, [cancelInFlight]);
+  }, [cancelBuzzer, cancelInFlight]);
 
   const toggleGuiding = useCallback(() => {
     if (isGuidingRef.current) {
@@ -443,8 +504,9 @@ export function useVisionAssistant() {
       isGuidingRef.current = false;
       setIsGuiding(false);
       cancelInFlight();
+      cancelBuzzer(true);
     }
-  }, [isConnected, cancelInFlight]);
+  }, [cancelBuzzer, cancelInFlight, isConnected]);
 
   return {
     piUrl,

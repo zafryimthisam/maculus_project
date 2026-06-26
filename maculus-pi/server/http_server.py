@@ -69,8 +69,17 @@ def buzz():
         return jsonify({"error": "Buzzer not initialized"}), 500
     data = request.get_json(silent=True) or {}
     pattern = data.get('pattern', 'short')
-    _buzzer.pattern(pattern)
+    handled = _buzzer.pattern(pattern)
+    if not handled:
+        return jsonify({"error": "Unknown buzzer pattern", "pattern": pattern}), 400
     return jsonify({"status": "ok", "pattern": pattern})
+
+@app.route('/buzz/stop', methods=['POST'])
+def buzz_stop():
+    if _buzzer is None:
+        return jsonify({"error": "Buzzer not initialized"}), 500
+    _buzzer.stop()
+    return jsonify({"status": "ok", "pattern": "stop"})
 
 @app.route('/status')
 def status():
@@ -86,10 +95,6 @@ def start_server(host, port, camera, sensor, buzzer):
     _camera = camera
     _sensor = sensor
     _buzzer = buzzer
-    
-    if _buzzer:
-        _buzzer.start()
-        _buzzer.test_beep()
     
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)

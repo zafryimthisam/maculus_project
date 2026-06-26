@@ -1,6 +1,9 @@
 import Tts from 'react-native-tts';
 import { Platform } from 'react-native';
 
+type SpeechKind = 'normal' | 'guidance';
+type SpeechItem = { text: string; priority: number; kind: SpeechKind };
+
 /**
  * Production-grade TTS service with:
  * - Rate limiting (prevents audio spam)
@@ -9,10 +12,10 @@ import { Platform } from 'react-native';
  * - Duplicate suppression
  * - Queue size cap (memory safety)
  */
-class TTSService {
+export class TTSService {
   private initialized = false;
   private initPromise: Promise<void> | null = null;
-  private queue: Array<{ text: string; priority: number }> = [];
+  private queue: SpeechItem[] = [];
   private speaking = false;
   private lastSpeakTime = 0;
   private lastText = '';
@@ -25,8 +28,12 @@ class TTSService {
   private readonly MAX_QUEUE_SIZE = 10;
 
   async init(): Promise<void> {
-    if (this.initialized) return;
-    if (this.initPromise) return this.initPromise;
+    if (this.initialized) {
+      return;
+    }
+    if (this.initPromise) {
+      return this.initPromise;
+    }
 
     this.initPromise = this.doInit();
     return this.initPromise;
@@ -96,6 +103,10 @@ class TTSService {
     }
   }
 
+  isSpeaking(): boolean {
+    return this.speaking;
+  }
+
   /**
    * Speak text with smart rate limiting and queue management.
    *
@@ -118,12 +129,7 @@ class TTSService {
 
     // Rate limiting per priority
     const now = Date.now();
-    const cooldown =
-      priority >= 2
-        ? this.EMERGENCY_COOLDOWN
-        : priority >= 1
-        ? this.PRIORITY_COOLDOWN
-        : this.NORMAL_COOLDOWN;
+    const cooldown = this.cooldownFor(priority);
 
     if (now - this.lastSpeakTime < cooldown && !force) {
       // If high priority and currently speaking low priority, interrupt
@@ -142,17 +148,44 @@ class TTSService {
       return;
     }
 
-    this.enqueue(text, priority);
+    this.enqueue(text, priority, 'normal');
     if (!this.speaking) {
       this.processQueue();
     }
   }
 
-  private interrupt(text: string, priority: number): void {
+  speakGuidance(text: string, priority: number = 0): void {
+    if (!this.initialized) {
+      console.warn('[TTS] Not initialized, dropping guidance:', text);
+      return;
+    }
+
+    if (priority >= 2) {
+      if (this.speaking || this.queue.length > 0) {
+        this.interrupt(text, priority, 'guidance');
+      } else {
+        this.enqueue(text, priority, 'guidance');
+        this.processQueue();
+      }
+      return;
+    }
+
+    if (text === this.lastText || this.queue.some(q => q.kind === 'guidance' && q.text === text)) {
+      return;
+    }
+
+    this.replaceQueuedGuidance(text, priority);
+    if (!this.speaking && Date.now() - this.lastSpeakTime >= this.cooldownFor(priority)) {
+      this.processQueue();
+    }
+  }
+
+  private interrupt(text: string, priority: number, kind: SpeechKind = 'normal'): void {
     Tts.stop();
     this.speaking = false;
     // Prepend new high-priority message
-    this.queue.unshift({ text, priority });
+    this.queue = this.queue.filter(q => q.kind !== kind);
+    this.queue.unshift({ text, priority, kind });
     // Trim queue
     if (this.queue.length > this.MAX_QUEUE_SIZE) {
       this.queue = this.queue.slice(0, this.MAX_QUEUE_SIZE);
@@ -161,8 +194,8 @@ class TTSService {
     setTimeout(() => this.processQueue(), 150);
   }
 
-  private enqueue(text: string, priority: number): void {
-    this.queue.push({ text, priority });
+  private enqueue(text: string, priority: number, kind: SpeechKind = 'normal'): void {
+    this.queue.push({ text, priority, kind });
     if (this.queue.length > this.MAX_QUEUE_SIZE) {
       // Drop oldest low-priority items first
       const firstNormal = this.queue.findIndex((q) => q.priority === 0);
@@ -174,8 +207,23 @@ class TTSService {
     }
   }
 
+  private replaceQueuedGuidance(text: string, priority: number): void {
+    this.queue = this.queue.filter(q => q.kind !== 'guidance');
+    this.enqueue(text, priority, 'guidance');
+  }
+
+  private cooldownFor(priority: number): number {
+    return priority >= 2
+      ? this.EMERGENCY_COOLDOWN
+      : priority >= 1
+      ? this.PRIORITY_COOLDOWN
+      : this.NORMAL_COOLDOWN;
+  }
+
   private processQueue(): void {
-    if (this.speaking || this.queue.length === 0) return;
+    if (this.speaking || this.queue.length === 0) {
+      return;
+    }
 
     const item = this.queue.shift()!;
     this.lastText = item.text;

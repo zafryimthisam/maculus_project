@@ -11,8 +11,16 @@ class BuzzerController:
         self.pin = pin
         self.buzzer = None
         self._lock = threading.Lock()
+        self._current_cancel = None
+        self._last_pattern_times = {}
+        self._pattern_cooldowns = {
+            "obstacle": 3.0,
+        }
 
     def start(self):
+        if self.buzzer:
+            logger.debug(f"Buzzer on GPIO {self.pin} already initialized")
+            return
         logger.info(f"Initializing buzzer on GPIO {self.pin}")
         self.buzzer = Buzzer(self.pin)
 
@@ -39,26 +47,57 @@ class BuzzerController:
             self.beep(duration=0.2, count=1, interval=0)       # Far
 
     def cleanup(self):
+        self.stop()
         if self.buzzer:
             self.buzzer.close()
             logger.info("Buzzer cleaned up.")
 
+    def stop(self):
+        """Cancel any active beep pattern and silence the buzzer."""
+        with self._lock:
+            cancel_event = self._current_cancel
+            self._current_cancel = None
+        if cancel_event:
+            cancel_event.set()
+        if self.buzzer:
+            self.buzzer.off()
+
     def beep(self, duration=0.2, count=1, interval=0.1):
-        """Play a beep pattern in background thread."""
+        """Play a cancellable beep pattern in a background thread."""
+        if not self.buzzer:
+            return
+
+        self.stop()
+        cancel_event = threading.Event()
+        with self._lock:
+            self._current_cancel = cancel_event
+
         def _pattern():
-            with self._lock:
-                if not self.buzzer:
-                    return
+            try:
                 for i in range(count):
+                    if cancel_event.is_set() or not self.buzzer:
+                        break
                     self.buzzer.on()
-                    time.sleep(duration)
+                    if cancel_event.wait(duration):
+                        break
                     self.buzzer.off()
-                    if i < count - 1:
-                        time.sleep(interval)
+                    if i < count - 1 and cancel_event.wait(interval):
+                        break
+            finally:
+                if self.buzzer:
+                    self.buzzer.off()
+                with self._lock:
+                    if self._current_cancel is cancel_event:
+                        self._current_cancel = None
+
         threading.Thread(target=_pattern, daemon=True).start()
 
     def pattern(self, name="short"):
-        """Predefined patterns: short, long, sos, obstacle, alert"""
+        """Predefined patterns: short, long, sos, obstacle, alert, stop"""
+        if name == "stop":
+            self.stop()
+            return True
+
         patterns = {
             "short": (0.1, 1, 0),
             "long": (0.5, 1, 0),
@@ -66,8 +105,26 @@ class BuzzerController:
             "obstacle": (0.1, 5, 0.1),
             "alert": (0.3, 3, 0.2)
         }
-        if name in patterns:
-            d, c, i = patterns[name]
-            self.beep(duration=d, count=c, interval=i)
-        else:
+        if name not in patterns:
             logger.warning(f"Unknown buzzer pattern: {name}")
+            return False
+
+        if not self._cooldown_allows(name):
+            logger.debug(f"[Buzzer] Pattern suppressed by cooldown: {name}")
+            return True
+
+        d, c, i = patterns[name]
+        self.beep(duration=d, count=c, interval=i)
+        return True
+
+    def _cooldown_allows(self, name):
+        cooldown = self._pattern_cooldowns.get(name, 0)
+        if cooldown <= 0:
+            return True
+        now = time.monotonic()
+        with self._lock:
+            last_time = self._last_pattern_times.get(name, 0)
+            if now - last_time < cooldown:
+                return False
+            self._last_pattern_times[name] = now
+            return True
