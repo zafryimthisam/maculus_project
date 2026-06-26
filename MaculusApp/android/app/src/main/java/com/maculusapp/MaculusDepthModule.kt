@@ -8,6 +8,7 @@ import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -18,7 +19,11 @@ import com.facebook.react.bridge.WritableMap
 import java.io.FileNotFoundException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.DoubleBuffer
 import java.nio.FloatBuffer
+import java.nio.IntBuffer
+import java.nio.LongBuffer
+import java.nio.ShortBuffer
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -33,6 +38,7 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     companion object {
+        private const val TAG = "MaculusDepth"
         private const val MODEL_ASSET = "depth_anything_v2_small_uint8_256.onnx"
         private const val DEFAULT_INPUT_SIZE = 256
     }
@@ -47,6 +53,8 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
     private var inputChannelsFirst = true
     private var outputWidth = 252
     private var outputHeight = 252
+    private var outputType: OnnxJavaType = OnnxJavaType.FLOAT
+    private var outputShape: LongArray = longArrayOf(1, 1, outputHeight.toLong(), outputWidth.toLong())
 
     override fun getName(): String = "MaculusDepth"
 
@@ -71,8 +79,11 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
 
             val outputEntry = session!!.outputInfo.entries.first()
             val outputInfo = outputEntry.value.info as TensorInfo
-            configureOutputShape(outputInfo.shape)
+            outputType = outputInfo.type
+            outputShape = outputInfo.shape
+            configureOutputShape(outputShape)
 
+            Log.i(TAG, "Depth model loaded: input=" + inputName + " type=" + inputType + " shape=" + inputShape.joinToString(prefix = "[", postfix = "]") + " output=" + outputEntry.key + " type=" + outputType + " shape=" + outputShape.joinToString(prefix = "[", postfix = "]"))
             promise.resolve(modelInfo(false))
         } catch (e: FileNotFoundException) {
             promise.reject(
@@ -103,9 +114,11 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
 
             val output = sess.run(mapOf(inputName to tensor)).use { result ->
                 val value = result[0].value
+                Log.d(TAG, "Depth output valueClass=" + (value?.javaClass?.name ?: "null") + " type=" + outputType + " shape=" + outputShape.joinToString(prefix = "[", postfix = "]"))
                 flattenOutput(value)
             }
             tensor.close()
+            reconcileOutputShape(output.size)
 
             val nearMap = normalizeNearMap(output)
             val response = Arguments.createMap()
@@ -254,22 +267,120 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
         fun visit(v: Any?) {
             when (v) {
                 null -> Unit
+                is OnnxTensor -> visit(v.value)
                 is FloatArray -> v.forEach { out.add(it) }
                 is DoubleArray -> v.forEach { out.add(it.toFloat()) }
                 is IntArray -> v.forEach { out.add(it.toFloat()) }
                 is LongArray -> v.forEach { out.add(it.toFloat()) }
+                is ShortArray -> v.forEach { out.add(it.toFloat()) }
+                is ByteArray -> v.forEach { out.add(unsignedByteValue(it)) }
+                is FloatBuffer -> readFloatBuffer(v, out)
+                is DoubleBuffer -> readDoubleBuffer(v, out)
+                is IntBuffer -> readIntBuffer(v, out)
+                is LongBuffer -> readLongBuffer(v, out)
+                is ShortBuffer -> readShortBuffer(v, out)
+                is ByteBuffer -> readByteBuffer(v, out)
                 is Array<*> -> v.forEach { visit(it) }
                 is Float -> out.add(v)
                 is Double -> out.add(v.toFloat())
                 is Int -> out.add(v.toFloat())
                 is Long -> out.add(v.toFloat())
+                is Short -> out.add(v.toFloat())
+                is Byte -> out.add(unsignedByteValue(v))
+                else -> Log.w(TAG, "Unsupported depth output value part: " + v.javaClass.name)
             }
         }
         visit(value)
         if (out.isEmpty()) {
-            throw IllegalStateException("Depth model returned empty output")
+            throw IllegalStateException(
+                "Depth model returned empty output from " +
+                    (value?.javaClass?.name ?: "null") +
+                    "; outputType=" + outputType +
+                    " outputShape=" + outputShape.joinToString(prefix = "[", postfix = "]")
+            )
         }
         return out.toFloatArray()
+    }
+
+    private fun readFloatBuffer(buffer: FloatBuffer, out: MutableList<Float>) {
+        val copy = buffer.duplicate()
+        copy.rewind()
+        while (copy.hasRemaining()) out.add(copy.get())
+    }
+
+    private fun readDoubleBuffer(buffer: DoubleBuffer, out: MutableList<Float>) {
+        val copy = buffer.duplicate()
+        copy.rewind()
+        while (copy.hasRemaining()) out.add(copy.get().toFloat())
+    }
+
+    private fun readIntBuffer(buffer: IntBuffer, out: MutableList<Float>) {
+        val copy = buffer.duplicate()
+        copy.rewind()
+        while (copy.hasRemaining()) out.add(copy.get().toFloat())
+    }
+
+    private fun readLongBuffer(buffer: LongBuffer, out: MutableList<Float>) {
+        val copy = buffer.duplicate()
+        copy.rewind()
+        while (copy.hasRemaining()) out.add(copy.get().toFloat())
+    }
+
+    private fun readShortBuffer(buffer: ShortBuffer, out: MutableList<Float>) {
+        val copy = buffer.duplicate()
+        copy.rewind()
+        while (copy.hasRemaining()) {
+            val value = copy.get()
+            out.add(if (isUnsignedOutput()) value.toInt().and(0xFFFF).toFloat() else value.toFloat())
+        }
+    }
+
+    private fun readByteBuffer(buffer: ByteBuffer, out: MutableList<Float>) {
+        val copy = buffer.duplicate().order(ByteOrder.nativeOrder())
+        copy.rewind()
+        when (outputType) {
+            OnnxJavaType.FLOAT -> readFloatBuffer(copy.asFloatBuffer(), out)
+            OnnxJavaType.DOUBLE -> readDoubleBuffer(copy.asDoubleBuffer(), out)
+            OnnxJavaType.INT32 -> readIntBuffer(copy.asIntBuffer(), out)
+            OnnxJavaType.INT64 -> readLongBuffer(copy.asLongBuffer(), out)
+            OnnxJavaType.INT16 -> readShortBuffer(copy.asShortBuffer(), out)
+            OnnxJavaType.INT8 -> while (copy.hasRemaining()) out.add(copy.get().toFloat())
+            OnnxJavaType.UINT8 -> while (copy.hasRemaining()) out.add(unsignedByteValue(copy.get()))
+            else -> {
+                Log.w(TAG, "Reading ByteBuffer depth output as unsigned bytes for unsupported ONNX type " + outputType)
+                while (copy.hasRemaining()) out.add(unsignedByteValue(copy.get()))
+            }
+        }
+    }
+
+    private fun unsignedByteValue(value: Byte): Float = value.toInt().and(0xFF).toFloat()
+
+    private fun isUnsignedOutput(): Boolean = outputType == OnnxJavaType.UINT8
+
+    private fun reconcileOutputShape(valueCount: Int) {
+        if (valueCount <= 0) {
+            return
+        }
+        val expected = outputWidth * outputHeight
+        if (expected == valueCount) {
+            return
+        }
+        val side = sqrt(valueCount.toDouble()).toInt()
+        if (side > 0 && side * side == valueCount) {
+            Log.w(TAG, "Depth output size " + valueCount + " differs from declared " + expected + "; using inferred " + side + "x" + side + " map")
+            outputWidth = side
+            outputHeight = side
+            return
+        }
+        if (outputWidth > 0 && valueCount % outputWidth == 0) {
+            val inferredHeight = valueCount / outputWidth
+            Log.w(TAG, "Depth output size " + valueCount + " differs from declared " + expected + "; using " + outputWidth + "x" + inferredHeight + " map")
+            outputHeight = inferredHeight
+            return
+        }
+        Log.w(TAG, "Depth output size " + valueCount + " differs from declared " + expected + "; using flat " + valueCount + "x1 map")
+        outputWidth = valueCount
+        outputHeight = 1
     }
 
     private fun normalizeNearMap(raw: FloatArray): FloatArray {

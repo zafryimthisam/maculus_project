@@ -36,7 +36,9 @@ def main():
         camera = Camera(resolution=CAMERA_RESOLUTION, fps=STREAM_FPS)
         camera.start()
 
-        buzzer = BuzzerController(pin=18)
+        buzzer = BuzzerController(pin=26)
+        buzzer.start()
+        buzzer.test_beep()
 
         def on_obstacle(distance_cm):
             buzzer.proportional_beep(distance_cm)

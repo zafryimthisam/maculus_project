@@ -7,7 +7,7 @@ from gpiozero import Buzzer
 logger = logging.getLogger(__name__)
 
 class BuzzerController:
-    def __init__(self, pin=18):
+    def __init__(self, pin=26):
         self.pin = pin
         self.buzzer = None
         self._lock = threading.Lock()
