@@ -20,6 +20,7 @@ export class TTSService {
   private lastSpeakTime = 0;
   private lastText = '';
   private listeners: Array<{ name: string; handler: any }> = [];
+  private speakingListeners = new Set<(speaking: boolean) => void>();
 
   // Rate limits (ms)
   private readonly NORMAL_COOLDOWN = 3500;
@@ -67,19 +68,19 @@ export class TTSService {
 
       // Track listeners for cleanup
       const finishHandler = () => {
-        this.speaking = false;
+        this.setSpeaking(false);
         this.processQueue();
       };
       const cancelHandler = () => {
-        this.speaking = false;
+        this.setSpeaking(false);
         this.processQueue();
       };
       const startHandler = () => {
-        this.speaking = true;
+        this.setSpeaking(true);
       };
       const errorHandler = (err: any) => {
         console.error('[TTS] Event error:', err);
-        this.speaking = false;
+        this.setSpeaking(false);
         this.processQueue();
       };
 
@@ -105,6 +106,14 @@ export class TTSService {
 
   isSpeaking(): boolean {
     return this.speaking;
+  }
+
+  onSpeakingChange(listener: (speaking: boolean) => void): () => void {
+    this.speakingListeners.add(listener);
+    listener(this.speaking);
+    return () => {
+      this.speakingListeners.delete(listener);
+    };
   }
 
   /**
@@ -182,7 +191,7 @@ export class TTSService {
 
   private interrupt(text: string, priority: number, kind: SpeechKind = 'normal'): void {
     Tts.stop();
-    this.speaking = false;
+    this.setSpeaking(false);
     // Prepend new high-priority message
     this.queue = this.queue.filter(q => q.kind !== kind);
     this.queue.unshift({ text, priority, kind });
@@ -228,21 +237,29 @@ export class TTSService {
     const item = this.queue.shift()!;
     this.lastText = item.text;
     this.lastSpeakTime = Date.now();
-    this.speaking = true;
+    this.setSpeaking(true);
 
     try {
       Tts.speak(item.text);
     } catch (err: any) {
       console.error('[TTS] Speak error:', err);
-      this.speaking = false;
+      this.setSpeaking(false);
       this.processQueue();
     }
+  }
+
+  private setSpeaking(speaking: boolean): void {
+    if (this.speaking === speaking) {
+      return;
+    }
+    this.speaking = speaking;
+    this.speakingListeners.forEach(listener => listener(speaking));
   }
 
   stop(): void {
     Tts.stop();
     this.queue = [];
-    this.speaking = false;
+    this.setSpeaking(false);
     this.lastText = '';
   }
 

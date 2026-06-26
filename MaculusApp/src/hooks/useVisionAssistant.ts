@@ -14,6 +14,7 @@ import { detectionService } from '../services/DetectionService';
 import { depthService } from '../services/DepthService';
 import { buildGuidance, describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
+import { executeVoiceCommand, voiceCommandService, VoiceCommand, VoiceCommandStatus } from '../services/VoiceCommandService';
 import { DepthEstimation, DistanceReading, Detection } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
@@ -45,6 +46,9 @@ export function useVisionAssistant() {
   const [isVisionReady, setIsVisionReady] = useState(false);
   const [isDepthReady, setIsDepthReady] = useState(false);
   const [depthStatus, setDepthStatus] = useState('Depth unavailable');
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceCommandStatus>('off');
+  const [buzzerAlertsEnabled, setBuzzerAlertsEnabledState] = useState(true);
 
   const distanceRef = useRef<DistanceReading | null>(null);
   const isConnectedRef = useRef(false);
@@ -60,6 +64,7 @@ export function useVisionAssistant() {
   const distanceTimerRef = useRef<number | null>(null);
   const buzzerAbortRef = useRef<AbortController | null>(null);
   const lastBuzzerTimeRef = useRef(0);
+  const buzzerAlertsEnabledRef = useRef(true);
   const depthBusyRef = useRef(false);
   const lastDepthTimeRef = useRef(0);
   const lastDepthResultRef = useRef<DepthEstimation | null>(null);
@@ -68,6 +73,7 @@ export function useVisionAssistant() {
   useEffect(() => { distanceRef.current = distance; }, [distance]);
   useEffect(() => { cameraAvailableRef.current = cameraAvailable; }, [cameraAvailable]);
   useEffect(() => { isDepthReadyRef.current = isDepthReady; }, [isDepthReady]);
+  useEffect(() => { buzzerAlertsEnabledRef.current = buzzerAlertsEnabled; }, [buzzerAlertsEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,6 +120,7 @@ export function useVisionAssistant() {
     return () => {
       cancelled = true;
       isGuidingRef.current = false;
+      voiceCommandService.stop();
       tts.destroy();
     };
   }, []);
@@ -136,7 +143,7 @@ export function useVisionAssistant() {
   }, []);
 
   const triggerGuidanceBuzzer = useCallback(() => {
-    if (!isGuidingRef.current || buzzerAbortRef.current) {
+    if (!isGuidingRef.current || !buzzerAlertsEnabledRef.current || buzzerAbortRef.current) {
       return;
     }
     const now = Date.now();
@@ -435,6 +442,20 @@ export function useVisionAssistant() {
     tts.speak('Guidance stopped', 1, true);
   }, [cancelBuzzer, cancelInFlight]);
 
+  const setBuzzerAlertsEnabled = useCallback((enabled: boolean) => {
+    setBuzzerAlertsEnabledState(enabled);
+    buzzerAlertsEnabledRef.current = enabled;
+    if (!enabled) {
+      cancelBuzzer(true);
+    }
+    tts.speak(enabled ? 'Buzzer alerts on' : 'Buzzer muted', 1, true);
+  }, [cancelBuzzer]);
+
+  const stopBuzzer = useCallback(() => {
+    cancelBuzzer(true);
+    tts.speak('Buzzer stopped', 1, true);
+  }, [cancelBuzzer]);
+
   const toggleGuiding = useCallback(() => {
     if (isGuidingRef.current) {
       stopGuiding();
@@ -475,7 +496,7 @@ export function useVisionAssistant() {
       }
       suppressDistanceSpeechUntilRef.current = Date.now() + OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS;
       tts.speak(guidance.text, Math.max(guidance.priority, 1), true);
-      if (guidance.buzz) {
+      if (guidance.buzz && buzzerAlertsEnabledRef.current) {
         triggerBuzzer('obstacle').catch(() => {});
       }
     } catch (e: any) {
@@ -498,6 +519,45 @@ export function useVisionAssistant() {
       }
     }
   }, [runYoloOnce]);
+
+  const handleVoiceCommand = useCallback((command: VoiceCommand) => {
+    const result = executeVoiceCommand(command, {
+      startGuidance: startGuiding,
+      stopGuidance: stopGuiding,
+      describeScene: describeOnce,
+      setBuzzerAlertsEnabled,
+      stopBuzzer,
+      isGuiding: () => isGuidingRef.current,
+    });
+    if (result.feedback) {
+      tts.speak(result.feedback, 1, true);
+    }
+  }, [describeOnce, setBuzzerAlertsEnabled, startGuiding, stopBuzzer, stopGuiding]);
+
+  const toggleVoiceCommands = useCallback(async () => {
+    if (voiceEnabled) {
+      await voiceCommandService.stop();
+      setVoiceEnabled(false);
+      setVoiceStatus('off');
+      tts.speak('Voice commands off', 1, true);
+      return;
+    }
+
+    const started = await voiceCommandService.start(handleVoiceCommand, setVoiceStatus);
+    if (started) {
+      setVoiceEnabled(true);
+      setVoiceStatus('listening');
+      tts.speak('Voice commands on', 1, true);
+    } else {
+      setVoiceEnabled(false);
+      setVoiceStatus('unavailable');
+      tts.speak('Voice commands unavailable. Check microphone permission.', 1, true);
+    }
+  }, [handleVoiceCommand, voiceEnabled]);
+
+  useEffect(() => () => {
+    voiceCommandService.stop();
+  }, []);
 
   useEffect(() => {
     if (!isConnected && isGuidingRef.current) {
@@ -522,12 +582,20 @@ export function useVisionAssistant() {
     fps,
     isDepthReady,
     depthStatus,
+    voiceEnabled,
+    voiceStatus,
+    buzzerAlertsEnabled,
     previewFrameBase64,
     previewResolution,
     previewDetections,
     testConnection,
+    startGuiding,
+    stopGuiding,
     toggleGuiding,
     describeOnce,
+    setBuzzerAlertsEnabled,
+    stopBuzzer,
+    toggleVoiceCommands,
   };
 }
 

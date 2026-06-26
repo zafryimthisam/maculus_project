@@ -10,7 +10,8 @@ class MaculusVisionPackage : ReactPackage {
         reactContext: ReactApplicationContext
     ): List<NativeModule> = listOf(
         MaculusVisionModule(reactContext),
-        MaculusDepthModule(reactContext)
+        MaculusDepthModule(reactContext),
+        MaculusVoiceCommandModule(reactContext)
     )
 
     override fun createViewManagers(

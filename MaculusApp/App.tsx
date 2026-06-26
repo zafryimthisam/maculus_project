@@ -30,16 +30,25 @@ export default function App() {
     fps,
     isDepthReady,
     depthStatus,
+    voiceEnabled,
+    voiceStatus,
+    buzzerAlertsEnabled,
     previewFrameBase64,
     previewResolution,
     previewDetections,
     testConnection,
     toggleGuiding,
     describeOnce,
+    toggleVoiceCommands,
   } = useVisionAssistant();
 
   const [inputUrl, setInputUrl] = useState(piUrl);
   const [isConnecting, setIsConnecting] = useState(false);
+  const voiceStatusText = voiceStatus === 'unavailable'
+    ? 'Voice unavailable'
+    : voiceEnabled
+    ? 'Voice listening'
+    : 'Voice off';
 
   useEffect(() => {
     setInputUrl(piUrl);
@@ -125,6 +134,17 @@ export default function App() {
           />
 
           <AccessibleButton
+            title={voiceEnabled ? 'Voice Commands On' : 'Voice Commands Off'}
+            onPress={toggleVoiceCommands}
+            accessibilityHint="Toggles hands-free commands like Maculus start guidance and Maculus what's around me"
+            color={voiceEnabled ? '#0891B2' : '#374151'}
+            style={styles.voiceBtn}
+            textStyle={styles.voiceBtnText}
+          />
+
+          <Text style={styles.voiceStatus}>{voiceStatusText}</Text>
+
+          <AccessibleButton
             title={isGuiding ? 'Stop Guidance' : 'Start Guidance'}
             onPress={toggleGuiding}
             disabled={!isConnected}
@@ -152,6 +172,8 @@ export default function App() {
             {cameraAvailable ? ' - Camera OK' : ''}
             {backend ? ' - ' + backend : ''}
             {' - ' + depthStatus}
+            {' - ' + voiceStatusText}
+            {buzzerAlertsEnabled ? ' - Buzzer on' : ' - Buzzer muted'}
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -189,6 +211,9 @@ const styles = StyleSheet.create({
   chipGreen: { backgroundColor: '#064E3B' },
   chipRed: { backgroundColor: '#7F1D1D' },
   chipText: { color: '#F3F4F6', fontSize: 14, fontWeight: '600' },
+  voiceBtn: { minHeight: 72, marginTop: 8 },
+  voiceBtnText: { fontSize: 22 },
+  voiceStatus: { marginTop: 4, marginBottom: 8, fontSize: 15, color: '#A7F3D0' },
   primaryBtn: { minHeight: 84, marginTop: 8 },
   primaryBtnText: { fontSize: 24 },
   footer: { marginTop: 20, fontSize: 14, color: '#6B7280' },
