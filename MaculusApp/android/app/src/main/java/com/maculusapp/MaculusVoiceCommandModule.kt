@@ -43,6 +43,7 @@ class MaculusVoiceCommandModule(
     private var commandPromise: Promise? = null
     private var commandTimeoutRunnable: Runnable? = null
     private var pendingWakeStartPromise: Promise? = null
+    @Volatile private var wakeLoopId = 0L
 
     init {
         reactContext.addLifecycleEventListener(this)
@@ -137,7 +138,7 @@ class MaculusVoiceCommandModule(
                     startWakeLoop()
                     emitState("wake_listening")
                 } catch (e: Exception) {
-                    emitError(e.message ?: "Wake word failed to resume", fatal = true)
+                    emitError(e.message ?: "Wake word failed to resume", fatal = false)
                 }
             }
             promise.resolve(null)
@@ -192,7 +193,7 @@ class MaculusVoiceCommandModule(
                 startWakeLoop()
                 emitState("wake_listening")
             } catch (e: Exception) {
-                emitError(e.message ?: "Wake word failed to resume", fatal = true)
+                emitError(e.message ?: "Wake word failed to resume", fatal = false)
             }
         }
     }
@@ -233,15 +234,16 @@ class MaculusVoiceCommandModule(
             recorder.release()
             throw IllegalStateException("Microphone could not be initialized")
         }
+        val loopId = ++wakeLoopId
         audioRecord = recorder
         wakeRunning.set(true)
-        wakeThread = Thread({ runWakeLoop(recorder, engine) }, "MaculusWakeWord").apply {
+        wakeThread = Thread({ runWakeLoop(recorder, engine, loopId) }, "MaculusWakeWord").apply {
             isDaemon = true
             start()
         }
     }
 
-    private fun runWakeLoop(recorder: AudioRecord, engine: LiveKitWakeWordEngine) {
+    private fun runWakeLoop(recorder: AudioRecord, engine: LiveKitWakeWordEngine, loopId: Long) {
         val ring = ShortArray(WAKE_WINDOW_SAMPLES)
         val readBuffer = ShortArray(WAKE_READ_SIZE)
         var writeIndex = 0
@@ -249,7 +251,7 @@ class MaculusVoiceCommandModule(
         var lastPredictAt = 0L
         try {
             recorder.startRecording()
-            while (wakeRunning.get()) {
+            while (wakeRunning.get() && wakeLoopId == loopId) {
                 val read = recorder.read(readBuffer, 0, readBuffer.size)
                 if (read <= 0) {
                     continue
@@ -285,25 +287,42 @@ class MaculusVoiceCommandModule(
             }
         } catch (e: Exception) {
             Log.w(TAG, "Wake loop failed", e)
-            mainHandler.post { emitError(e.message ?: "Wake loop failed", fatal = true) }
+            mainHandler.post { emitError(e.message ?: "Wake loop failed", fatal = false) }
         } finally {
-            try { recorder.stop() } catch (_: Exception) { }
-            recorder.release()
-            if (audioRecord === recorder) {
-                audioRecord = null
+            val finishedThread = Thread.currentThread()
+            try {
+                if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    recorder.stop()
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Wake recorder stop ignored: ${e.message}")
             }
-            wakeRunning.set(false)
+            try {
+                recorder.release()
+            } catch (e: Exception) {
+                Log.d(TAG, "Wake recorder release ignored: ${e.message}")
+            }
+            mainHandler.post {
+                if (audioRecord === recorder) {
+                    audioRecord = null
+                }
+                if (wakeThread === finishedThread) {
+                    wakeThread = null
+                }
+                if (wakeLoopId == loopId) {
+                    wakeRunning.set(false)
+                }
+            }
         }
     }
 
     private fun stopWakeLoop() {
         if (!wakeRunning.getAndSet(false)) {
-            audioRecord?.release()
             audioRecord = null
+            wakeThread = null
             return
         }
         try { audioRecord?.stop() } catch (_: Exception) { }
-        audioRecord?.release()
         audioRecord = null
         wakeThread = null
     }
@@ -360,11 +379,17 @@ class MaculusVoiceCommandModule(
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
         override fun onError(error: Int) {
-            Log.w(TAG, "Command recognizer error: ${errorMessage(error)} (code=$error)")
+            val message = errorMessage(error)
             val pending = commandPromise
             clearCommandTimeout()
             commandPromise = null
-            emitError(errorMessage(error), fatal = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
+            if (isExpectedCommandMiss(error)) {
+                Log.d(TAG, "Command recognizer ended without command: $message (code=$error)")
+                pending?.resolve(null)
+                return
+            }
+            Log.w(TAG, "Command recognizer error: $message (code=$error)")
+            emitError(message, fatal = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
             pending?.resolve(null)
         }
 
@@ -483,6 +508,12 @@ class MaculusVoiceCommandModule(
         }
         return out
     }
+
+    private fun isExpectedCommandMiss(error: Int): Boolean =
+        error == SpeechRecognizer.ERROR_NO_MATCH ||
+            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+            error == SpeechRecognizer.ERROR_CLIENT ||
+            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
 
     private fun errorMessage(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"

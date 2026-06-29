@@ -13,6 +13,7 @@ CAPTURE_RESOLUTION = (640, 480)
 # Sensor
 SENSOR_POLL_INTERVAL = 0.5  # seconds
 OBSTACLE_THRESHOLD_CM = 100.0  # cm
+BUZZER_THRESHOLD_CM = 80.0  # cm; beep only below this distance
 
 # Buzzer
 BUZZER_DEFAULT_DURATION = 0.2

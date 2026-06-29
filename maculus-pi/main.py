@@ -11,7 +11,7 @@ from hardware.camera import Camera
 from hardware.sensor import UltrasonicSensor
 from hardware.buzzer import BuzzerController
 from server.http_server import start_server
-from utils.config import PI_HOST, PI_HTTP_PORT, CAMERA_RESOLUTION, STREAM_FPS
+from utils.config import PI_HOST, PI_HTTP_PORT, CAMERA_RESOLUTION, STREAM_FPS, BUZZER_THRESHOLD_CM
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,8 +41,11 @@ def main():
         buzzer.test_beep()
 
         def on_obstacle(distance_cm):
-            buzzer.proportional_beep(distance_cm)
-            logger.info(f"[Alert] Obstacle at {distance_cm:.1f} cm")
+            if distance_cm < BUZZER_THRESHOLD_CM:
+                buzzer.proportional_beep(distance_cm)
+                logger.info(f"[Alert] Obstacle buzzer at {distance_cm:.1f} cm")
+            else:
+                logger.info(f"[Alert] Obstacle at {distance_cm:.1f} cm; buzzer suppressed")
 
         sensor = UltrasonicSensor(echo_pin=24, trigger_pin=23, on_obstacle=on_obstacle)
         sensor.start()

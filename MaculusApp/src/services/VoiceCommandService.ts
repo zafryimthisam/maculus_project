@@ -178,6 +178,7 @@ export class VoiceCommandService {
   private commandBusy = false;
   private status: VoiceCommandStatus = 'off';
   private lastUnknownCommandTime = 0;
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private onStatus: ((status: VoiceCommandStatus) => void) | null = null;
   private onCommand: ((command: VoiceCommand, result: VoiceCommandResult) => void) | null = null;
 
@@ -243,6 +244,7 @@ export class VoiceCommandService {
     this.commandBusy = true;
     this.setStatus('wake_detected');
     Vibration.vibrate([0, 60]);
+    tts.stop();
     tts.speak('Listening', 1, true);
 
     await sleep(WAKE_PROMPT_DELAY_MS);
@@ -304,16 +306,23 @@ export class VoiceCommandService {
     if (!this.enabled || !state.state) {
       return;
     }
+    if (state.state === 'off') {
+      console.warn('[Voice] Native reported off while voice control is enabled; restarting wake listener');
+      this.scheduleWakeRecovery();
+      return;
+    }
     this.setStatus(state.state);
   };
 
   private handleError = (error: { message?: string; fatal?: boolean }) => {
+    console.warn('[Voice] Native error:', error);
     if (error.fatal) {
       this.setStatus('unavailable');
       this.stopLocal();
       return;
     }
     this.setStatus('error');
+    this.scheduleWakeRecovery();
   };
 
   private handleTtsSpeakingChange = (speaking: boolean) => {
@@ -331,23 +340,53 @@ export class VoiceCommandService {
           this.setStatus('wake_listening');
         }
       })
-      .catch(() => this.setStatus('error'));
+      .catch((e) => {
+        console.warn('[Voice] Resume after TTS failed:', e);
+        this.setStatus('error');
+        this.scheduleWakeRecovery();
+      });
   };
 
   private async restartWakeListening(): Promise<void> {
-    if (!MaculusVoiceCommand) {
+    if (!MaculusVoiceCommand || !this.enabled || this.commandBusy) {
+      return;
+    }
+    if (tts.isSpeaking()) {
+      this.scheduleWakeRecovery();
       return;
     }
     try {
       await MaculusVoiceCommand.startWakeListening();
-      this.setStatus('wake_listening');
+      if (this.enabled && !this.commandBusy) {
+        this.setStatus('wake_listening');
+      }
     } catch (e) {
       console.warn('[Voice] Wake restart failed:', e);
       this.setStatus('error');
+      this.scheduleWakeRecovery();
+    }
+  }
+
+  private scheduleWakeRecovery(delayMs: number = 700): void {
+    if (!this.enabled || this.commandBusy) {
+      return;
+    }
+    this.clearRecoveryTimer();
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      this.restartWakeListening();
+    }, delayMs);
+  }
+
+  private clearRecoveryTimer(): void {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
     }
   }
 
   private stopLocal(): void {
+    this.clearRecoveryTimer();
     this.enabled = false;
     this.commandBusy = false;
     this.subscriptions.forEach(subscription => subscription.remove());
@@ -367,6 +406,13 @@ export class VoiceCommandService {
 
   getStatus(): VoiceCommandStatus {
     return this.status;
+  }
+
+  isCommandCaptureActive(): boolean {
+    return this.commandBusy ||
+      this.status === 'wake_detected' ||
+      this.status === 'command_listening' ||
+      this.status === 'processing';
   }
 }
 

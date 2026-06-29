@@ -20,6 +20,7 @@ export interface Guidance {
 const MIN_SCORE = 0.30;
 const CLOSE_DEPTH_SCORE = 0.68;
 const VERY_CLOSE_DEPTH_SCORE = 0.82;
+const BUZZER_DISTANCE_CM = 80;
 
 // Raspberry Pi Camera Module v1 / rev 1.3 uses the OV5647 sensor. The Pi
 // server streams a 640x480 4:3 frame, matching the sensor aspect ratio, so
@@ -209,7 +210,7 @@ export function buildGuidance(
         ? `Stop! ${cap(what)}, ${cm} centimeters ahead.`
         : `Caution — ${what}, ${cm} centimeters ahead.`,
       priority: emergency ? PRIORITY.EMERGENCY : PRIORITY.HIGH,
-      buzz: cm <= 80,
+      buzz: distance.distance_cm < BUZZER_DISTANCE_CM,
     };
   }
 
@@ -258,7 +259,7 @@ export function describeScene(
     if (distance?.obstacle) {
       body = `I don't see any objects clearly, but the sensor shows something ${formatObstacleDistance(distance.distance_cm)} centimeters ahead.`;
       priority = PRIORITY.HIGH;
-      buzz = true;
+      buzz = distance.distance_cm < BUZZER_DISTANCE_CM;
     } else {
       body = `I don't see any distinct objects around you. The path appears clear.`;
     }
@@ -314,7 +315,7 @@ export function describeScene(
         if (cm <= 50) {
           body += ' Be careful.';
           priority = PRIORITY.EMERGENCY;
-          buzz = true;
+          buzz = distance.distance_cm < BUZZER_DISTANCE_CM;
         }
       }
     }

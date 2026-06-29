@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { buildGuidance, summarizeObjects } from '../src/services/GuidanceEngine';
+import { buildGuidance, describeScene, summarizeObjects } from '../src/services/GuidanceEngine';
 import { Detection } from '../src/types';
 
 const detection = (overrides: Partial<Detection>): Detection => ({
@@ -49,6 +49,38 @@ describe('GuidanceEngine camera position logic', () => {
     expect(guidance.text).toContain('person, 80 centimeters ahead');
   });
 
+
+  it('does not buzz unless raw ultrasonic distance is below 80 centimeters', () => {
+    const at89 = buildGuidance([detection({})], {
+      obstacle: true,
+      distance_cm: 89,
+      threshold_cm: 100,
+    });
+    const at80 = buildGuidance([detection({})], {
+      obstacle: true,
+      distance_cm: 80,
+      threshold_cm: 100,
+    });
+    const at79 = buildGuidance([detection({})], {
+      obstacle: true,
+      distance_cm: 79,
+      threshold_cm: 100,
+    });
+
+    expect(at89.buzz).toBe(false);
+    expect(at80.buzz).toBe(false);
+    expect(at79.buzz).toBe(true);
+  });
+
+  it('uses the same below-80 buzzer rule for one-shot obstacle descriptions', () => {
+    const guidance = describeScene([], {
+      obstacle: true,
+      distance_cm: 89,
+      threshold_cm: 100,
+    });
+
+    expect(guidance.buzz).toBe(false);
+  });
   it('uses relative depth to prioritize visually closer objects', () => {
     const guidance = buildGuidance([
       detection({ label: 'chair', cx: 0.5, x1: 0.42, x2: 0.58, nearScore: 0.2 }),

@@ -143,7 +143,7 @@ export function useVisionAssistant() {
   }, []);
 
   const triggerGuidanceBuzzer = useCallback(() => {
-    if (!isGuidingRef.current || !buzzerAlertsEnabledRef.current || buzzerAbortRef.current) {
+    if (voiceCommandService.isCommandCaptureActive() || !isGuidingRef.current || !buzzerAlertsEnabledRef.current || buzzerAbortRef.current) {
       return;
     }
     const now = Date.now();
@@ -241,7 +241,7 @@ export function useVisionAssistant() {
         setDistance(d);
         if (!isGuidingRef.current && d.obstacle) {
           const now = Date.now();
-          if (oneShotBusyRef.current || now < suppressDistanceSpeechUntilRef.current) {
+          if (voiceCommandService.isCommandCaptureActive() || oneShotBusyRef.current || now < suppressDistanceSpeechUntilRef.current) {
             return;
           }
           const dt = now - lastObstacleTimeRef.current;
@@ -346,6 +346,9 @@ export function useVisionAssistant() {
     };
 
     const maybeSpeakGuidance = (textToSpeak: string, priority: number) => {
+      if (voiceCommandService.isCommandCaptureActive()) {
+        return;
+      }
       const now = Date.now();
       if (now - lastGuidanceSpeakTime < guidanceSpeechInterval(priority)) {
         return;
@@ -399,7 +402,9 @@ export function useVisionAssistant() {
           setPreviewFrameBase64(null);
           setPreviewResolution(null);
           setPreviewDetections([]);
-          tts.speakGuidance('Camera not available. Distance monitoring active.', 1);
+          if (!voiceCommandService.isCommandCaptureActive()) {
+            tts.speakGuidance('Camera not available. Distance monitoring active.', 1);
+          }
         }
         await sleep(LOOP_ERROR_DELAY_MS);
       } finally {
