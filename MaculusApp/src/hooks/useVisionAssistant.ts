@@ -14,7 +14,7 @@ import { detectionService } from '../services/DetectionService';
 import { depthService } from '../services/DepthService';
 import { buildGuidance, describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
-import { executeVoiceCommand, voiceCommandService, VoiceCommand, VoiceCommandStatus } from '../services/VoiceCommandService';
+import { executeVoiceCommand, voiceCommandService, VoiceCommand, VoiceCommandStatus, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
 import { DepthEstimation, DistanceReading, Detection } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
@@ -546,12 +546,12 @@ export function useVisionAssistant() {
     const started = await voiceCommandService.start(handleVoiceCommand, setVoiceStatus);
     if (started) {
       setVoiceEnabled(true);
-      setVoiceStatus('listening');
-      tts.speak('Voice commands on', 1, true);
+      setVoiceStatus('wake_listening');
+      tts.speak('Voice commands on. Say ' + WAKE_WORD_LABEL + '.', 1, true);
     } else {
       setVoiceEnabled(false);
       setVoiceStatus('unavailable');
-      tts.speak('Voice commands unavailable. Check microphone permission.', 1, true);
+      tts.speak('Voice commands unavailable. Check microphone permission and wake word assets.', 1, true);
     }
   }, [handleVoiceCommand, voiceEnabled]);
 

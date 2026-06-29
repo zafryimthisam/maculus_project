@@ -1,8 +1,12 @@
 package com.maculusapp
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -21,18 +25,24 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MaculusVoiceCommandModule(
     private val reactContext: ReactApplicationContext
 ) : ReactContextBaseJavaModule(reactContext), PermissionListener, LifecycleEventListener {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var wakeEngine: LiveKitWakeWordEngine? = null
+    private var wakeThread: Thread? = null
+    private var audioRecord: AudioRecord? = null
+    private val wakeRunning = AtomicBoolean(false)
+    private var wakeEnabled = false
+    private var wakePausedForTts = false
+    private var lastWakeAtMs = 0L
+
     private var recognizer: SpeechRecognizer? = null
-    private var enabled = false
-    private var pausedForTts = false
-    private var listening = false
-    private var usingOnDevice = false
-    private var pendingStartPromise: Promise? = null
-    private var restartRunnable: Runnable? = null
+    private var commandPromise: Promise? = null
+    private var commandTimeoutRunnable: Runnable? = null
+    private var pendingWakeStartPromise: Promise? = null
 
     init {
         reactContext.addLifecycleEventListener(this)
@@ -42,53 +52,78 @@ class MaculusVoiceCommandModule(
 
     @ReactMethod
     fun isAvailable(promise: Promise) {
-        val available = SpeechRecognizer.isRecognitionAvailable(reactContext)
-        val onDeviceAvailable = isOnDeviceAvailable()
-        val map = Arguments.createMap().apply {
-            putBoolean("available", available)
-            putBoolean("onDeviceAvailable", onDeviceAvailable)
+        try {
+            val wakeAvailable = hasWakeAssets()
+            val commandAvailable = SpeechRecognizer.isRecognitionAvailable(reactContext)
+            promise.resolve(Arguments.createMap().apply {
+                putBoolean("available", wakeAvailable && commandAvailable)
+                putBoolean("wakeAvailable", wakeAvailable)
+                putBoolean("commandAvailable", commandAvailable)
+                putString("wakeWord", WAKE_LABEL)
+            })
+        } catch (e: Exception) {
+            promise.reject("VOICE_AVAILABILITY_ERROR", e.message, e)
         }
-        promise.resolve(map)
     }
 
     @ReactMethod
-    fun startListening(promise: Promise) {
+    fun startWakeListening(promise: Promise) {
+        mainHandler.post {
+            if (!hasRecordAudioPermission()) {
+                requestRecordAudioPermission(promise)
+                return@post
+            }
+            try {
+                wakeEnabled = true
+                wakePausedForTts = false
+                startWakeLoop()
+                emitState("wake_listening")
+                promise.resolve(Arguments.createMap().apply {
+                    putBoolean("started", true)
+                    putString("wakeWord", WAKE_LABEL)
+                })
+            } catch (e: Exception) {
+                wakeEnabled = false
+                emitError(e.message ?: "Wake word failed to start", fatal = true)
+                promise.reject("WAKE_START_FAILED", e.message, e)
+            }
+        }
+    }
+
+    @ReactMethod
+    fun stopVoiceControl(promise: Promise) {
+        mainHandler.post {
+            wakeEnabled = false
+            wakePausedForTts = false
+            stopWakeLoop()
+            cancelCommandRecognition()
+            emitState("off")
+            promise.resolve(null)
+        }
+    }
+
+    @ReactMethod
+    fun listenForCommandOnce(timeoutMs: Int, promise: Promise) {
         mainHandler.post {
             if (!SpeechRecognizer.isRecognitionAvailable(reactContext)) {
                 promise.reject("VOICE_UNAVAILABLE", "Speech recognition is not available on this device")
                 return@post
             }
             if (!hasRecordAudioPermission()) {
-                requestRecordAudioPermission(promise)
+                promise.reject("VOICE_PERMISSION_DENIED", "Microphone permission needed for voice commands")
                 return@post
             }
-            enabled = true
-            pausedForTts = false
-            startListeningInternal(promise)
-        }
-    }
-
-    @ReactMethod
-    fun stopListening(promise: Promise) {
-        mainHandler.post {
-            enabled = false
-            pausedForTts = false
-            cancelRestart()
-            recognizer?.cancel()
-            listening = false
-            emitState(false, false)
-            promise.resolve(null)
+            stopWakeLoop()
+            startCommandRecognition(timeoutMs.coerceAtLeast(1000), promise)
         }
     }
 
     @ReactMethod
     fun pauseForTts(promise: Promise) {
         mainHandler.post {
-            pausedForTts = true
-            cancelRestart()
-            recognizer?.cancel()
-            listening = false
-            emitState(false, true)
+            wakePausedForTts = true
+            stopWakeLoop()
+            emitState(if (wakeEnabled) "paused" else "off")
             promise.resolve(null)
         }
     }
@@ -96,25 +131,36 @@ class MaculusVoiceCommandModule(
     @ReactMethod
     fun resumeAfterTts(promise: Promise) {
         mainHandler.post {
-            pausedForTts = false
-            if (enabled) {
-                scheduleRestart(0)
+            wakePausedForTts = false
+            if (wakeEnabled && commandPromise == null) {
+                try {
+                    startWakeLoop()
+                    emitState("wake_listening")
+                } catch (e: Exception) {
+                    emitError(e.message ?: "Wake word failed to resume", fatal = true)
+                }
             }
             promise.resolve(null)
         }
     }
 
-    @Suppress("UNUSED_PARAMETER")
     @ReactMethod
-    fun addListener(eventName: String) {
-        // Required by NativeEventEmitter.
+    fun startListening(promise: Promise) {
+        startWakeListening(promise)
+    }
+
+    @ReactMethod
+    fun stopListening(promise: Promise) {
+        stopVoiceControl(promise)
     }
 
     @Suppress("UNUSED_PARAMETER")
     @ReactMethod
-    fun removeListeners(count: Int) {
-        // Required by NativeEventEmitter.
-    }
+    fun addListener(eventName: String) = Unit
+
+    @Suppress("UNUSED_PARAMETER")
+    @ReactMethod
+    fun removeListeners(count: Int) = Unit
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
@@ -124,9 +170,8 @@ class MaculusVoiceCommandModule(
         if (requestCode != REQUEST_RECORD_AUDIO) {
             return false
         }
-
-        val promise = pendingStartPromise
-        pendingStartPromise = null
+        val promise = pendingWakeStartPromise
+        pendingWakeStartPromise = null
         val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
         mainHandler.post {
             if (!granted) {
@@ -134,146 +179,253 @@ class MaculusVoiceCommandModule(
                 emitError("Microphone permission needed for voice commands", fatal = true)
                 return@post
             }
-            enabled = true
-            pausedForTts = false
             if (promise != null) {
-                startListeningInternal(promise)
+                startWakeListening(promise)
             }
         }
         return true
     }
 
     override fun onHostResume() {
-        if (enabled && !pausedForTts) {
-            scheduleRestart(300)
+        if (wakeEnabled && !wakePausedForTts && commandPromise == null) {
+            try {
+                startWakeLoop()
+                emitState("wake_listening")
+            } catch (e: Exception) {
+                emitError(e.message ?: "Wake word failed to resume", fatal = true)
+            }
         }
     }
 
     override fun onHostPause() {
-        recognizer?.cancel()
-        listening = false
-        emitState(false, pausedForTts)
+        stopWakeLoop()
+        cancelCommandRecognition()
     }
 
     override fun onHostDestroy() {
-        enabled = false
-        cancelRestart()
-        recognizer?.destroy()
-        recognizer = null
+        wakeEnabled = false
+        stopWakeLoop()
+        cancelCommandRecognition()
+        wakeEngine?.close()
+        wakeEngine = null
         reactContext.removeLifecycleEventListener(this)
     }
 
-    private fun startListeningInternal(promise: Promise?) {
+    @SuppressLint("MissingPermission")
+    private fun startWakeLoop() {
+        if (wakeRunning.get() || !wakeEnabled || wakePausedForTts) {
+            return
+        }
+        val engine = ensureWakeEngine()
+        val minBuffer = AudioRecord.getMinBufferSize(
+            WAKE_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(WAKE_READ_SIZE * 2)
+        val recorder = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            WAKE_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minBuffer
+        )
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            recorder.release()
+            throw IllegalStateException("Microphone could not be initialized")
+        }
+        audioRecord = recorder
+        wakeRunning.set(true)
+        wakeThread = Thread({ runWakeLoop(recorder, engine) }, "MaculusWakeWord").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun runWakeLoop(recorder: AudioRecord, engine: LiveKitWakeWordEngine) {
+        val ring = ShortArray(WAKE_WINDOW_SAMPLES)
+        val readBuffer = ShortArray(WAKE_READ_SIZE)
+        var writeIndex = 0
+        var samplesWritten = 0
+        var lastPredictAt = 0L
         try {
-            cancelRestart()
-            if (!enabled || pausedForTts) {
-                promise?.resolve(startResult(false))
-                return
-            }
-            ensureRecognizer()
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, reactContext.packageName)
-                if (usingOnDevice) {
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            recorder.startRecording()
+            while (wakeRunning.get()) {
+                val read = recorder.read(readBuffer, 0, readBuffer.size)
+                if (read <= 0) {
+                    continue
+                }
+                for (i in 0 until read) {
+                    ring[writeIndex] = readBuffer[i]
+                    writeIndex = (writeIndex + 1) % ring.size
+                }
+                samplesWritten = (samplesWritten + read).coerceAtMost(ring.size)
+                if (samplesWritten < ring.size) {
+                    continue
+                }
+                val now = System.currentTimeMillis()
+                if (now - lastPredictAt < WAKE_PREDICT_INTERVAL_MS) {
+                    continue
+                }
+                lastPredictAt = now
+                val snapshot = linearizeRing(ring, writeIndex)
+                val detection = try {
+                    engine.predict(snapshot)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Wake prediction failed", e)
+                    null
+                }
+                if (detection != null && now - lastWakeAtMs >= WAKE_DEBOUNCE_MS) {
+                    lastWakeAtMs = now
+                    mainHandler.post {
+                        emitWakeDetected(detection)
+                        stopWakeLoop()
+                    }
+                    break
                 }
             }
-            listening = true
-            recognizer?.startListening(intent)
-            emitState(true, false)
-            promise?.resolve(startResult(true))
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to start voice recognition", e)
-            listening = false
-            emitError(e.message ?: "Failed to start voice recognition", fatal = false)
-            promise?.reject("VOICE_START_FAILED", e.message, e)
-            scheduleRestart(RESTART_DELAY_MS)
+            Log.w(TAG, "Wake loop failed", e)
+            mainHandler.post { emitError(e.message ?: "Wake loop failed", fatal = true) }
+        } finally {
+            try { recorder.stop() } catch (_: Exception) { }
+            recorder.release()
+            if (audioRecord === recorder) {
+                audioRecord = null
+            }
+            wakeRunning.set(false)
         }
+    }
+
+    private fun stopWakeLoop() {
+        if (!wakeRunning.getAndSet(false)) {
+            audioRecord?.release()
+            audioRecord = null
+            return
+        }
+        try { audioRecord?.stop() } catch (_: Exception) { }
+        audioRecord?.release()
+        audioRecord = null
+        wakeThread = null
+    }
+
+    private fun startCommandRecognition(timeoutMs: Int, promise: Promise) {
+        cancelCommandRecognition()
+        ensureRecognizer()
+        commandPromise = promise
+        val timeout = Runnable {
+            val pending = commandPromise
+            commandPromise = null
+            try { recognizer?.cancel() } catch (_: Exception) { }
+            emitState("wake_listening")
+            pending?.resolve(null)
+        }
+        commandTimeoutRunnable = timeout
+        mainHandler.postDelayed(timeout, timeoutMs.toLong())
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, reactContext.packageName)
+            if (isOnDeviceAvailable()) {
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
+        }
+        emitState("command_listening")
+        recognizer?.startListening(intent)
     }
 
     private fun ensureRecognizer() {
         if (recognizer != null) {
             return
         }
-        usingOnDevice = isOnDeviceAvailable()
-        recognizer = if (usingOnDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        recognizer = if (isOnDeviceAvailable() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             SpeechRecognizer.createOnDeviceSpeechRecognizer(reactContext)
         } else {
             SpeechRecognizer.createSpeechRecognizer(reactContext)
         }
-        recognizer?.setRecognitionListener(listener)
+        recognizer?.setRecognitionListener(commandListener)
     }
 
-    private val listener = object : RecognitionListener {
+    private val commandListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
-            listening = true
-            emitState(true, false)
+            emitState("command_listening")
         }
-
         override fun onBeginningOfSpeech() = Unit
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-        override fun onEndOfSpeech() {
-            listening = false
-            emitState(false, false)
-        }
+        override fun onEndOfSpeech() = Unit
+        override fun onPartialResults(partialResults: Bundle?) = Unit
+        override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
         override fun onError(error: Int) {
-            listening = false
-            val fatal = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
-            emitError(errorMessage(error), fatal)
-            if (fatal) {
-                enabled = false
-                return
-            }
-            scheduleRestart(RESTART_DELAY_MS)
+            Log.w(TAG, "Command recognizer error: ${errorMessage(error)} (code=$error)")
+            val pending = commandPromise
+            clearCommandTimeout()
+            commandPromise = null
+            emitError(errorMessage(error), fatal = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
+            pending?.resolve(null)
         }
 
         override fun onResults(results: Bundle?) {
-            listening = false
-            emitState(false, false)
+            val pending = commandPromise
+            clearCommandTimeout()
+            commandPromise = null
             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
             val confidences = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
-            if (matches.isNotEmpty()) {
-                val map = Arguments.createMap().apply {
-                    putString("text", matches[0])
-                    if (confidences != null && confidences.isNotEmpty()) {
-                        putDouble("confidence", confidences[0].toDouble())
-                    } else {
-                        putNull("confidence")
-                    }
-                    putBoolean("onDevice", usingOnDevice)
+            Log.d(TAG, "Command recognizer results: matches=$matches confidences=${confidences?.joinToString()}")
+            if (matches.isEmpty()) {
+                pending?.resolve(null)
+                return
+            }
+            pending?.resolve(Arguments.createMap().apply {
+                putString("text", matches[0])
+                if (confidences != null && confidences.isNotEmpty()) {
+                    putDouble("confidence", confidences[0].toDouble())
+                } else {
+                    putNull("confidence")
                 }
-                emit(EVENT_RESULT, map)
-            }
-            scheduleRestart(RESTART_DELAY_MS)
+            })
         }
-
-        override fun onPartialResults(partialResults: Bundle?) = Unit
-        override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
 
-    private fun scheduleRestart(delayMs: Long) {
-        cancelRestart()
-        if (!enabled || pausedForTts) {
-            return
-        }
-        val runnable = Runnable {
-            if (enabled && !pausedForTts && !listening) {
-                startListeningInternal(null)
-            }
-        }
-        restartRunnable = runnable
-        mainHandler.postDelayed(runnable, delayMs)
+    private fun cancelCommandRecognition() {
+        clearCommandTimeout()
+        commandPromise?.resolve(null)
+        commandPromise = null
+        try { recognizer?.cancel() } catch (_: Exception) { }
     }
 
-    private fun cancelRestart() {
-        restartRunnable?.let { mainHandler.removeCallbacks(it) }
-        restartRunnable = null
+    private fun clearCommandTimeout() {
+        commandTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        commandTimeoutRunnable = null
+    }
+
+    private fun ensureWakeEngine(): LiveKitWakeWordEngine {
+        val existing = wakeEngine
+        if (existing != null) {
+            return existing
+        }
+        val created = LiveKitWakeWordEngine(reactApplicationContext.assets, WAKE_THRESHOLD)
+        wakeEngine = created
+        return created
+    }
+
+    private fun hasWakeAssets(): Boolean {
+        val required = arrayOf(
+            "wakeword/melspectrogram.onnx",
+            "wakeword/embedding_model.onnx",
+            "wakeword/hey_livekit.onnx"
+        )
+        return required.all { asset ->
+            try {
+                reactApplicationContext.assets.open(asset).close()
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     private fun requestRecordAudioPermission(promise: Promise) {
@@ -282,12 +434,8 @@ class MaculusVoiceCommandModule(
             promise.reject("VOICE_NO_ACTIVITY", "Cannot request microphone permission")
             return
         }
-        pendingStartPromise = promise
-        activity.requestPermissions(
-            arrayOf(Manifest.permission.RECORD_AUDIO),
-            REQUEST_RECORD_AUDIO,
-            this
-        )
+        pendingWakeStartPromise = promise
+        activity.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO, this)
     }
 
     private fun hasRecordAudioPermission(): Boolean {
@@ -300,25 +448,24 @@ class MaculusVoiceCommandModule(
             SpeechRecognizer.isOnDeviceRecognitionAvailable(reactContext)
     }
 
-    private fun startResult(started: Boolean) = Arguments.createMap().apply {
-        putBoolean("started", started)
-        putBoolean("onDevice", usingOnDevice)
+    private fun emitWakeDetected(detection: LiveKitWakeWordEngine.Detection) {
+        emitState("wake_detected")
+        emit(EVENT_WAKE_DETECTED, Arguments.createMap().apply {
+            putString("name", detection.name)
+            putDouble("confidence", detection.confidence.toDouble())
+            putString("label", WAKE_LABEL)
+        })
     }
 
-    private fun emitState(isListening: Boolean, isPaused: Boolean) {
-        val map = Arguments.createMap().apply {
-            putBoolean("listening", isListening)
-            putBoolean("paused", isPaused)
-        }
-        emit(EVENT_STATE, map)
+    private fun emitState(state: String) {
+        emit(EVENT_STATE, Arguments.createMap().apply { putString("state", state) })
     }
 
     private fun emitError(message: String, fatal: Boolean) {
-        val map = Arguments.createMap().apply {
+        emit(EVENT_ERROR, Arguments.createMap().apply {
             putString("message", message)
             putBoolean("fatal", fatal)
-        }
-        emit(EVENT_ERROR, map)
+        })
     }
 
     private fun emit(eventName: String, payload: Any) {
@@ -327,16 +474,26 @@ class MaculusVoiceCommandModule(
             .emit(eventName, payload)
     }
 
+    private fun linearizeRing(ring: ShortArray, writeIndex: Int): ShortArray {
+        val out = ShortArray(ring.size)
+        val tail = ring.size - writeIndex
+        System.arraycopy(ring, writeIndex, out, 0, tail)
+        if (writeIndex > 0) {
+            System.arraycopy(ring, 0, out, tail, writeIndex)
+        }
+        return out
+    }
+
     private fun errorMessage(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
         SpeechRecognizer.ERROR_CLIENT -> "Speech recognizer client error"
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission needed for voice commands"
         SpeechRecognizer.ERROR_NETWORK -> "Speech recognition network error"
         SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech recognition network timeout"
-        SpeechRecognizer.ERROR_NO_MATCH -> "No voice command matched"
+        SpeechRecognizer.ERROR_NO_MATCH -> "No command heard"
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Speech recognizer is busy"
         SpeechRecognizer.ERROR_SERVER -> "Speech recognition server error"
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No command heard"
         else -> "Speech recognition error $error"
     }
 
@@ -344,8 +501,14 @@ class MaculusVoiceCommandModule(
         private const val NAME = "MaculusVoiceCommand"
         private const val TAG = "MaculusVoiceCommand"
         private const val REQUEST_RECORD_AUDIO = 4107
-        private const val RESTART_DELAY_MS = 700L
-        private const val EVENT_RESULT = "MaculusVoiceCommandResult"
+        private const val WAKE_SAMPLE_RATE = 16000
+        private const val WAKE_WINDOW_SAMPLES = 32000
+        private const val WAKE_READ_SIZE = 1024
+        private const val WAKE_THRESHOLD = 0.5f
+        private const val WAKE_DEBOUNCE_MS = 2000L
+        private const val WAKE_PREDICT_INTERVAL_MS = 100L
+        private const val WAKE_LABEL = "Hey LiveKit"
+        private const val EVENT_WAKE_DETECTED = "MaculusVoiceWakeDetected"
         private const val EVENT_STATE = "MaculusVoiceCommandState"
         private const val EVENT_ERROR = "MaculusVoiceCommandError"
     }

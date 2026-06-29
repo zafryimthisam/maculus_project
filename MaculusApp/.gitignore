@@ -20,6 +20,8 @@ DerivedData
 *.xcuserstate
 ios/.xcode.env.local
 *.onnx
+!android/app/src/main/assets/wakeword/
+!android/app/src/main/assets/wakeword/*.onnx
 MaculusApp/android/app/src/main/assets/smolvlm/onnx/*.onnx
 
 # Android/IntelliJ

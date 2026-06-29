@@ -1,4 +1,5 @@
-import { NativeEventEmitter, NativeModules, EmitterSubscription } from 'react-native';
+import { EmitterSubscription, NativeEventEmitter, NativeModules, Vibration } from 'react-native';
+import { COMMAND_TIMEOUT_MS, WAKE_WORD_LABEL } from '../config/WakeWordConfig';
 import { tts } from './TTSService';
 
 export type VoiceCommand =
@@ -9,17 +10,39 @@ export type VoiceCommand =
   | 'buzzer_on'
   | 'stop_buzzer';
 
-export type VoiceCommandStatus = 'off' | 'listening' | 'paused' | 'unavailable' | 'error';
+export type VoiceCommandStatus =
+  | 'off'
+  | 'wake_listening'
+  | 'wake_detected'
+  | 'command_listening'
+  | 'processing'
+  | 'paused'
+  | 'unavailable'
+  | 'error';
 
 export type VoiceCommandResult = {
   text: string;
   confidence?: number | null;
 };
 
+type VoiceAvailability = {
+  available: boolean;
+  wakeAvailable?: boolean;
+  commandAvailable?: boolean;
+  wakeWord?: string;
+};
+
+type WakeDetection = {
+  name?: string;
+  label?: string;
+  confidence?: number;
+};
+
 type VoiceCommandNativeModule = {
-  isAvailable(): Promise<{ available: boolean; onDeviceAvailable: boolean }>;
-  startListening(): Promise<{ started: boolean; onDevice: boolean }>;
-  stopListening(): Promise<void>;
+  isAvailable(): Promise<VoiceAvailability>;
+  startWakeListening(): Promise<{ started: boolean; wakeWord?: string }>;
+  stopVoiceControl(): Promise<void>;
+  listenForCommandOnce(timeoutMs: number): Promise<VoiceCommandResult | null>;
   pauseForTts(): Promise<void>;
   resumeAfterTts(): Promise<void>;
 };
@@ -40,35 +63,40 @@ export type VoiceCommandExecution = {
 
 const WAKE_WORD = 'maculus';
 const MIN_CONFIDENCE = 0.35;
-const RESUME_AFTER_TTS_MS = 500;
-const UNKNOWN_STATUS_COOLDOWN_MS = 8000;
-const MAX_RECOVERABLE_ERRORS = 5;
+const UNKNOWN_COMMAND_COOLDOWN_MS = 8000;
+const WAKE_PROMPT_DELAY_MS = 700;
 
 const MaculusVoiceCommand = NativeModules.MaculusVoiceCommand as VoiceCommandNativeModule | undefined;
 
 export function parseVoiceCommand(
   text: string,
   confidence?: number | null,
+  options: { requireWakeWord?: boolean; ignoreConfidence?: boolean } = {},
 ): VoiceCommand | null {
-  if (typeof confidence === 'number' && confidence >= 0 && confidence < MIN_CONFIDENCE) {
+  if (!options.ignoreConfidence && typeof confidence === 'number' && confidence >= 0 && confidence < MIN_CONFIDENCE) {
     return null;
   }
 
   const normalized = normalizeSpeech(text);
+  const requireWakeWord = options.requireWakeWord ?? true;
+  let command = normalized;
+
   const wakeIndex = normalized.indexOf(WAKE_WORD);
-  if (wakeIndex === -1) {
+  if (wakeIndex !== -1) {
+    command = normalized.slice(wakeIndex + WAKE_WORD.length).trim();
+  } else if (requireWakeWord) {
     return null;
   }
 
-  const command = normalized.slice(wakeIndex + WAKE_WORD.length).trim();
   if (!command) {
     return null;
   }
 
-  if (containsAll(command, ['stop', 'guidance'])) {
+  const guidanceWords = ['guidance', 'guide', 'guiding'];
+  if (containsAny(command, ['stop', 'end', 'cancel']) && containsAny(command, guidanceWords)) {
     return 'stop_guidance';
   }
-  if (containsAll(command, ['start', 'guidance'])) {
+  if (containsAny(command, ['start', 'begin']) && containsAny(command, guidanceWords)) {
     return 'start_guidance';
   }
   if (
@@ -76,7 +104,8 @@ export function parseVoiceCommand(
     command.includes('what s around me') ||
     command.includes('what is around me') ||
     command.includes('describe scene') ||
-    command.includes('describe surroundings')
+    command.includes('describe surroundings') ||
+    command.includes('around me')
   ) {
     return 'describe_scene';
   }
@@ -122,7 +151,7 @@ export function executeVoiceCommand(
       if (actions.isGuiding()) {
         return {
           handled: true,
-          feedback: 'Guidance is already running. Say Maculus stop guidance first.',
+          feedback: 'Guidance is already running. Say stop guidance first.',
         };
       }
       actions.describeScene();
@@ -146,9 +175,9 @@ export class VoiceCommandService {
   private subscriptions: EmitterSubscription[] = [];
   private ttsSubscription: (() => void) | null = null;
   private enabled = false;
-  private resumeTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastUnknownStatusTime = 0;
-  private recoverableErrorCount = 0;
+  private commandBusy = false;
+  private status: VoiceCommandStatus = 'off';
+  private lastUnknownCommandTime = 0;
   private onStatus: ((status: VoiceCommandStatus) => void) | null = null;
   private onCommand: ((command: VoiceCommand, result: VoiceCommandResult) => void) | null = null;
 
@@ -165,7 +194,6 @@ export class VoiceCommandService {
     this.enabled = true;
     this.onCommand = onCommand;
     this.onStatus = onStatus;
-    this.recoverableErrorCount = 0;
 
     try {
       const availability = await MaculusVoiceCommand.isAvailable();
@@ -177,14 +205,14 @@ export class VoiceCommandService {
 
       this.emitter = new NativeEventEmitter(MaculusVoiceCommand as any);
       this.subscriptions = [
-        this.emitter.addListener('MaculusVoiceCommandResult', this.handleResult),
+        this.emitter.addListener('MaculusVoiceWakeDetected', this.handleWakeDetected),
         this.emitter.addListener('MaculusVoiceCommandState', this.handleState),
         this.emitter.addListener('MaculusVoiceCommandError', this.handleError),
       ];
       this.ttsSubscription = tts.onSpeakingChange(this.handleTtsSpeakingChange);
 
-      await MaculusVoiceCommand.startListening();
-      this.setStatus('listening');
+      await MaculusVoiceCommand.startWakeListening();
+      this.setStatus('wake_listening');
       return true;
     } catch (e) {
       console.warn('[Voice] Start failed:', e);
@@ -199,40 +227,88 @@ export class VoiceCommandService {
     this.stopLocal();
     if (native) {
       try {
-        await native.stopListening();
+        await native.stopVoiceControl();
       } catch (e) {
         console.warn('[Voice] Stop failed:', e);
       }
     }
   }
 
-  private handleResult = (result: VoiceCommandResult) => {
-    const command = parseVoiceCommand(result.text, result.confidence);
-    if (!command) {
-      const now = Date.now();
-      if (now - this.lastUnknownStatusTime > UNKNOWN_STATUS_COOLDOWN_MS) {
-        this.lastUnknownStatusTime = now;
-        this.setStatus('listening');
+  private handleWakeDetected = async (detection: WakeDetection) => {
+    console.log('[Voice] Wake detected:', detection);
+    if (!this.enabled || this.commandBusy || !MaculusVoiceCommand) {
+      return;
+    }
+
+    this.commandBusy = true;
+    this.setStatus('wake_detected');
+    Vibration.vibrate([0, 60]);
+    tts.speak('Listening', 1, true);
+
+    await sleep(WAKE_PROMPT_DELAY_MS);
+    if (!this.enabled || !MaculusVoiceCommand) {
+      this.commandBusy = false;
+      return;
+    }
+
+    this.setStatus('command_listening');
+    try {
+      const result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
+      console.log('[Voice] Command transcript result:', result);
+      if (!this.enabled) {
+        this.commandBusy = false;
+        return;
       }
-      return;
+
+      if (!result?.text) {
+        console.log('[Voice] No command transcript returned');
+        tts.speak('No command heard', 1, true);
+        return;
+      }
+
+      this.setStatus('processing');
+      const command = parseVoiceCommand(result.text, result.confidence, {
+        requireWakeWord: false,
+        ignoreConfidence: true,
+      });
+      console.log('[Voice] Command parse result:', {
+        text: result.text,
+        confidence: result.confidence,
+        command,
+      });
+      if (command) {
+        this.onCommand?.(command, result);
+      } else {
+        console.warn('[Voice] Command not recognized:', {
+          text: result.text,
+          confidence: result.confidence,
+        });
+        const now = Date.now();
+        if (now - this.lastUnknownCommandTime > UNKNOWN_COMMAND_COOLDOWN_MS) {
+          this.lastUnknownCommandTime = now;
+          tts.speak('Command not recognized', 1, true);
+        }
+      }
+    } catch (e) {
+      console.warn('[Voice] Command listen failed:', e);
+      this.setStatus('error');
+    } finally {
+      this.commandBusy = false;
+      if (this.enabled) {
+        await this.restartWakeListening();
+      }
     }
-    this.recoverableErrorCount = 0;
-    this.onCommand?.(command, result);
   };
 
-  private handleState = (state: { listening?: boolean; paused?: boolean }) => {
-    if (!this.enabled) {
+  private handleState = (state: { state?: VoiceCommandStatus }) => {
+    if (!this.enabled || !state.state) {
       return;
     }
-    if (state.listening) {
-      this.recoverableErrorCount = 0;
-    }
-    this.setStatus(state.paused ? 'paused' : state.listening ? 'listening' : 'listening');
+    this.setStatus(state.state);
   };
 
-  private handleError = (error: { code?: number; message?: string; fatal?: boolean }) => {
-    this.recoverableErrorCount += 1;
-    if (error.fatal || this.recoverableErrorCount >= MAX_RECOVERABLE_ERRORS) {
+  private handleError = (error: { message?: string; fatal?: boolean }) => {
+    if (error.fatal) {
       this.setStatus('unavailable');
       this.stopLocal();
       return;
@@ -241,33 +317,39 @@ export class VoiceCommandService {
   };
 
   private handleTtsSpeakingChange = (speaking: boolean) => {
-    if (!this.enabled || !MaculusVoiceCommand) {
+    if (!this.enabled || !MaculusVoiceCommand || this.commandBusy) {
       return;
-    }
-    if (this.resumeTimer) {
-      clearTimeout(this.resumeTimer);
-      this.resumeTimer = null;
     }
     if (speaking) {
       MaculusVoiceCommand.pauseForTts().catch(() => {});
       this.setStatus('paused');
       return;
     }
-    this.resumeTimer = setTimeout(() => {
-      if (this.enabled && MaculusVoiceCommand) {
-        MaculusVoiceCommand.resumeAfterTts()
-          .then(() => this.setStatus('listening'))
-          .catch(() => this.setStatus('error'));
-      }
-    }, RESUME_AFTER_TTS_MS);
+    MaculusVoiceCommand.resumeAfterTts()
+      .then(() => {
+        if (this.enabled && !this.commandBusy) {
+          this.setStatus('wake_listening');
+        }
+      })
+      .catch(() => this.setStatus('error'));
   };
+
+  private async restartWakeListening(): Promise<void> {
+    if (!MaculusVoiceCommand) {
+      return;
+    }
+    try {
+      await MaculusVoiceCommand.startWakeListening();
+      this.setStatus('wake_listening');
+    } catch (e) {
+      console.warn('[Voice] Wake restart failed:', e);
+      this.setStatus('error');
+    }
+  }
 
   private stopLocal(): void {
     this.enabled = false;
-    if (this.resumeTimer) {
-      clearTimeout(this.resumeTimer);
-      this.resumeTimer = null;
-    }
+    this.commandBusy = false;
     this.subscriptions.forEach(subscription => subscription.remove());
     this.subscriptions = [];
     this.ttsSubscription?.();
@@ -279,7 +361,12 @@ export class VoiceCommandService {
   }
 
   private setStatus(status: VoiceCommandStatus): void {
+    this.status = status;
     this.onStatus?.(status);
+  }
+
+  getStatus(): VoiceCommandStatus {
+    return this.status;
   }
 }
 
@@ -295,4 +382,13 @@ function containsAll(text: string, words: string[]): boolean {
   return words.every(word => text.includes(word));
 }
 
+function containsAny(text: string, words: string[]): boolean {
+  return words.some(word => text.includes(word));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export const voiceCommandService = new VoiceCommandService();
+export { WAKE_WORD_LABEL };

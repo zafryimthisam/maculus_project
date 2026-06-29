@@ -73,3 +73,18 @@ NativeModules.MaculusDepth = {
     ],
   }),
 };
+
+// Mock wake-word and one-shot voice command module.
+NativeModules.MaculusVoiceCommand = {
+  isAvailable: jest.fn().mockResolvedValue({
+    available: true,
+    wakeAvailable: true,
+    commandAvailable: true,
+    wakeWord: 'Hey LiveKit',
+  }),
+  startWakeListening: jest.fn().mockResolvedValue({ started: true, wakeWord: 'Hey LiveKit' }),
+  stopVoiceControl: jest.fn().mockResolvedValue(undefined),
+  listenForCommandOnce: jest.fn().mockResolvedValue(null),
+  pauseForTts: jest.fn().mockResolvedValue(undefined),
+  resumeAfterTts: jest.fn().mockResolvedValue(undefined),
+};

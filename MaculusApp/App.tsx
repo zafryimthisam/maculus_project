@@ -46,8 +46,18 @@ export default function App() {
   const [isConnecting, setIsConnecting] = useState(false);
   const voiceStatusText = voiceStatus === 'unavailable'
     ? 'Voice unavailable'
-    : voiceEnabled
-    ? 'Voice listening'
+    : voiceStatus === 'wake_listening'
+    ? 'Wake listening'
+    : voiceStatus === 'wake_detected'
+    ? 'Wake detected'
+    : voiceStatus === 'command_listening'
+    ? 'Command listening'
+    : voiceStatus === 'processing'
+    ? 'Voice processing'
+    : voiceStatus === 'paused'
+    ? 'Voice paused'
+    : voiceStatus === 'error'
+    ? 'Voice error'
     : 'Voice off';
 
   useEffect(() => {
@@ -136,7 +146,7 @@ export default function App() {
           <AccessibleButton
             title={voiceEnabled ? 'Voice Commands On' : 'Voice Commands Off'}
             onPress={toggleVoiceCommands}
-            accessibilityHint="Toggles hands-free commands like Maculus start guidance and Maculus what's around me"
+            accessibilityHint="Toggles hands-free commands. Say Hey LiveKit, then say start guidance or what's around me"
             color={voiceEnabled ? '#0891B2' : '#374151'}
             style={styles.voiceBtn}
             textStyle={styles.voiceBtnText}

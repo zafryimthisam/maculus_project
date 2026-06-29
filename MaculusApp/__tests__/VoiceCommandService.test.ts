@@ -30,9 +30,24 @@ describe('VoiceCommandService parser', () => {
     expect(parseVoiceCommand('Maculus stop buzzer')).toBe('stop_buzzer');
   });
 
-  it('rejects phrases without the wake word and low-confidence phrases', () => {
+  it('rejects phrases without the wake word before wake detection and low-confidence phrases', () => {
     expect(parseVoiceCommand('start guidance')).toBeNull();
     expect(parseVoiceCommand('Maculus start guidance', 0.2)).toBeNull();
+  });
+
+  it('accepts command-only phrases after wake detection', () => {
+    expect(parseVoiceCommand('start guidance', null, { requireWakeWord: false })).toBe('start_guidance');
+    expect(parseVoiceCommand('start guide', null, { requireWakeWord: false })).toBe('start_guidance');
+    expect(parseVoiceCommand('begin guiding', null, { requireWakeWord: false })).toBe('start_guidance');
+    expect(parseVoiceCommand("what's around me", null, { requireWakeWord: false })).toBe('describe_scene');
+    expect(parseVoiceCommand('buzzer off', null, { requireWakeWord: false })).toBe('buzzer_off');
+  });
+
+  it('can ignore unreliable recognizer confidence after wake detection', () => {
+    expect(parseVoiceCommand('start guidance', 0.1, {
+      requireWakeWord: false,
+      ignoreConfidence: true,
+    })).toBe('start_guidance');
   });
 });
 
