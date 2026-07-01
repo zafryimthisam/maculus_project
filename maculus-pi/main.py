@@ -2,16 +2,14 @@
 """
 Maculus - Raspberry Pi Zero 2 W Controller
 Streams video from Camera Module 3, reads HC-SR04 ultrasonic sensor,
-controls buzzer, and exposes HTTP API for the mobile app.
+and exposes HTTP API for the mobile app.
 """
 import logging
 import sys
-import time
 from hardware.camera import Camera
 from hardware.sensor import UltrasonicSensor
-from hardware.buzzer import BuzzerController
 from server.http_server import start_server
-from utils.config import PI_HOST, PI_HTTP_PORT, CAMERA_RESOLUTION, STREAM_FPS, BUZZER_THRESHOLD_CM
+from utils.config import PI_HOST, PI_HTTP_PORT, CAMERA_RESOLUTION, STREAM_FPS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,29 +21,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    logger.info("╔══════════════════════════════════════╗")
-    logger.info("║      MACULUS PI ZERO CONTROLLER      ║")
-    logger.info("╚══════════════════════════════════════╝")
+    logger.info("========================================")
+    logger.info("      MACULUS PI ZERO CONTROLLER      ")
+    logger.info("========================================")
     logger.info("Initializing hardware...")
 
     camera = None
     sensor = None
-    buzzer = None
 
     try:
         camera = Camera(resolution=CAMERA_RESOLUTION, fps=STREAM_FPS)
         camera.start()
 
-        buzzer = BuzzerController(pin=26)
-        buzzer.start()
-        buzzer.test_beep()
-
         def on_obstacle(distance_cm):
-            if distance_cm < BUZZER_THRESHOLD_CM:
-                buzzer.proportional_beep(distance_cm)
-                logger.info(f"[Alert] Obstacle buzzer at {distance_cm:.1f} cm")
-            else:
-                logger.info(f"[Alert] Obstacle at {distance_cm:.1f} cm; buzzer suppressed")
+            logger.info(f"[Alert] Obstacle at {distance_cm:.1f} cm")
 
         sensor = UltrasonicSensor(echo_pin=24, trigger_pin=23, on_obstacle=on_obstacle)
         sensor.start()
@@ -56,10 +45,9 @@ def main():
         logger.info("  GET  /capture    -> Single JPEG frame (if camera available)")
         logger.info("  GET  /stream.mjpg-> MJPEG video stream (if camera available)")
         logger.info("  GET  /distance   -> Ultrasonic distance JSON")
-        logger.info("  POST /buzz       -> Trigger buzzer pattern")
 
-        start_server(host=PI_HOST, port=PI_HTTP_PORT, 
-                     camera=camera, sensor=sensor, buzzer=buzzer)
+        start_server(host=PI_HOST, port=PI_HTTP_PORT,
+                     camera=camera, sensor=sensor)
 
     except KeyboardInterrupt:
         logger.info("Shutdown requested by user.")
@@ -69,7 +57,6 @@ def main():
         logger.info("Cleaning up hardware...")
         if camera: camera.stop()
         if sensor: sensor.stop()
-        if buzzer: buzzer.cleanup()
         logger.info("Maculus Pi Controller stopped.")
 
 if __name__ == "__main__":

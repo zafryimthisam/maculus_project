@@ -14,13 +14,13 @@ export const PRIORITY = { NORMAL: 0, HIGH: 1, EMERGENCY: 2 };
 export interface Guidance {
   text: string;
   priority: number;
-  buzz: boolean;
+  haptic: boolean;
 }
 
 const MIN_SCORE = 0.30;
 const CLOSE_DEPTH_SCORE = 0.68;
 const VERY_CLOSE_DEPTH_SCORE = 0.82;
-const BUZZER_DISTANCE_CM = 80;
+const HAPTIC_DISTANCE_CM = 80;
 
 // Raspberry Pi Camera Module v1 / rev 1.3 uses the OV5647 sensor. The Pi
 // server streams a 640x480 4:3 frame, matching the sensor aspect ratio, so
@@ -210,13 +210,13 @@ export function buildGuidance(
         ? `Stop! ${cap(what)}, ${cm} centimeters ahead.`
         : `Caution — ${what}, ${cm} centimeters ahead.`,
       priority: emergency ? PRIORITY.EMERGENCY : PRIORITY.HIGH,
-      buzz: distance.distance_cm < BUZZER_DISTANCE_CM,
+      haptic: distance.distance_cm < HAPTIC_DISTANCE_CM,
     };
   }
 
   // 2. Clear path.
   if (strong.length === 0) {
-    return { text: 'Path clear.', priority: PRIORITY.NORMAL, buzz: false };
+    return { text: 'Path clear.', priority: PRIORITY.NORMAL, haptic: false };
   }
 
   // 3. Top 1-2 objects, brief.
@@ -235,7 +235,7 @@ export function buildGuidance(
   return {
     text: cap(parts.join('; ')) + '.',
     priority: elevated ? PRIORITY.HIGH : PRIORITY.NORMAL,
-    buzz: false,
+    haptic: false,
   };
 }
 
@@ -253,13 +253,13 @@ export function describeScene(
 
   let body = '';
   let priority: number = PRIORITY.NORMAL;
-  let buzz = false;
+  let haptic = false;
 
   if (strong.length === 0) {
     if (distance?.obstacle) {
       body = `I don't see any objects clearly, but the sensor shows something ${formatObstacleDistance(distance.distance_cm)} centimeters ahead.`;
       priority = PRIORITY.HIGH;
-      buzz = distance.distance_cm < BUZZER_DISTANCE_CM;
+      haptic = distance.distance_cm < HAPTIC_DISTANCE_CM;
     } else {
       body = `I don't see any distinct objects around you. The path appears clear.`;
     }
@@ -315,13 +315,13 @@ export function describeScene(
         if (cm <= 50) {
           body += ' Be careful.';
           priority = PRIORITY.EMERGENCY;
-          buzz = distance.distance_cm < BUZZER_DISTANCE_CM;
+          haptic = distance.distance_cm < HAPTIC_DISTANCE_CM;
         }
       }
     }
   }
 
-  return { text: body, priority, buzz };
+  return { text: body, priority, haptic };
 }
 
 /** Compact on-screen status. */

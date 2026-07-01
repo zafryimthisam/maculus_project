@@ -7,7 +7,6 @@ import {
   setPiUrl,
   getPiUrl,
   fetchStatus,
-  triggerBuzzer,
   discoverPiUrl,
 } from '../api/piClient';
 import { detectionService } from '../services/DetectionService';
@@ -27,7 +26,7 @@ const DEPTH_INTERVAL_MS = 1500;
 const NORMAL_GUIDANCE_SPEECH_INTERVAL_MS = 3200;
 const HIGH_GUIDANCE_SPEECH_INTERVAL_MS = 1500;
 const EMERGENCY_GUIDANCE_SPEECH_INTERVAL_MS = 700;
-const BUZZER_COOLDOWN_MS = 3000;
+const HAPTIC_COOLDOWN_MS = 3000;
 
 export function useVisionAssistant() {
   const [piUrl, setPiUrlState] = useState(getPiUrl());
@@ -48,7 +47,7 @@ export function useVisionAssistant() {
   const [depthStatus, setDepthStatus] = useState('Depth unavailable');
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<VoiceCommandStatus>('off');
-  const [buzzerAlertsEnabled, setBuzzerAlertsEnabledState] = useState(true);
+  const [hapticAlertsEnabled, setHapticAlertsEnabledState] = useState(true);
 
   const distanceRef = useRef<DistanceReading | null>(null);
   const isConnectedRef = useRef(false);
@@ -62,9 +61,8 @@ export function useVisionAssistant() {
   const suppressDistanceSpeechUntilRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const distanceTimerRef = useRef<number | null>(null);
-  const buzzerAbortRef = useRef<AbortController | null>(null);
-  const lastBuzzerTimeRef = useRef(0);
-  const buzzerAlertsEnabledRef = useRef(true);
+  const lastHapticTimeRef = useRef(0);
+  const hapticAlertsEnabledRef = useRef(true);
   const depthBusyRef = useRef(false);
   const lastDepthTimeRef = useRef(0);
   const lastDepthResultRef = useRef<DepthEstimation | null>(null);
@@ -73,7 +71,7 @@ export function useVisionAssistant() {
   useEffect(() => { distanceRef.current = distance; }, [distance]);
   useEffect(() => { cameraAvailableRef.current = cameraAvailable; }, [cameraAvailable]);
   useEffect(() => { isDepthReadyRef.current = isDepthReady; }, [isDepthReady]);
-  useEffect(() => { buzzerAlertsEnabledRef.current = buzzerAlertsEnabled; }, [buzzerAlertsEnabled]);
+  useEffect(() => { hapticAlertsEnabledRef.current = hapticAlertsEnabled; }, [hapticAlertsEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,38 +130,27 @@ export function useVisionAssistant() {
     }
   }, []);
 
-  const cancelBuzzer = useCallback((sendStop: boolean = false) => {
-    if (buzzerAbortRef.current) {
-      buzzerAbortRef.current.abort();
-      buzzerAbortRef.current = null;
-    }
-    if (sendStop && isConnectedRef.current) {
-      triggerBuzzer('stop').catch(() => {});
-    }
+  const cancelHaptics = useCallback((_sendStop: boolean = false) => {
+    Vibration.cancel();
   }, []);
 
-  const triggerGuidanceBuzzer = useCallback(() => {
-    if (voiceCommandService.isCommandCaptureActive() || !isGuidingRef.current || !buzzerAlertsEnabledRef.current || buzzerAbortRef.current) {
+  const triggerGuidanceHaptic = useCallback((priority: number, requireGuiding: boolean = true) => {
+    if (voiceCommandService.isCommandCaptureActive() || !hapticAlertsEnabledRef.current) {
+      return;
+    }
+    if (requireGuiding && !isGuidingRef.current) {
       return;
     }
     const now = Date.now();
-    if (now - lastBuzzerTimeRef.current < BUZZER_COOLDOWN_MS) {
+    if (now - lastHapticTimeRef.current < HAPTIC_COOLDOWN_MS) {
       return;
     }
-    lastBuzzerTimeRef.current = now;
-    const controller = new AbortController();
-    buzzerAbortRef.current = controller;
-    triggerBuzzer('obstacle', controller.signal)
-      .catch((e: any) => {
-        if (e?.name !== 'CanceledError' && e?.code !== 'ERR_CANCELED') {
-          console.warn('[Buzzer] Trigger failed:', e?.message || e);
-        }
-      })
-      .finally(() => {
-        if (buzzerAbortRef.current === controller) {
-          buzzerAbortRef.current = null;
-        }
-      });
+    lastHapticTimeRef.current = now;
+    const pattern = priority >= 2
+      ? [0, 180, 80, 180, 80, 240]
+      : [0, 120, 120, 120];
+    Vibration.cancel();
+    Vibration.vibrate(pattern);
   }, []);
 
   const updatePiUrl = useCallback((url: string) => {
@@ -379,8 +366,8 @@ export function useVisionAssistant() {
         const depthAdjustedDetections = applyDepthToDetections(detections, lastDepthResultRef.current);
         const guidance = buildGuidance(depthAdjustedDetections, distanceRef.current);
         maybeSpeakGuidance(guidance.text, guidance.priority);
-        if (guidance.buzz) {
-          triggerGuidanceBuzzer();
+        if (guidance.haptic) {
+          triggerGuidanceHaptic(guidance.priority);
         }
 
         const now = Date.now();
@@ -414,7 +401,7 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [applyDepthToDetections, maybeStartDepthEstimate, runYoloOnce, triggerGuidanceBuzzer]);
+  }, [applyDepthToDetections, maybeStartDepthEstimate, runYoloOnce, triggerGuidanceHaptic]);
 
   const startGuiding = useCallback(() => {
     if (isGuidingRef.current) {
@@ -442,24 +429,24 @@ export function useVisionAssistant() {
     isGuidingRef.current = false;
     setIsGuiding(false);
     cancelInFlight();
-    cancelBuzzer(true);
+    cancelHaptics(true);
     tts.stop();
     tts.speak('Guidance stopped', 1, true);
-  }, [cancelBuzzer, cancelInFlight]);
+  }, [cancelHaptics, cancelInFlight]);
 
-  const setBuzzerAlertsEnabled = useCallback((enabled: boolean) => {
-    setBuzzerAlertsEnabledState(enabled);
-    buzzerAlertsEnabledRef.current = enabled;
+  const setHapticAlertsEnabled = useCallback((enabled: boolean) => {
+    setHapticAlertsEnabledState(enabled);
+    hapticAlertsEnabledRef.current = enabled;
     if (!enabled) {
-      cancelBuzzer(true);
+      cancelHaptics(true);
     }
-    tts.speak(enabled ? 'Buzzer alerts on' : 'Buzzer muted', 1, true);
-  }, [cancelBuzzer]);
+    tts.speak(enabled ? 'Haptic alerts on' : 'Haptic alerts off', 1, true);
+  }, [cancelHaptics]);
 
-  const stopBuzzer = useCallback(() => {
-    cancelBuzzer(true);
-    tts.speak('Buzzer stopped', 1, true);
-  }, [cancelBuzzer]);
+  const stopHaptic = useCallback(() => {
+    cancelHaptics(true);
+    tts.speak('Haptic stopped', 1, true);
+  }, [cancelHaptics]);
 
   const toggleGuiding = useCallback(() => {
     if (isGuidingRef.current) {
@@ -501,8 +488,8 @@ export function useVisionAssistant() {
       }
       suppressDistanceSpeechUntilRef.current = Date.now() + OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS;
       tts.speak(guidance.text, Math.max(guidance.priority, 1), true);
-      if (guidance.buzz && buzzerAlertsEnabledRef.current) {
-        triggerBuzzer('obstacle').catch(() => {});
+      if (guidance.haptic && hapticAlertsEnabledRef.current) {
+        triggerGuidanceHaptic(guidance.priority, false);
       }
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
@@ -523,21 +510,21 @@ export function useVisionAssistant() {
         abortRef.current = null;
       }
     }
-  }, [runYoloOnce]);
+  }, [runYoloOnce, triggerGuidanceHaptic]);
 
   const handleVoiceCommand = useCallback((command: VoiceCommand) => {
     const result = executeVoiceCommand(command, {
       startGuidance: startGuiding,
       stopGuidance: stopGuiding,
       describeScene: describeOnce,
-      setBuzzerAlertsEnabled,
-      stopBuzzer,
+      setHapticAlertsEnabled,
+      stopHaptic,
       isGuiding: () => isGuidingRef.current,
     });
     if (result.feedback) {
       tts.speak(result.feedback, 1, true);
     }
-  }, [describeOnce, setBuzzerAlertsEnabled, startGuiding, stopBuzzer, stopGuiding]);
+  }, [describeOnce, setHapticAlertsEnabled, startGuiding, stopHaptic, stopGuiding]);
 
   const toggleVoiceCommands = useCallback(async () => {
     if (voiceEnabled) {
@@ -569,9 +556,9 @@ export function useVisionAssistant() {
       isGuidingRef.current = false;
       setIsGuiding(false);
       cancelInFlight();
-      cancelBuzzer(true);
+      cancelHaptics(true);
     }
-  }, [cancelBuzzer, cancelInFlight, isConnected]);
+  }, [cancelHaptics, cancelInFlight, isConnected]);
 
   return {
     piUrl,
@@ -589,7 +576,7 @@ export function useVisionAssistant() {
     depthStatus,
     voiceEnabled,
     voiceStatus,
-    buzzerAlertsEnabled,
+    hapticAlertsEnabled,
     previewFrameBase64,
     previewResolution,
     previewDetections,
@@ -598,8 +585,8 @@ export function useVisionAssistant() {
     stopGuiding,
     toggleGuiding,
     describeOnce,
-    setBuzzerAlertsEnabled,
-    stopBuzzer,
+    setHapticAlertsEnabled,
+    stopHaptic,
     toggleVoiceCommands,
   };
 }

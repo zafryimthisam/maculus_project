@@ -50,7 +50,7 @@ describe('GuidanceEngine camera position logic', () => {
   });
 
 
-  it('does not buzz unless raw ultrasonic distance is below 80 centimeters', () => {
+  it('does not request haptics unless raw ultrasonic distance is below 80 centimeters', () => {
     const at89 = buildGuidance([detection({})], {
       obstacle: true,
       distance_cm: 89,
@@ -67,19 +67,19 @@ describe('GuidanceEngine camera position logic', () => {
       threshold_cm: 100,
     });
 
-    expect(at89.buzz).toBe(false);
-    expect(at80.buzz).toBe(false);
-    expect(at79.buzz).toBe(true);
+    expect(at89.haptic).toBe(false);
+    expect(at80.haptic).toBe(false);
+    expect(at79.haptic).toBe(true);
   });
 
-  it('uses the same below-80 buzzer rule for one-shot obstacle descriptions', () => {
+  it('uses the same below-80 haptics rule for one-shot obstacle descriptions', () => {
     const guidance = describeScene([], {
       obstacle: true,
       distance_cm: 89,
       threshold_cm: 100,
     });
 
-    expect(guidance.buzz).toBe(false);
+    expect(guidance.haptic).toBe(false);
   });
   it('uses relative depth to prioritize visually closer objects', () => {
     const guidance = buildGuidance([

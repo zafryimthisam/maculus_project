@@ -1,13 +1,12 @@
 """Flask-based HTTP server for Maculus Pi"""
 import logging
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 _camera = None
 _sensor = None
-_buzzer = None
 
 PAGE = """\
 <html>
@@ -44,7 +43,7 @@ def capture():
 def stream():
     if _camera is None or not getattr(_camera, 'is_available', lambda: False)():
         return jsonify({"error": "Camera not available"}), 503
-    
+
     def generate():
         output = _camera.get_stream_output()
         while True:
@@ -53,8 +52,8 @@ def stream():
                 frame = output.frame
             header = b'--FRAME\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(frame)).encode() + b'\r\n\r\n'
             yield header + frame + b'\r\n'
-    
-    return Response(generate(), 
+
+    return Response(generate(),
                     mimetype='multipart/x-mixed-replace; boundary=FRAME')
 
 @app.route('/distance')
@@ -63,41 +62,21 @@ def distance():
         return jsonify({"error": "Sensor not initialized"}), 500
     return jsonify(_sensor.get_reading())
 
-@app.route('/buzz', methods=['POST'])
-def buzz():
-    if _buzzer is None:
-        return jsonify({"error": "Buzzer not initialized"}), 500
-    data = request.get_json(silent=True) or {}
-    pattern = data.get('pattern', 'short')
-    handled = _buzzer.pattern(pattern)
-    if not handled:
-        return jsonify({"error": "Unknown buzzer pattern", "pattern": pattern}), 400
-    return jsonify({"status": "ok", "pattern": pattern})
-
-@app.route('/buzz/stop', methods=['POST'])
-def buzz_stop():
-    if _buzzer is None:
-        return jsonify({"error": "Buzzer not initialized"}), 500
-    _buzzer.stop()
-    return jsonify({"status": "ok", "pattern": "stop"})
-
 @app.route('/status')
 def status():
     return jsonify({
         "system": "Maculus Pi",
         "camera": _camera is not None and getattr(_camera, 'is_available', lambda: False)(),
-        "sensor": _sensor is not None and getattr(_sensor, '_running', False),
-        "buzzer": _buzzer is not None
+        "sensor": _sensor is not None and getattr(_sensor, '_running', False)
     })
 
-def start_server(host, port, camera, sensor, buzzer):
-    global _camera, _sensor, _buzzer
+def start_server(host, port, camera, sensor):
+    global _camera, _sensor
     _camera = camera
     _sensor = sensor
-    _buzzer = buzzer
-    
+
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
-    
+
     logger.info(f"HTTP server ready at http://{host}:{port}")
     app.run(host=host, port=port, threaded=True, debug=False)

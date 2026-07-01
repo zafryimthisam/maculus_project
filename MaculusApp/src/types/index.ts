@@ -2,7 +2,6 @@ export interface PiStatus {
   system: string;
   camera: boolean;
   sensor: boolean;
-  buzzer: boolean;
 }
 
 export interface DistanceReading {

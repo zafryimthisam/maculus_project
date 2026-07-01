@@ -5,8 +5,8 @@ const createActions = (isGuiding: boolean = false) => ({
   startGuidance: jest.fn(),
   stopGuidance: jest.fn(),
   describeScene: jest.fn(),
-  setBuzzerAlertsEnabled: jest.fn(),
-  stopBuzzer: jest.fn(),
+  setHapticAlertsEnabled: jest.fn(),
+  stopHaptic: jest.fn(),
   isGuiding: jest.fn(() => isGuiding),
 });
 
@@ -22,12 +22,14 @@ describe('VoiceCommandService parser', () => {
     expect(parseVoiceCommand('Maculus describe scene')).toBe('describe_scene');
   });
 
-  it('accepts wake-word buzzer commands', () => {
-    expect(parseVoiceCommand('Maculus buzzer off')).toBe('buzzer_off');
-    expect(parseVoiceCommand('Maculus mute buzzer')).toBe('buzzer_off');
-    expect(parseVoiceCommand('Maculus buzzer on')).toBe('buzzer_on');
-    expect(parseVoiceCommand('Maculus enable buzzer')).toBe('buzzer_on');
-    expect(parseVoiceCommand('Maculus stop buzzer')).toBe('stop_buzzer');
+  it('accepts wake-word haptic commands', () => {
+    expect(parseVoiceCommand('Maculus haptic off')).toBe('haptic_off');
+    expect(parseVoiceCommand('Maculus haptics off')).toBe('haptic_off');
+    expect(parseVoiceCommand('Maculus mute vibration')).toBe('haptic_off');
+    expect(parseVoiceCommand('Maculus haptic on')).toBe('haptic_on');
+    expect(parseVoiceCommand('Maculus enable vibrations')).toBe('haptic_on');
+    expect(parseVoiceCommand('Maculus stop haptic')).toBe('stop_haptic');
+    expect(parseVoiceCommand('Maculus stop vibration')).toBe('stop_haptic');
   });
 
   it('rejects phrases without the wake word before wake detection and low-confidence phrases', () => {
@@ -40,7 +42,7 @@ describe('VoiceCommandService parser', () => {
     expect(parseVoiceCommand('start guide', null, { requireWakeWord: false })).toBe('start_guidance');
     expect(parseVoiceCommand('begin guiding', null, { requireWakeWord: false })).toBe('start_guidance');
     expect(parseVoiceCommand("what's around me", null, { requireWakeWord: false })).toBe('describe_scene');
-    expect(parseVoiceCommand('buzzer off', null, { requireWakeWord: false })).toBe('buzzer_off');
+    expect(parseVoiceCommand('haptic off', null, { requireWakeWord: false })).toBe('haptic_off');
   });
 
   it('can ignore unreliable recognizer confidence after wake detection', () => {
@@ -70,20 +72,20 @@ describe('VoiceCommandService executor', () => {
     expect(result.feedback).toContain('stop guidance');
   });
 
-  it('mutes and restores buzzer alerts', () => {
+  it('mutes and restores haptic alerts', () => {
     const actions = createActions(false);
-    executeVoiceCommand('buzzer_off', actions);
-    executeVoiceCommand('buzzer_on', actions);
+    executeVoiceCommand('haptic_off', actions);
+    executeVoiceCommand('haptic_on', actions);
 
-    expect(actions.setBuzzerAlertsEnabled).toHaveBeenNthCalledWith(1, false);
-    expect(actions.setBuzzerAlertsEnabled).toHaveBeenNthCalledWith(2, true);
+    expect(actions.setHapticAlertsEnabled).toHaveBeenNthCalledWith(1, false);
+    expect(actions.setHapticAlertsEnabled).toHaveBeenNthCalledWith(2, true);
   });
 
-  it('stops only the active buzzer pattern', () => {
+  it('stops only the active haptic pattern', () => {
     const actions = createActions(false);
-    executeVoiceCommand('stop_buzzer', actions);
+    executeVoiceCommand('stop_haptic', actions);
 
-    expect(actions.stopBuzzer).toHaveBeenCalledTimes(1);
-    expect(actions.setBuzzerAlertsEnabled).not.toHaveBeenCalled();
+    expect(actions.stopHaptic).toHaveBeenCalledTimes(1);
+    expect(actions.setHapticAlertsEnabled).not.toHaveBeenCalled();
   });
 });

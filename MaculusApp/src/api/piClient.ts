@@ -34,9 +34,9 @@ const fetchStatusFromUrl = async (
 const isMaculusStatus = (status: any): status is PiStatus =>
   status &&
   typeof status === 'object' &&
+  status.system === 'Maculus Pi' &&
   typeof status.camera === 'boolean' &&
-  typeof status.sensor === 'boolean' &&
-  typeof status.buzzer === 'boolean';
+  typeof status.sensor === 'boolean';
 
 const getSubnetCandidates = async (fullScan: boolean): Promise<string[]> => {
   try {
@@ -138,12 +138,4 @@ export const fetchFrame = async (signal?: AbortSignal): Promise<CapturedFrame> =
 export const fetchFrameBase64 = async (signal?: AbortSignal): Promise<string> => {
   const frame = await fetchFrame(signal);
   return frame.base64;
-};
-
-export const triggerBuzzer = async (pattern: string, signal?: AbortSignal): Promise<void> => {
-  await axios.post(
-    `${PI_BASE_URL}/buzz`,
-    { pattern },
-    { timeout: 3000, signal }
-  );
 };

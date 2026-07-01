@@ -6,9 +6,9 @@ export type VoiceCommand =
   | 'start_guidance'
   | 'stop_guidance'
   | 'describe_scene'
-  | 'buzzer_off'
-  | 'buzzer_on'
-  | 'stop_buzzer';
+  | 'haptic_off'
+  | 'haptic_on'
+  | 'stop_haptic';
 
 export type VoiceCommandStatus =
   | 'off'
@@ -51,8 +51,8 @@ type VoiceCommandActions = {
   startGuidance(): void;
   stopGuidance(): void;
   describeScene(): void;
-  setBuzzerAlertsEnabled(enabled: boolean): void;
-  stopBuzzer(): void;
+  setHapticAlertsEnabled(enabled: boolean): void;
+  stopHaptic(): void;
   isGuiding(): boolean;
 };
 
@@ -109,22 +109,21 @@ export function parseVoiceCommand(
   ) {
     return 'describe_scene';
   }
-  if (containsAll(command, ['stop', 'buzzer'])) {
-    return 'stop_buzzer';
+  const hapticWords = ['haptic', 'haptics', 'vibration', 'vibrations'];
+  if (containsAny(command, ['stop', 'cancel']) && containsAny(command, hapticWords)) {
+    return 'stop_haptic';
   }
   if (
-    containsAll(command, ['buzzer', 'off']) ||
-    containsAll(command, ['mute', 'buzzer']) ||
-    containsAll(command, ['disable', 'buzzer'])
+    containsAny(command, ['off', 'mute', 'disable']) &&
+    containsAny(command, hapticWords)
   ) {
-    return 'buzzer_off';
+    return 'haptic_off';
   }
   if (
-    containsAll(command, ['buzzer', 'on']) ||
-    containsAll(command, ['enable', 'buzzer']) ||
-    containsAll(command, ['unmute', 'buzzer'])
+    containsAny(command, ['on', 'enable', 'unmute']) &&
+    containsAny(command, hapticWords)
   ) {
-    return 'buzzer_on';
+    return 'haptic_on';
   }
 
   return null;
@@ -156,14 +155,14 @@ export function executeVoiceCommand(
       }
       actions.describeScene();
       return { handled: true };
-    case 'buzzer_off':
-      actions.setBuzzerAlertsEnabled(false);
+    case 'haptic_off':
+      actions.setHapticAlertsEnabled(false);
       return { handled: true };
-    case 'buzzer_on':
-      actions.setBuzzerAlertsEnabled(true);
+    case 'haptic_on':
+      actions.setHapticAlertsEnabled(true);
       return { handled: true };
-    case 'stop_buzzer':
-      actions.stopBuzzer();
+    case 'stop_haptic':
+      actions.stopHaptic();
       return { handled: true };
     default:
       return { handled: false };

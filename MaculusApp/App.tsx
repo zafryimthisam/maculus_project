@@ -32,7 +32,7 @@ export default function App() {
     depthStatus,
     voiceEnabled,
     voiceStatus,
-    buzzerAlertsEnabled,
+    hapticAlertsEnabled,
     previewFrameBase64,
     previewResolution,
     previewDetections,
@@ -183,7 +183,7 @@ export default function App() {
             {backend ? ' - ' + backend : ''}
             {' - ' + depthStatus}
             {' - ' + voiceStatusText}
-            {buzzerAlertsEnabled ? ' - Buzzer on' : ' - Buzzer muted'}
+            {hapticAlertsEnabled ? ' - Haptics on' : ' - Haptics off'}
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
