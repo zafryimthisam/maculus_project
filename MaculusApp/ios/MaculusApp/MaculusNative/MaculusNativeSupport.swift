@@ -187,8 +187,11 @@ enum MaculusImage {
   }
 
   static func letterbox(_ image: UIImage, size: Int) -> MaculusLetterbox {
-    let sourceWidth = image.size.width
-    let sourceHeight = image.size.height
+    // Use decoded pixels rather than UIImage points. They normally match for
+    // our JPEGs, but camera images can carry a non-1 scale or orientation
+    // metadata; model coordinates must be mapped to the actual pixel frame.
+    let sourceWidth = CGFloat(image.cgImage?.width ?? Int(image.size.width))
+    let sourceHeight = CGFloat(image.cgImage?.height ?? Int(image.size.height))
     let scale = min(CGFloat(size) / sourceWidth, CGFloat(size) / sourceHeight)
     let width = sourceWidth * scale
     let height = sourceHeight * scale

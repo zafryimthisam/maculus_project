@@ -13,6 +13,7 @@ import { detectionService } from '../services/DetectionService';
 import { depthService } from '../services/DepthService';
 import { deviceCameraService } from '../services/DeviceCameraService';
 import { reIdService } from '../services/ReIdService';
+import { keepAwakeService } from '../services/KeepAwakeService';
 import { TemporalSceneEngine } from '../services/TemporalSceneEngine';
 import { describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
@@ -76,6 +77,15 @@ export function useVisionAssistant() {
   useEffect(() => { distanceRef.current = distance; }, [distance]);
   useEffect(() => { isDepthReadyRef.current = isDepthReady; }, [isDepthReady]);
   useEffect(() => { hapticAlertsEnabledRef.current = hapticAlertsEnabled; }, [hapticAlertsEnabled]);
+
+  useEffect(() => {
+    keepAwakeService.setEnabled(isGuiding);
+    return () => {
+      if (isGuiding) {
+        keepAwakeService.setEnabled(false);
+      }
+    };
+  }, [isGuiding]);
 
   const setActiveCameraSource = useCallback((source: CameraSource) => {
     cameraSourceRef.current = source;

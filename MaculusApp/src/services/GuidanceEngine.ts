@@ -22,14 +22,12 @@ const CLOSE_DEPTH_SCORE = 0.68;
 const VERY_CLOSE_DEPTH_SCORE = 0.82;
 const HAPTIC_DISTANCE_CM = 80;
 
-// Raspberry Pi Camera Module v1 / rev 1.3 uses the OV5647 sensor. The Pi
-// server streams a 640x480 4:3 frame, matching the sensor aspect ratio, so
-// normalized x coordinates map cleanly to the full horizontal FoV.
-const CAMERA_HORIZONTAL_FOV_DEGREES = 53.5;
 const CENTERLINE_MIN_OVERLAP = 0.08;
-const DIRECT_AHEAD_DEGREES = 8;
-const SLIGHT_DEGREES = 17;
-const SIDE_DEGREES = 24;
+// Position bands are normalized to the decoded frame, so guidance behaves the
+// same for the Pi camera and phone cameras with different resolutions/FoVs.
+const DIRECT_AHEAD_OFFSET = 0.15;
+const SLIGHT_OFFSET = 0.32;
+const SIDE_OFFSET = 0.45;
 
 type PositionPhrase =
   | 'far to your left'
@@ -43,8 +41,8 @@ type PositionPhrase =
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
-function horizontalAngle(cx: number): number {
-  return (clamp01(cx) - 0.5) * CAMERA_HORIZONTAL_FOV_DEGREES;
+function horizontalOffset(cx: number): number {
+  return clamp01(cx) - 0.5;
 }
 
 function overlapsCenter(x1?: number, x2?: number): boolean {
@@ -62,34 +60,34 @@ function describePosition(cx: number, x1?: number, x2?: number): PositionPhrase 
     return 'directly ahead of you';
   }
 
-  const angle = horizontalAngle(cx);
-  const absAngle = Math.abs(angle);
-  if (absAngle <= DIRECT_AHEAD_DEGREES) {
+  const offset = horizontalOffset(cx);
+  const absoluteOffset = Math.abs(offset);
+  if (absoluteOffset <= DIRECT_AHEAD_OFFSET) {
     return 'directly ahead of you';
   }
-  if (angle < 0) {
-    if (absAngle <= SLIGHT_DEGREES) {
+  if (offset < 0) {
+    if (absoluteOffset <= SLIGHT_OFFSET) {
       return 'slightly to your left';
     }
-    if (absAngle <= SIDE_DEGREES) {
+    if (absoluteOffset <= SIDE_OFFSET) {
       return 'to your left';
     }
     return 'far to your left';
   }
-  if (absAngle <= SLIGHT_DEGREES) {
+  if (absoluteOffset <= SLIGHT_OFFSET) {
     return 'slightly to your right';
   }
-  if (absAngle <= SIDE_DEGREES) {
+  if (absoluteOffset <= SIDE_OFFSET) {
     return 'to your right';
   }
   return 'far to your right';
 }
 
 function zoneOf(cx: number, x1?: number, x2?: number): Zone {
-  if (overlapsCenter(x1, x2) || Math.abs(horizontalAngle(cx)) <= DIRECT_AHEAD_DEGREES) {
+  if (overlapsCenter(x1, x2) || Math.abs(horizontalOffset(cx)) <= DIRECT_AHEAD_OFFSET) {
     return 'ahead';
   }
-  return horizontalAngle(cx) < 0 ? 'left' : 'right';
+  return horizontalOffset(cx) < 0 ? 'left' : 'right';
 }
 
 // Box-size to proximity (larger box is roughly closer).

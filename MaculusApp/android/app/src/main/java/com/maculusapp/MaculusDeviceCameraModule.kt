@@ -3,6 +3,7 @@ package com.maculusapp
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -15,6 +16,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.LifecycleOwner
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.LifecycleEventListener
@@ -25,6 +27,7 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -88,19 +91,16 @@ class MaculusDeviceCameraModule(
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                     try {
-                        val bytes = outputFile.readBytes()
-                        val dimensions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, dimensions)
-                        val resolution = if (dimensions.outWidth > 0 && dimensions.outHeight > 0) {
-                            "${dimensions.outWidth}x${dimensions.outHeight}"
-                        } else {
-                            null
-                        }
+                        val frame = normalizedJpeg(outputFile)
                         promise.resolve(Arguments.createMap().apply {
-                            putString("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                            putString("base64", Base64.encodeToString(frame.bytes, Base64.NO_WRAP))
                             putDouble("frameId", frameCounter.incrementAndGet().toDouble())
                             putDouble("capturedAt", System.currentTimeMillis().toDouble())
-                            if (resolution != null) putString("resolution", resolution) else putNull("resolution")
+                            if (frame.resolution != null) {
+                                putString("resolution", frame.resolution)
+                            } else {
+                                putNull("resolution")
+                            }
                             putString("lensFacing", lensFacing)
                         })
                     } catch (e: Exception) {
@@ -245,6 +245,76 @@ class MaculusDeviceCameraModule(
     private fun hasCameraPermission(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
             reactContext.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    private data class EncodedFrame(val bytes: ByteArray, val resolution: String?)
+
+    private fun normalizedJpeg(file: File): EncodedFrame {
+        val original = file.readBytes()
+        val orientation = try {
+            ExifInterface(file).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+        } catch (_: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+        val needsTransform = orientation != ExifInterface.ORIENTATION_NORMAL &&
+            orientation != ExifInterface.ORIENTATION_UNDEFINED
+        if (!needsTransform) {
+            val dimensions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(original, 0, original.size, dimensions)
+            val resolution = if (dimensions.outWidth > 0 && dimensions.outHeight > 0) {
+                "${dimensions.outWidth}x${dimensions.outHeight}"
+            } else {
+                null
+            }
+            return EncodedFrame(original, resolution)
+        }
+
+        val bitmap = BitmapFactory.decodeByteArray(original, 0, original.size)
+            ?: return EncodedFrame(original, null)
+        val matrix = Matrix().apply {
+            when (orientation) {
+                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> setScale(-1f, 1f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> setRotate(180f)
+                ExifInterface.ORIENTATION_FLIP_VERTICAL -> {
+                    setRotate(180f)
+                    postScale(-1f, 1f)
+                }
+                ExifInterface.ORIENTATION_TRANSPOSE -> {
+                    setRotate(90f)
+                    postScale(-1f, 1f)
+                }
+                ExifInterface.ORIENTATION_ROTATE_90 -> setRotate(90f)
+                ExifInterface.ORIENTATION_TRANSVERSE -> {
+                    setRotate(-90f)
+                    postScale(-1f, 1f)
+                }
+                ExifInterface.ORIENTATION_ROTATE_270 -> setRotate(-90f)
+            }
+        }
+        val normalized = try {
+            android.graphics.Bitmap.createBitmap(
+                bitmap,
+                0,
+                0,
+                bitmap.width,
+                bitmap.height,
+                matrix,
+                true
+            )
+        } catch (_: Exception) {
+            bitmap.recycle()
+            return EncodedFrame(original, null)
+        }
+        val output = ByteArrayOutputStream()
+        normalized.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, output)
+        val bytes = output.toByteArray()
+        val resolution = "${normalized.width}x${normalized.height}"
+        if (normalized !== bitmap) normalized.recycle()
+        bitmap.recycle()
+        return EncodedFrame(bytes, resolution)
+    }
 
     private fun startResult(alreadyStarted: Boolean) = Arguments.createMap().apply {
         putBoolean("started", true)

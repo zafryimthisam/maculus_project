@@ -37,6 +37,12 @@ RCT_EXTERN_METHOD(stopCamera:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 @end
 
+@interface RCT_EXTERN_MODULE(MaculusKeepAwake, NSObject)
+RCT_EXTERN_METHOD(setEnabled:(BOOL)enabled
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+@end
+
 @interface RCT_EXTERN_MODULE(MaculusVoiceCommand, RCTEventEmitter)
 RCT_EXTERN_METHOD(isAvailable:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

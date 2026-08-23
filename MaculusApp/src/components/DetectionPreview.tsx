@@ -1,5 +1,13 @@
 ﻿import React from 'react';
-import { Image, StyleSheet, Text, View } from 'react-native';
+import {
+  Image,
+  ImageLoadEventData,
+  LayoutChangeEvent,
+  NativeSyntheticEvent,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Detection } from '../types';
 
 interface Props {
@@ -10,17 +18,53 @@ interface Props {
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 
-const parseAspectRatio = (resolution: string | null): number => {
+export interface FrameDimensions {
+  width: number;
+  height: number;
+}
+
+export interface ContainedFrameRect extends FrameDimensions {
+  x: number;
+  y: number;
+}
+
+export const parseFrameDimensions = (resolution: string | null): FrameDimensions | null => {
   if (!resolution) {
-    return 4 / 3;
+    return null;
   }
   const match = resolution.match(/^(\d+)x(\d+)$/i);
   if (!match) {
-    return 4 / 3;
+    return null;
   }
   const width = Number(match[1]);
   const height = Number(match[2]);
-  return width > 0 && height > 0 ? width / height : 4 / 3;
+  return width > 0 && height > 0 ? { width, height } : null;
+};
+
+export const calculateContainedFrame = (
+  container: FrameDimensions,
+  frame: FrameDimensions,
+): ContainedFrameRect => {
+  if (
+    container.width <= 0 || container.height <= 0 ||
+    frame.width <= 0 || frame.height <= 0
+  ) {
+    return {
+      x: 0,
+      y: 0,
+      width: Math.max(0, container.width),
+      height: Math.max(0, container.height),
+    };
+  }
+  const scale = Math.min(container.width / frame.width, container.height / frame.height);
+  const width = frame.width * scale;
+  const height = frame.height * scale;
+  return {
+    x: (container.width - width) / 2,
+    y: (container.height - height) / 2,
+    width,
+    height,
+  };
 };
 
 export const DetectionPreview: React.FC<Props> = ({
@@ -28,15 +72,59 @@ export const DetectionPreview: React.FC<Props> = ({
   resolution,
   detections,
 }) => {
+  const declaredDimensions = parseFrameDimensions(resolution);
+  const [decodedFrame, setDecodedFrame] = React.useState<{
+    resolution: string | null;
+    dimensions: FrameDimensions;
+  } | null>(null);
+  const [containerDimensions, setContainerDimensions] = React.useState<FrameDimensions | null>(null);
+  const decodedDimensions = decodedFrame?.resolution === resolution
+    ? decodedFrame.dimensions
+    : null;
+  // Image.onLoad reports the pixels React Native actually renders, including
+  // decoded orientation metadata. That geometry is authoritative for boxes;
+  // native resolution is only the initial layout hint.
+  const frameDimensions = decodedDimensions || declaredDimensions || { width: 4, height: 3 };
+  const aspectRatio = frameDimensions.width / frameDimensions.height;
+  const containedFrame = containerDimensions
+    ? calculateContainedFrame(containerDimensions, frameDimensions)
+    : null;
+
+  const handleImageLoad = (event: NativeSyntheticEvent<ImageLoadEventData>) => {
+    const { width, height } = event.nativeEvent.source;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+      return;
+    }
+    setDecodedFrame(current => {
+      if (
+        current?.resolution === resolution &&
+        current.dimensions.width === width &&
+        current.dimensions.height === height
+      ) {
+        return current;
+      }
+      return { resolution, dimensions: { width, height } };
+    });
+  };
+
+  const handleLayout = (event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    setContainerDimensions(current => {
+      if (current?.width === width && current.height === height) {
+        return current;
+      }
+      return { width, height };
+    });
+  };
+
   if (!frameBase64) {
     return null;
   }
 
-  const aspectRatio = parseAspectRatio(resolution);
-
   return (
     <View
       style={[styles.container, { aspectRatio }]}
+      onLayout={handleLayout}
       accessibilityLabel="Live camera preview with detected objects"
       accessibilityRole="image"
     >
@@ -44,8 +132,20 @@ export const DetectionPreview: React.FC<Props> = ({
         source={{ uri: `data:image/jpeg;base64,${frameBase64}` }}
         style={styles.image}
         resizeMode="contain"
+        onLoad={handleImageLoad}
       />
-      <View style={styles.overlay} pointerEvents="none">
+      <View
+        style={[
+          styles.overlay,
+          containedFrame && {
+            left: containedFrame.x,
+            top: containedFrame.y,
+            width: containedFrame.width,
+            height: containedFrame.height,
+          },
+        ]}
+        pointerEvents="none"
+      >
         <View style={styles.counter}>
           <Text style={styles.counterText}>
             {detections.length} {detections.length === 1 ? 'object' : 'objects'}
@@ -101,7 +201,11 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    width: '100%',
+    height: '100%',
   },
   counter: {
     position: 'absolute',

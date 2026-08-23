@@ -192,9 +192,12 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
 
     private data class Letterbox(
         val bitmap: Bitmap,
-        val scale: Float,
+        val scaleX: Float,
+        val scaleY: Float,
         val padX: Float,
-        val padY: Float
+        val padY: Float,
+        val sourceWidth: Int,
+        val sourceHeight: Int
     )
 
     private data class Det(
@@ -252,7 +255,15 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
         canvas.drawBitmap(scaled, padX, padY, null)
         scaled.recycle()
 
-        return Letterbox(canvasBmp, scale, padX, padY)
+        return Letterbox(
+            canvasBmp,
+            newW.toFloat() / srcW,
+            newH.toFloat() / srcH,
+            padX,
+            padY,
+            srcW,
+            srcH
+        )
     }
 
     private fun fillInputBuffer(bmp: Bitmap): ByteBuffer {
@@ -338,16 +349,17 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             val modelW = if (outputIsNormalized) rawW * INPUT_SIZE else rawW
             val modelH = if (outputIsNormalized) rawH * INPUT_SIZE else rawH
 
-            val origCx = (modelCx - lb.padX) / lb.scale
-            val origCy = (modelCy - lb.padY) / lb.scale
-            val origW = modelW / lb.scale
-            val origH = modelH / lb.scale
-            val origImgW = (INPUT_SIZE - 2 * lb.padX) / lb.scale
-            val origImgH = (INPUT_SIZE - 2 * lb.padY) / lb.scale
-            val nCx = (origCx / origImgW).coerceIn(0f, 1f)
-            val nCy = (origCy / origImgH).coerceIn(0f, 1f)
-            val nW = (origW / origImgW).coerceIn(0f, 1f)
-            val nH = (origH / origImgH).coerceIn(0f, 1f)
+            val origCx = (modelCx - lb.padX) / lb.scaleX
+            val origCy = (modelCy - lb.padY) / lb.scaleY
+            val origW = modelW / lb.scaleX
+            val origH = modelH / lb.scaleY
+            // Normalize against the decoded source pixels, not dimensions
+            // reconstructed from rounded letterbox padding. This keeps boxes
+            // aligned for arbitrary phone-camera sizes and aspect ratios.
+            val nCx = (origCx / lb.sourceWidth.toFloat()).coerceIn(0f, 1f)
+            val nCy = (origCy / lb.sourceHeight.toFloat()).coerceIn(0f, 1f)
+            val nW = (origW / lb.sourceWidth.toFloat()).coerceIn(0f, 1f)
+            val nH = (origH / lb.sourceHeight.toFloat()).coerceIn(0f, 1f)
             val x1 = (nCx - nW / 2).coerceIn(0f, 1f)
             val y1 = (nCy - nH / 2).coerceIn(0f, 1f)
             val x2 = (nCx + nW / 2).coerceIn(0f, 1f)

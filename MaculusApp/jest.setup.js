@@ -122,3 +122,7 @@ NativeModules.MaculusDeviceCamera = {
   }),
   stopCamera: jest.fn().mockResolvedValue(undefined),
 };
+
+NativeModules.MaculusKeepAwake = {
+  setEnabled: jest.fn().mockResolvedValue(undefined),
+};
