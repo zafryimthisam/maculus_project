@@ -69,3 +69,64 @@ export interface DepthEstimation {
 }
 
 export type Zone = 'left' | 'ahead' | 'right';
+
+export type RiskState = 'none' | 'advisory' | 'warning' | 'emergency';
+export type PersonCountBand = 'none' | 'one' | 'two-to-three' | 'crowded';
+export type GuidanceEventKind =
+  | 'person-movement'
+  | 'risk'
+  | 'path-change'
+  | 'scene-change'
+  | 'sensor';
+
+export interface PersonEmbedding {
+  detectionIndex: number;
+  embedding: number[];
+}
+
+export interface ReIdModelInfo {
+  available: boolean;
+  backend: string;
+  inputWidth?: number;
+  inputHeight?: number;
+  embeddingSize?: number;
+  alreadyLoaded?: boolean;
+}
+
+export interface TrackedEntity {
+  id: number;
+  label: string;
+  alias?: string;
+  aliasReliable: boolean;
+  confirmed: boolean;
+  zone: Zone;
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+  nearScore?: number;
+  confidence: number;
+  risk: RiskState;
+  inPath: boolean;
+  approaching: boolean;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
+export interface SceneSnapshot {
+  timestamp: number;
+  tracks: TrackedEntity[];
+  pathState: 'clear' | 'blocked';
+  personCountBand: PersonCountBand;
+  environment: string | null;
+}
+
+export interface GuidanceEvent {
+  key: string;
+  kind: GuidanceEventKind;
+  priority: 0 | 1 | 2;
+  text: string;
+  expiresAt: number;
+  haptic: boolean;
+  interruption: 'never' | 'after-command' | 'immediate';
+}

@@ -1,8 +1,16 @@
 import Tts from 'react-native-tts';
 import { Platform } from 'react-native';
+import { GuidanceEvent } from '../types';
 
 type SpeechKind = 'normal' | 'guidance';
-type SpeechItem = { text: string; priority: number; kind: SpeechKind };
+type SpeechItem = {
+  text: string;
+  priority: number;
+  kind: SpeechKind;
+  eventKey?: string;
+  eventKind?: GuidanceEvent['kind'];
+  expiresAt?: number;
+};
 
 /**
  * Production-grade TTS service with:
@@ -17,8 +25,11 @@ export class TTSService {
   private initPromise: Promise<void> | null = null;
   private queue: SpeechItem[] = [];
   private speaking = false;
+  private currentItem: SpeechItem | null = null;
+  private queueTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSpeakTime = 0;
   private lastText = '';
+  private lastGuidanceKeys = new Map<string, number>();
   private listeners: Array<{ name: string; handler: any }> = [];
   private speakingListeners = new Set<(speaking: boolean) => void>();
 
@@ -68,10 +79,12 @@ export class TTSService {
 
       // Track listeners for cleanup
       const finishHandler = () => {
+        this.currentItem = null;
         this.setSpeaking(false);
         this.processQueue();
       };
       const cancelHandler = () => {
+        this.currentItem = null;
         this.setSpeaking(false);
         this.processQueue();
       };
@@ -163,38 +176,62 @@ export class TTSService {
     }
   }
 
-  speakGuidance(text: string, priority: number = 0): void {
+  speakGuidance(event: GuidanceEvent): void {
     if (!this.initialized) {
-      console.warn('[TTS] Not initialized, dropping guidance:', text);
+      console.warn('[TTS] Not initialized, dropping guidance:', event.text);
       return;
     }
 
-    if (priority >= 2) {
+    const now = Date.now();
+    if (event.expiresAt <= now) {
+      return;
+    }
+    const lastForKey = this.lastGuidanceKeys.get(event.key) || 0;
+    if (
+      this.currentItem?.eventKey === event.key ||
+      this.queue.some(item => item.eventKey === event.key) ||
+      now - lastForKey < this.cooldownFor(event.priority)
+    ) {
+      return;
+    }
+
+    const item: SpeechItem = {
+      text: event.text,
+      priority: event.priority,
+      kind: 'guidance',
+      eventKey: event.key,
+      eventKind: event.kind,
+      expiresAt: event.expiresAt,
+    };
+
+    if (event.interruption === 'immediate' || event.priority >= 2) {
       if (this.speaking || this.queue.length > 0) {
-        this.interrupt(text, priority, 'guidance');
+        this.interruptItem(item);
       } else {
-        this.enqueue(text, priority, 'guidance');
+        this.enqueueItem(item);
         this.processQueue();
       }
       return;
     }
 
-    if (text === this.lastText || this.queue.some(q => q.kind === 'guidance' && q.text === text)) {
-      return;
-    }
-
-    this.replaceQueuedGuidance(text, priority);
-    if (!this.speaking && Date.now() - this.lastSpeakTime >= this.cooldownFor(priority)) {
-      this.processQueue();
+    this.replaceQueuedGuidance(item);
+    if (!this.speaking) {
+      const remaining = this.cooldownFor(event.priority) - (now - this.lastSpeakTime);
+      if (remaining <= 0) {this.processQueue();}
+      else {this.scheduleQueue(remaining);}
     }
   }
 
   private interrupt(text: string, priority: number, kind: SpeechKind = 'normal'): void {
+    this.interruptItem({ text, priority, kind });
+  }
+
+  private interruptItem(item: SpeechItem): void {
     Tts.stop();
+    this.currentItem = null;
     this.setSpeaking(false);
-    // Prepend new high-priority message
-    this.queue = this.queue.filter(q => q.kind !== kind);
-    this.queue.unshift({ text, priority, kind });
+    this.queue = this.queue.filter(q => q.kind !== item.kind || q.priority >= item.priority);
+    this.queue.unshift(item);
     // Trim queue
     if (this.queue.length > this.MAX_QUEUE_SIZE) {
       this.queue = this.queue.slice(0, this.MAX_QUEUE_SIZE);
@@ -204,7 +241,11 @@ export class TTSService {
   }
 
   private enqueue(text: string, priority: number, kind: SpeechKind = 'normal'): void {
-    this.queue.push({ text, priority, kind });
+    this.enqueueItem({ text, priority, kind });
+  }
+
+  private enqueueItem(item: SpeechItem): void {
+    this.queue.push(item);
     if (this.queue.length > this.MAX_QUEUE_SIZE) {
       // Drop oldest low-priority items first
       const firstNormal = this.queue.findIndex((q) => q.priority === 0);
@@ -216,9 +257,16 @@ export class TTSService {
     }
   }
 
-  private replaceQueuedGuidance(text: string, priority: number): void {
-    this.queue = this.queue.filter(q => q.kind !== 'guidance');
-    this.enqueue(text, priority, 'guidance');
+  private replaceQueuedGuidance(item: SpeechItem): void {
+    this.queue = this.queue.filter(q => {
+      if (q.kind !== 'guidance') {return true;}
+      if (q.eventKey === item.eventKey) {return false;}
+      if (item.eventKind === 'scene-change' || item.eventKind === 'path-change') {
+        return q.eventKind !== 'scene-change' && q.eventKind !== 'path-change';
+      }
+      return q.priority > item.priority;
+    });
+    this.enqueueItem(item);
   }
 
   private cooldownFor(priority: number): number {
@@ -229,20 +277,35 @@ export class TTSService {
       : this.NORMAL_COOLDOWN;
   }
 
+  private scheduleQueue(delay: number): void {
+    if (this.queueTimer) {clearTimeout(this.queueTimer);}
+    this.queueTimer = setTimeout(() => {
+      this.queueTimer = null;
+      this.processQueue();
+    }, Math.max(0, delay));
+  }
+
   private processQueue(): void {
     if (this.speaking || this.queue.length === 0) {
       return;
     }
 
+    const now = Date.now();
+    this.queue = this.queue.filter(item => item.expiresAt === undefined || item.expiresAt > now);
+    if (this.queue.length === 0) {return;}
+    this.queue.sort((a, b) => b.priority - a.priority);
     const item = this.queue.shift()!;
     this.lastText = item.text;
-    this.lastSpeakTime = Date.now();
+    this.lastSpeakTime = now;
+    this.currentItem = item;
+    if (item.eventKey) {this.lastGuidanceKeys.set(item.eventKey, now);}
     this.setSpeaking(true);
 
     try {
       Tts.speak(item.text);
     } catch (err: any) {
       console.error('[TTS] Speak error:', err);
+      this.currentItem = null;
       this.setSpeaking(false);
       this.processQueue();
     }
@@ -258,9 +321,13 @@ export class TTSService {
 
   stop(): void {
     Tts.stop();
+    if (this.queueTimer) {clearTimeout(this.queueTimer);}
+    this.queueTimer = null;
     this.queue = [];
+    this.currentItem = null;
     this.setSpeaking(false);
     this.lastText = '';
+    this.lastGuidanceKeys.clear();
   }
 
   destroy(): void {

@@ -11,21 +11,21 @@ import {
 } from '../api/piClient';
 import { detectionService } from '../services/DetectionService';
 import { depthService } from '../services/DepthService';
-import { buildGuidance, describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
+import { reIdService } from '../services/ReIdService';
+import { TemporalSceneEngine } from '../services/TemporalSceneEngine';
+import { describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
 import { executeVoiceCommand, voiceCommandService, VoiceCommand, VoiceCommandStatus, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
-import { DepthEstimation, DistanceReading, Detection } from '../types';
+import { CapturedFrame, DistanceReading, Detection, GuidanceEvent, PersonEmbedding, TrackedEntity } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
-const OBSTACLE_ANNOUNCE_COOLDOWN_MS = 8000;
-const OBSTACLE_DISTANCE_DELTA_CM = 15;
+const OBSTACLE_DISTANCE_DELTA_CM = 20;
 const OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS = 12000;
 const LOOP_IDLE_DELAY_MS = 80;
 const LOOP_ERROR_DELAY_MS = 500;
 const DEPTH_INTERVAL_MS = 1500;
-const NORMAL_GUIDANCE_SPEECH_INTERVAL_MS = 3200;
-const HIGH_GUIDANCE_SPEECH_INTERVAL_MS = 1500;
-const EMERGENCY_GUIDANCE_SPEECH_INTERVAL_MS = 700;
+const REID_INTERVAL_MS = 500;
+const MAX_REID_PEOPLE_PER_FRAME = 4;
 const HAPTIC_COOLDOWN_MS = 3000;
 
 export function useVisionAssistant() {
@@ -56,8 +56,8 @@ export function useVisionAssistant() {
   const isDepthReadyRef = useRef(false);
   const oneShotBusyRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
-  const lastObstacleTimeRef = useRef(0);
   const lastObstacleDistRef = useRef(999);
+  const idleObstacleActiveRef = useRef(false);
   const suppressDistanceSpeechUntilRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const distanceTimerRef = useRef<number | null>(null);
@@ -65,7 +65,10 @@ export function useVisionAssistant() {
   const hapticAlertsEnabledRef = useRef(true);
   const depthBusyRef = useRef(false);
   const lastDepthTimeRef = useRef(0);
-  const lastDepthResultRef = useRef<DepthEstimation | null>(null);
+  const isReIdReadyRef = useRef(false);
+  const lastReIdTimeRef = useRef(0);
+  const temporalEngineRef = useRef(new TemporalSceneEngine());
+  const deferredGuidanceRef = useRef<GuidanceEvent | null>(null);
 
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
   useEffect(() => { distanceRef.current = distance; }, [distance]);
@@ -75,6 +78,7 @@ export function useVisionAssistant() {
 
   useEffect(() => {
     let cancelled = false;
+    const temporalEngine = temporalEngineRef.current;
     const init = async () => {
       try {
         await tts.init();
@@ -118,6 +122,7 @@ export function useVisionAssistant() {
     return () => {
       cancelled = true;
       isGuidingRef.current = false;
+      temporalEngine.reset();
       voiceCommandService.stop();
       tts.destroy();
     };
@@ -171,6 +176,9 @@ export function useVisionAssistant() {
       }
       setPiUrlState(discoveredUrl);
       const status = await fetchStatus();
+      temporalEngineRef.current.reset();
+      deferredGuidanceRef.current = null;
+      idleObstacleActiveRef.current = false;
       setCameraAvailable(!!status.camera);
       setIsConnected(true);
       try {
@@ -231,14 +239,20 @@ export function useVisionAssistant() {
           if (voiceCommandService.isCommandCaptureActive() || oneShotBusyRef.current || now < suppressDistanceSpeechUntilRef.current) {
             return;
           }
-          const dt = now - lastObstacleTimeRef.current;
           const spokenDistance = formatObstacleDistance(d.distance_cm);
-          const dd = Math.abs(spokenDistance - lastObstacleDistRef.current);
-          if (dt > OBSTACLE_ANNOUNCE_COOLDOWN_MS || dd >= OBSTACLE_DISTANCE_DELTA_CM) {
-            lastObstacleTimeRef.current = now;
+          const movedCloser = lastObstacleDistRef.current - spokenDistance >= OBSTACLE_DISTANCE_DELTA_CM;
+          if (!idleObstacleActiveRef.current || movedCloser) {
+            idleObstacleActiveRef.current = true;
             lastObstacleDistRef.current = spokenDistance;
-            tts.speak('Obstacle ahead, ' + spokenDistance + ' centimeters', 1);
+            const emergency = spokenDistance <= 40;
+            tts.speak(
+              (emergency ? 'Stop! Obstacle, ' : 'Caution, obstacle, ') + spokenDistance + ' centimeters ahead.',
+              emergency ? 2 : 1,
+            );
           }
+        } else if (!d.obstacle) {
+          idleObstacleActiveRef.current = false;
+          lastObstacleDistRef.current = 999;
         }
       } catch { /* silent on polling */ }
     };
@@ -260,41 +274,25 @@ export function useVisionAssistant() {
 
   const runYoloOnce = useCallback(async (
     signal: AbortSignal,
-  ): Promise<{ detections: Detection[]; frameBase64: string }> => {
+  ): Promise<{ detections: Detection[]; frame: CapturedFrame }> => {
     const frame = await fetchFrame(signal);
     if (signal.aborted) {
-      return { detections: [], frameBase64: frame.base64 };
+      return { detections: [], frame };
     }
     const detections = await detectionService.detectObjects(frame.base64);
     if (signal.aborted) {
-      return { detections: [], frameBase64: frame.base64 };
+      return { detections: [], frame };
     }
     setPreviewFrameBase64(frame.base64);
     setPreviewResolution(frame.resolution);
     setPreviewDetections(detections);
     setLastObjects(summarizeObjects(detections));
-    return { detections, frameBase64: frame.base64 };
-  }, []);
-
-  const applyDepthToDetections = useCallback((
-    detections: Detection[],
-    depth: DepthEstimation | null,
-  ): Detection[] => {
-    if (!depth?.objectDepths?.length) {
-      return detections;
-    }
-    const nearByIndex = new Map<number, number>();
-    for (const item of depth.objectDepths) {
-      nearByIndex.set(item.index, Math.max(0, Math.min(1, item.nearScore)));
-    }
-    return detections.map((detection, index) => {
-      const nearScore = nearByIndex.get(index);
-      return nearScore === undefined ? detection : { ...detection, nearScore };
-    });
+    return { detections, frame };
   }, []);
 
   const maybeStartDepthEstimate = useCallback((
-    frameBase64: string,
+    frame: CapturedFrame,
+    frameKey: string,
     detections: Detection[],
   ) => {
     if (!isDepthReadyRef.current || depthBusyRef.current) {
@@ -306,10 +304,10 @@ export function useVisionAssistant() {
     }
     lastDepthTimeRef.current = now;
     depthBusyRef.current = true;
-    depthService.estimateDepth(frameBase64, detections)
+    depthService.estimateDepth(frame.base64, detections)
       .then((depth) => {
         if (depth) {
-          lastDepthResultRef.current = depth;
+          temporalEngineRef.current.applyDepth(frameKey, depth, Date.now());
         }
       })
       .finally(() => {
@@ -317,39 +315,67 @@ export function useVisionAssistant() {
       });
   }, []);
 
+  const maybeEmbedPeople = useCallback(async (
+    frame: CapturedFrame,
+    detections: Detection[],
+  ): Promise<PersonEmbedding[]> => {
+    if (!isReIdReadyRef.current) {return [];}
+    const now = Date.now();
+    if (now - lastReIdTimeRef.current < REID_INTERVAL_MS) {return [];}
+    const indices = detections
+      .map((detection, index) => ({ detection, index }))
+      .filter(item => item.detection.label === 'person')
+      .sort((a, b) => {
+        const aScore = a.detection.w * a.detection.h + (1 - Math.abs(a.detection.cx - 0.5));
+        const bScore = b.detection.w * b.detection.h + (1 - Math.abs(b.detection.cx - 0.5));
+        return bScore - aScore;
+      })
+      .slice(0, MAX_REID_PEOPLE_PER_FRAME)
+      .map(item => item.index);
+    if (indices.length === 0) {return [];}
+    lastReIdTimeRef.current = now;
+    return reIdService.embedPeople(frame.base64, detections, indices);
+  }, []);
+
   const guidanceLoop = useCallback(async () => {
     let lastFrameTime = Date.now();
     let smoothedFps = 0;
-    let lastGuidanceSpeakTime = 0;
 
-    const guidanceSpeechInterval = (priority: number): number => {
-      if (priority >= 2) {
-        return EMERGENCY_GUIDANCE_SPEECH_INTERVAL_MS;
-      }
-      if (priority >= 1) {
-        return HIGH_GUIDANCE_SPEECH_INTERVAL_MS;
-      }
-      return NORMAL_GUIDANCE_SPEECH_INTERVAL_MS;
-    };
-
-    const maybeSpeakGuidance = (textToSpeak: string, priority: number) => {
-      if (voiceCommandService.isCommandCaptureActive()) {
+    const dispatchEvent = (event: GuidanceEvent) => {
+      const capturingCommand = voiceCommandService.isCommandCaptureActive();
+      if (capturingCommand && event.interruption !== 'immediate') {
+        if (event.interruption === 'after-command') {
+          const pending = deferredGuidanceRef.current;
+          if (!pending || event.priority >= pending.priority) {
+            deferredGuidanceRef.current = event;
+          }
+        }
         return;
       }
-      const now = Date.now();
-      if (now - lastGuidanceSpeakTime < guidanceSpeechInterval(priority)) {
-        return;
-      }
-      tts.speakGuidance(textToSpeak, priority);
-      lastGuidanceSpeakTime = now;
+      tts.speakGuidance(event);
+      if (event.haptic) {triggerGuidanceHaptic(event.priority);}
     };
 
     while (isGuidingRef.current && isConnectedRef.current) {
+      const deferred = deferredGuidanceRef.current;
+      if (
+        deferred && !voiceCommandService.isCommandCaptureActive() &&
+        deferred.expiresAt > Date.now()
+      ) {
+        deferredGuidanceRef.current = null;
+        dispatchEvent(deferred);
+      } else if (deferred && deferred.expiresAt <= Date.now()) {
+        deferredGuidanceRef.current = null;
+      }
+
       if (!cameraAvailableRef.current) {
-        const d = distanceRef.current;
-        if (d?.obstacle) {
-          maybeSpeakGuidance('Caution, obstacle ' + formatObstacleDistance(d.distance_cm) + ' centimeters ahead.', 1);
-        }
+        const update = temporalEngineRef.current.update({
+          frameKey: `sensor:${Date.now()}`,
+          timestamp: Date.now(),
+          detections: [],
+          distance: distanceRef.current,
+        });
+        update.events.forEach(dispatchEvent);
         await sleep(800);
         continue;
       }
@@ -357,18 +383,27 @@ export function useVisionAssistant() {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const { detections, frameBase64 } = await runYoloOnce(controller.signal);
+        const { detections, frame } = await runYoloOnce(controller.signal);
         if (!isGuidingRef.current) {
           break;
         }
 
-        maybeStartDepthEstimate(frameBase64, detections);
-        const depthAdjustedDetections = applyDepthToDetections(detections, lastDepthResultRef.current);
-        const guidance = buildGuidance(depthAdjustedDetections, distanceRef.current);
-        maybeSpeakGuidance(guidance.text, guidance.priority);
-        if (guidance.haptic) {
-          triggerGuidanceHaptic(guidance.priority);
-        }
+        const frameKey = capturedFrameKey(frame);
+        const personEmbeddings = await maybeEmbedPeople(frame, detections);
+        if (!isGuidingRef.current) {break;}
+        const update = temporalEngineRef.current.update({
+          frameKey,
+          timestamp: Date.now(),
+          detections,
+          distance: distanceRef.current,
+          personEmbeddings,
+        });
+        // Start depth only after the engine has stored this frame's
+        // detection-to-track assignments. The async result can then update the
+        // correct tracks even if later YOLO frames arrive in a different order.
+        maybeStartDepthEstimate(frame, frameKey, detections);
+        setLastObjects(summarizeTrackedEntities(update.snapshot.tracks));
+        update.events.forEach(dispatchEvent);
 
         const now = Date.now();
         const dt = now - lastFrameTime;
@@ -389,9 +424,17 @@ export function useVisionAssistant() {
           setPreviewFrameBase64(null);
           setPreviewResolution(null);
           setPreviewDetections([]);
-          if (!voiceCommandService.isCommandCaptureActive()) {
-            tts.speakGuidance('Camera not available. Distance monitoring active.', 1);
-          }
+          temporalEngineRef.current.reset();
+          deferredGuidanceRef.current = null;
+          dispatchEvent({
+            key: 'system:camera-unavailable',
+            kind: 'sensor',
+            priority: 1,
+            text: 'Camera not available. Distance monitoring active.',
+            expiresAt: Date.now() + 5000,
+            haptic: false,
+            interruption: 'after-command',
+          });
         }
         await sleep(LOOP_ERROR_DELAY_MS);
       } finally {
@@ -401,7 +444,7 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [applyDepthToDetections, maybeStartDepthEstimate, runYoloOnce, triggerGuidanceHaptic]);
+  }, [maybeEmbedPeople, maybeStartDepthEstimate, runYoloOnce, triggerGuidanceHaptic]);
 
   const startGuiding = useCallback(() => {
     if (isGuidingRef.current) {
@@ -411,6 +454,13 @@ export function useVisionAssistant() {
       tts.speak('Not connected', 1, true);
       return;
     }
+    temporalEngineRef.current.reset();
+    deferredGuidanceRef.current = null;
+    idleObstacleActiveRef.current = false;
+    lastReIdTimeRef.current = 0;
+    reIdService.loadModel().then(info => {
+      isReIdReadyRef.current = info.available;
+    });
     isGuidingRef.current = true;
     setIsGuiding(true);
     setIsProcessing(true);
@@ -428,6 +478,8 @@ export function useVisionAssistant() {
     }
     isGuidingRef.current = false;
     setIsGuiding(false);
+    temporalEngineRef.current.reset();
+    deferredGuidanceRef.current = null;
     cancelInFlight();
     cancelHaptics(true);
     tts.stop();
@@ -483,8 +535,8 @@ export function useVisionAssistant() {
       const guidance = describeScene(detections, distanceRef.current);
       const currentDistance = distanceRef.current;
       if (currentDistance?.obstacle) {
-        lastObstacleTimeRef.current = Date.now();
         lastObstacleDistRef.current = formatObstacleDistance(currentDistance.distance_cm);
+        idleObstacleActiveRef.current = true;
       }
       suppressDistanceSpeechUntilRef.current = Date.now() + OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS;
       tts.speak(guidance.text, Math.max(guidance.priority, 1), true);
@@ -555,6 +607,8 @@ export function useVisionAssistant() {
     if (!isConnected && isGuidingRef.current) {
       isGuidingRef.current = false;
       setIsGuiding(false);
+      temporalEngineRef.current.reset();
+      deferredGuidanceRef.current = null;
       cancelInFlight();
       cancelHaptics(true);
     }
@@ -593,4 +647,21 @@ export function useVisionAssistant() {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function capturedFrameKey(frame: CapturedFrame): string {
+  if (frame.frameId !== null) {return `frame:${frame.frameId}`;}
+  if (frame.capturedAt !== null) {return `captured:${frame.capturedAt}`;}
+  return `local:${Date.now()}`;
+}
+
+function summarizeTrackedEntities(tracks: TrackedEntity[]): string {
+  return tracks.map(track => {
+    const name = track.label === 'person' && track.alias && track.aliasReliable
+      ? `${track.alias} (person)`
+      : track.label;
+    const location = track.zone === 'ahead' ? 'ahead' : `to your ${track.zone}`;
+    const risk = track.risk === 'none' ? '' : `, ${track.risk}`;
+    return `${name} (${location}${risk})`;
+  }).join(' · ');
 }

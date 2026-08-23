@@ -74,6 +74,23 @@ NativeModules.MaculusDepth = {
   }),
 };
 
+// Optional anonymous person ReID module. Tests use tiny deterministic vectors.
+NativeModules.MaculusReId = {
+  loadModel: jest.fn().mockResolvedValue({
+    available: true,
+    backend: 'ONNX Runtime',
+    inputWidth: 128,
+    inputHeight: 256,
+    embeddingSize: 3,
+  }),
+  embedPeople: jest.fn().mockImplementation((_image, _detections, indices) =>
+    Promise.resolve(indices.map((detectionIndex) => ({
+      detectionIndex,
+      embedding: detectionIndex % 2 === 0 ? [1, 0, 0] : [0, 1, 0],
+    }))),
+  ),
+};
+
 // Mock wake-word and one-shot voice command module.
 NativeModules.MaculusVoiceCommand = {
   isAvailable: jest.fn().mockResolvedValue({

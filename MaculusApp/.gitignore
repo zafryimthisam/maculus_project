@@ -22,6 +22,7 @@ ios/.xcode.env.local
 *.onnx
 !android/app/src/main/assets/wakeword/
 !android/app/src/main/assets/wakeword/*.onnx
+!android/app/src/main/assets/person_reid_osnet_x0_25.onnx
 MaculusApp/android/app/src/main/assets/smolvlm/onnx/*.onnx
 
 # Android/IntelliJ

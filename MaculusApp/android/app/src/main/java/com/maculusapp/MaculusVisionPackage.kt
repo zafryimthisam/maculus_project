@@ -11,6 +11,7 @@ class MaculusVisionPackage : ReactPackage {
     ): List<NativeModule> = listOf(
         MaculusVisionModule(reactContext),
         MaculusDepthModule(reactContext),
+        MaculusReIdModule(reactContext),
         MaculusVoiceCommandModule(reactContext)
     )
 

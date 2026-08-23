@@ -1,17 +1,34 @@
 import { describe, expect, it, beforeEach, afterEach, jest } from '@jest/globals';
 import Tts from 'react-native-tts';
 import { TTSService } from '../src/services/TTSService';
+import { GuidanceEvent } from '../src/types';
 
 type QueuedSpeech = { text: string; priority: number; kind: string };
 type TestableTTSService = {
   init(): Promise<void>;
-  speakGuidance(text: string, priority?: number): void;
+  speakGuidance(event: GuidanceEvent): void;
   stop(): void;
   queue: QueuedSpeech[];
   speaking: boolean;
   lastSpeakTime: number;
   lastText: string;
 };
+
+const guidance = (
+  key: string,
+  text: string,
+  priority: 0 | 1 | 2 = 0,
+  overrides: Partial<GuidanceEvent> = {},
+): GuidanceEvent => ({
+  key,
+  text,
+  priority,
+  kind: priority > 0 ? 'risk' : 'scene-change',
+  expiresAt: Date.now() + 10000,
+  haptic: false,
+  interruption: priority === 2 ? 'immediate' : priority === 1 ? 'after-command' : 'never',
+  ...overrides,
+});
 
 const createService = async (): Promise<TestableTTSService> => {
   const service = new TTSService() as unknown as TestableTTSService;
@@ -34,8 +51,8 @@ describe('TTSService guidance speech', () => {
     const service = await createService();
     service.speaking = true;
 
-    service.speakGuidance('Chair ahead.', 0);
-    service.speakGuidance('Person ahead.', 0);
+    service.speakGuidance(guidance('scene:ambient', 'Chair ahead.'));
+    service.speakGuidance(guidance('scene:ambient-2', 'Person ahead.'));
 
     const guidanceItems = service.queue.filter(item => item.kind === 'guidance');
     expect(guidanceItems).toHaveLength(1);
@@ -46,7 +63,7 @@ describe('TTSService guidance speech', () => {
     const service = await createService();
     service.speaking = true;
 
-    service.speakGuidance('Person ahead.', 0);
+    service.speakGuidance(guidance('scene:ambient', 'Person ahead.'));
 
     expect(Tts.stop).not.toHaveBeenCalled();
     expect(service.queue[0]).toMatchObject({ text: 'Person ahead.', kind: 'guidance' });
@@ -57,7 +74,7 @@ describe('TTSService guidance speech', () => {
     const service = await createService();
     service.speaking = true;
 
-    service.speakGuidance('Stop now.', 2);
+    service.speakGuidance(guidance('sensor:emergency', 'Stop now.', 2));
 
     expect(Tts.stop).toHaveBeenCalledTimes(1);
     expect(service.queue[0]).toMatchObject({ text: 'Stop now.', priority: 2, kind: 'guidance' });
@@ -66,13 +83,45 @@ describe('TTSService guidance speech', () => {
   it('clears pending guidance on stop', async () => {
     const service = await createService();
     service.speaking = true;
-    service.speakGuidance('Person ahead.', 0);
+    service.speakGuidance(guidance('scene:ambient', 'Person ahead.'));
 
     service.stop();
 
     expect(service.queue).toHaveLength(0);
     expect(service.speaking).toBe(false);
     expect(Tts.stop).toHaveBeenCalled();
+  });
+
+  it('drops guidance that expired before it reached the queue', async () => {
+    const service = await createService();
+    service.speaking = true;
+
+    service.speakGuidance(guidance('scene:stale', 'Old scene.', 0, { expiresAt: Date.now() - 1 }));
+
+    expect(service.queue).toHaveLength(0);
+  });
+
+  it('deduplicates a semantic event key even if its wording changes', async () => {
+    const service = await createService();
+    service.speaking = true;
+
+    service.speakGuidance(guidance('person:7:movement', 'Alex moved right.'));
+    service.speakGuidance(guidance('person:7:movement', 'Alex is to your right.'));
+
+    expect(service.queue).toHaveLength(1);
+    expect(service.queue[0].text).toBe('Alex moved right.');
+  });
+
+  it('speaks a queued event when its cooldown expires without needing another event', async () => {
+    jest.useFakeTimers();
+    const service = await createService();
+    service.lastSpeakTime = Date.now();
+
+    service.speakGuidance(guidance('scene:new', 'The room changed.'));
+    expect(Tts.speak).not.toHaveBeenCalled();
+
+    jest.advanceTimersByTime(3500);
+    expect(Tts.speak).toHaveBeenCalledWith('The room changed.');
   });
 });
 
