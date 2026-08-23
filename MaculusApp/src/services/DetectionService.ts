@@ -26,7 +26,7 @@ class DetectionService {
   async loadModels(): Promise<ModelInfo> {
     if (!MaculusVision) {
       throw new Error(
-        'MaculusVision native module not found. Rebuild the Android app (npm run android).'
+        'MaculusVision native module not found. Rebuild the native Android or iOS app.'
       );
     }
     if (this.loaded) {

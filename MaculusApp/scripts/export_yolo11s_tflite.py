@@ -74,7 +74,7 @@ def main() -> None:
 
     print(f"Exported: {exported_tflite}")
     print(f"Copied to: {args.asset}")
-    print("Now rebuild Android so yolo11s.tflite is packaged into the APK.")
+    print("Now rebuild Android, or run pod install before rebuilding iOS.")
 
 
 if __name__ == "__main__":

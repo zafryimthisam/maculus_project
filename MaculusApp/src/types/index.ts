@@ -47,7 +47,7 @@ export interface Detection {
 }
 
 export interface ModelInfo {
-  backend: string; // "NNAPI" | "GPU" | "CPU"
+  backend: string; // Android accelerator or iOS TensorFlow Lite backend
   inputSize?: number;
   numAnchors?: number;
   quantized?: boolean;

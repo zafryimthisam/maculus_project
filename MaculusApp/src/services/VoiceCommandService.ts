@@ -423,10 +423,6 @@ function normalizeSpeech(text: string): string {
     .trim();
 }
 
-function containsAll(text: string, words: string[]): boolean {
-  return words.every(word => text.includes(word));
-}
-
 function containsAny(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word));
 }

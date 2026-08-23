@@ -13,6 +13,10 @@ end
 target 'MaculusApp' do
   config = use_native_modules!
 
+  # App-local iOS parity layer: YOLO, depth, anonymous person ReID,
+  # wake-word/command capture, and the phone-camera fallback.
+  pod 'MaculusNative', :path => '..'
+
   use_react_native!(
     :path => config[:reactNativePath],
     :app_path => "#{Pod::Config.instance.installation_root}/.."

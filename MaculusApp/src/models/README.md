@@ -4,7 +4,7 @@ Maculus uses one local AI path: YOLO object detection plus ultrasonic distance g
 
 ## Required Model
 
-Place the YOLO model at:
+Place the shared Android/iOS YOLO model at:
 
 ```text
 MaculusApp/android/app/src/main/assets/yolo11s.tflite
@@ -51,7 +51,8 @@ Copy-Item .\yolo11s_saved_model\yolo11s_full_integer_quant.tflite C:\Users\mimza
 - Continuous guidance: YOLO detections plus ultrasonic distance.
 - "What's around me?": one YOLO frame, summarized by the grounded guidance engine.
 - Emergency obstacle warnings remain driven by the ultrasonic sensor, with YOLO used to name central hazards when available.
-- The native Android module validates the model shape before use: input must be [1, 320, 320, 3], output must be [1, 84, anchors].
+- Both native mobile modules validate the model shape before use: input must be [1, 320, 320, 3], output must be [1, 84, anchors].
+- Android packages this directory directly. The iOS `MaculusNative` CocoaPod copies the same tracked model into the app bundle, avoiding duplicate model binaries in Git.
 
 ## Optional Depth Anything V2
 

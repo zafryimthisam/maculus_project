@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+BRANCH="${MACULUS_BRANCH:-main}"
+REMOTE="${MACULUS_REMOTE:-origin}"
+XCODE_JOBS="${MACULUS_XCODE_JOBS:-2}"
+OUTPUT_DIR="${MACULUS_OUTPUT_DIR:-$HOME/Downloads}"
+SYNC_FROM_GITHUB=1
+
+case "${1:-}" in
+  "") ;;
+  --no-sync) SYNC_FROM_GITHUB=0 ;;
+  *)
+    echo "Usage: $0 [--no-sync]" >&2
+    exit 2
+    ;;
+esac
+
+log() {
+  printf '\n==> %s\n' "$1"
+}
+
+fail() {
+  printf '\nERROR: %s\n' "$1" >&2
+  exit 1
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+[[ "$(uname -s)" == "Darwin" ]] || fail "This script must run on macOS."
+
+for command_name in git node npm ruby bundle xcodebuild python3 zip unzip plutil shasum; do
+  command_exists "$command_name" || fail "Required command is missing: $command_name"
+done
+
+REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" ||
+  fail "Run this inside the Maculus Git repository."
+
+if [[ -f "$REPOSITORY_ROOT/MaculusApp/package.json" ]]; then
+  APP_ROOT="$REPOSITORY_ROOT/MaculusApp"
+elif [[ -f "$REPOSITORY_ROOT/package.json" ]]; then
+  APP_ROOT="$REPOSITORY_ROOT"
+else
+  fail "Could not find the MaculusApp package from $REPOSITORY_ROOT"
+fi
+
+cd "$REPOSITORY_ROOT"
+CURRENT_BRANCH="$(git branch --show-current)"
+
+if [[ "$SYNC_FROM_GITHUB" -eq 1 ]]; then
+  [[ "$CURRENT_BRANCH" == "$BRANCH" ]] ||
+    fail "Switch to '$BRANCH' before syncing. Current branch: '$CURRENT_BRANCH'"
+  [[ -z "$(git status --porcelain --untracked-files=no)" ]] ||
+    fail "Tracked files have local changes. Commit or stash them before syncing."
+
+  log "Fast-forwarding from $REMOTE/$BRANCH"
+  git fetch "$REMOTE" "$BRANCH"
+  git merge --ff-only "$REMOTE/$BRANCH"
+fi
+
+ACTIVE_DEVELOPER_DIR="$(xcode-select -p 2>/dev/null || true)"
+[[ "$ACTIVE_DEVELOPER_DIR" == *"Xcode.app/Contents/Developer"* ]] ||
+  fail "Full Xcode is not selected. Run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+
+NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
+if (( NODE_MAJOR < 18 )); then
+  fail "Maculus requires Node 18 or newer. Current version: $(node --version)"
+fi
+
+cd "$APP_ROOT"
+
+log "Installing JavaScript dependencies"
+npm ci --no-audit --no-fund
+
+log "Installing CocoaPods dependencies and the local iOS vision modules"
+bundle config set --local path vendor/bundle
+bundle install --jobs 4 --retry 2
+(
+  cd ios
+  bundle exec pod install
+)
+
+# React Native's Xcode phase needs the same Node binary selected by this shell.
+printf 'export NODE_BINARY="%s"\n' "$(command -v node)" > ios/.xcode.env.local
+
+WORKSPACE="$(find "$APP_ROOT/ios" -maxdepth 1 -name "*.xcworkspace" -print -quit)"
+[[ -n "$WORKSPACE" ]] || fail "CocoaPods did not generate an iOS workspace."
+
+SCHEME_JSON="$(xcodebuild -workspace "$WORKSPACE" -list -json)"
+SCHEME="$(printf '%s' "$SCHEME_JSON" | python3 -c '
+import json
+import sys
+
+schemes = json.load(sys.stdin)["workspace"]["schemes"]
+print(next((item for item in schemes if item.lower() == "maculusapp"), schemes[0] if schemes else ""))
+'
+)"
+[[ -n "$SCHEME" ]] || fail "Could not determine the Maculus Xcode scheme."
+
+LOG_DIR="$APP_ROOT/tmp"
+BUILD_LOG="$LOG_DIR/ios-unsigned-build.log"
+mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
+DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/maculus-ios-derived.XXXXXX")"
+IPA_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/maculus-ios-ipa.XXXXXX")"
+
+cleanup() {
+  rm -rf "$DERIVED_DATA" "$IPA_TEMP"
+}
+trap cleanup EXIT
+
+log "Building unsigned Maculus for a physical iPhone with scheme '$SCHEME'"
+
+set +e
+xcodebuild \
+  -workspace "$WORKSPACE" \
+  -scheme "$SCHEME" \
+  -configuration Release \
+  -sdk iphoneos \
+  -destination "generic/platform=iOS" \
+  -derivedDataPath "$DERIVED_DATA" \
+  -jobs "$XCODE_JOBS" \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  DEVELOPMENT_TEAM="" \
+  COMPILER_INDEX_STORE_ENABLE=NO \
+  build 2>&1 | tee "$BUILD_LOG"
+XCODE_STATUS=${PIPESTATUS[0]}
+set -e
+
+if [[ "$XCODE_STATUS" -ne 0 ]]; then
+  printf '\nFirst relevant Xcode errors:\n'
+  grep -nE \
+    "error:|fatal error:|Killed|too many open files|No space left|unable to execute command" \
+    "$BUILD_LOG" | head -60 || true
+  fail "Xcode build failed. Full log: $BUILD_LOG"
+fi
+
+APP="$(find "$DERIVED_DATA/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" -print -quit)"
+[[ -d "$APP" ]] || fail "Build succeeded but no Release iPhoneOS .app was found."
+
+for model_name in \
+  yolo11s.tflite \
+  depth_anything_v2_small_uint8_256.onnx \
+  person_reid_osnet_x0_25.onnx \
+  melspectrogram.onnx \
+  embedding_model.onnx \
+  hey_livekit.onnx; do
+  find "$APP" -name "$model_name" -print -quit | grep -q . ||
+    fail "Built app is missing required offline model: $model_name"
+done
+
+REID_MODEL="$(find "$APP" -name person_reid_osnet_x0_25.onnx -print -quit)"
+REID_CHECKSUM="$(find "$APP" -name person_reid_osnet_x0_25.onnx.sha256 -print -quit)"
+[[ -f "$REID_CHECKSUM" ]] || fail "Built app is missing the ReID checksum file."
+read -r EXPECTED_REID_SHA _ < "$REID_CHECKSUM"
+ACTUAL_REID_SHA="$(shasum -a 256 "$REID_MODEL")"
+ACTUAL_REID_SHA="${ACTUAL_REID_SHA%% *}"
+[[ "$ACTUAL_REID_SHA" == "$EXPECTED_REID_SHA" ]] ||
+  fail "Bundled ReID model checksum does not match its tracked provenance file."
+
+plutil -lint "$APP/Info.plist" >/dev/null
+
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+IPA="$OUTPUT_DIR/Maculus-unsigned-$TIMESTAMP.ipa"
+
+log "Packaging and validating the unsigned IPA"
+mkdir "$IPA_TEMP/Payload"
+cp -R "$APP" "$IPA_TEMP/Payload/"
+(
+  cd "$IPA_TEMP"
+  zip -qry "$IPA" Payload
+)
+unzip -tq "$IPA"
+
+printf '\nMaculus unsigned IPA created successfully.\n'
+printf 'IPA: %s\n' "$IPA"
+printf 'Log: %s\n' "$BUILD_LOG"
+printf '\nThe IPA still needs an external signer and a valid provisioning profile before installation.\n'
