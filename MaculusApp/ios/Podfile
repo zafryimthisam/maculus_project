@@ -15,6 +15,8 @@ target 'MaculusApp' do
 
   # App-local iOS parity layer: YOLO, depth, anonymous person ReID,
   # wake-word/command capture, and the phone-camera fallback.
+  pod 'TensorFlowLiteObjC', '2.17.0', :modular_headers => true
+  pod 'onnxruntime-objc', '1.18.0', :modular_headers => true
   pod 'MaculusNative', :path => '..'
 
   use_react_native!(

@@ -1,18 +1,27 @@
 import AVFoundation
+import CoreImage
 import Foundation
-import ImageIO
 import React
 import UIKit
 
 @objc(MaculusDeviceCamera)
-final class MaculusDeviceCamera: NSObject, AVCapturePhotoCaptureDelegate {
+final class MaculusDeviceCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+  private struct BufferedVideoFrame {
+    let pixelBuffer: CVPixelBuffer
+    let frameId: Int64
+    let capturedAt: Double
+  }
+
   private let queue = DispatchQueue(label: "com.maculus.device-camera", qos: .userInitiated)
   private let session = AVCaptureSession()
-  private let photoOutput = AVCapturePhotoOutput()
+  private let videoOutput = AVCaptureVideoDataOutput()
+  private let imageContext = CIContext(options: [CIContextOption.cacheIntermediates: false])
   private var configured = false
   private var desiredRunning = false
   private var lensFacing = "back"
   private var frameId: Int64 = 0
+  private var lastDeliveredFrameId: Int64 = 0
+  private var latestFrame: BufferedVideoFrame?
   private var pendingCapture: (
     resolve: RCTPromiseResolveBlock,
     reject: RCTPromiseRejectBlock
@@ -83,23 +92,20 @@ final class MaculusDeviceCamera: NSObject, AVCapturePhotoCaptureDelegate {
         return
       }
       guard self.pendingCapture == nil else {
-        reject("DEVICE_CAMERA_BUSY", "A phone camera frame is already being captured", nil)
+        reject("DEVICE_CAMERA_BUSY", "A phone camera frame is already being requested", nil)
         return
       }
-      self.pendingCapture = (resolve, reject)
-      let settings: AVCapturePhotoSettings
-      if self.photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
-        settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+
+      self.updateVideoOrientation()
+      if let frame = self.latestFrame,
+         frame.frameId > self.lastDeliveredFrameId {
+        self.deliver(frame, resolve: resolve, reject: reject)
       } else {
-        settings = AVCapturePhotoSettings()
+        // Wait for the next sample from the already-running video stream. This
+        // guarantees callers receive a new frame without invoking still-photo
+        // capture (and therefore without shutter behavior).
+        self.pendingCapture = (resolve, reject)
       }
-      settings.flashMode = .off
-      settings.photoQualityPrioritization = .speed
-      if let connection = self.photoOutput.connection(with: .video),
-         connection.isVideoOrientationSupported {
-        connection.videoOrientation = Self.captureOrientation()
-      }
-      self.photoOutput.capturePhoto(with: settings, delegate: self)
     }
   }
 
@@ -114,36 +120,36 @@ final class MaculusDeviceCamera: NSObject, AVCapturePhotoCaptureDelegate {
         pending.reject("DEVICE_CAMERA_STOPPED", "Phone camera stopped during capture", nil)
       }
       if self.session.isRunning { self.session.stopRunning() }
+      self.latestFrame = nil
+      self.lastDeliveredFrameId = self.frameId
       resolve(nil)
     }
   }
 
-  func photoOutput(
-    _ output: AVCapturePhotoOutput,
-    didFinishProcessingPhoto photo: AVCapturePhoto,
-    error: Error?
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didOutput sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
   ) {
-    queue.async {
-      guard let pending = self.pendingCapture else { return }
-      self.pendingCapture = nil
-      if let error {
-        pending.reject("DEVICE_CAMERA_CAPTURE_ERROR", error.localizedDescription, error)
-        return
-      }
-      guard let data = photo.fileDataRepresentation(), !data.isEmpty else {
-        pending.reject("DEVICE_CAMERA_CAPTURE_ERROR", "Phone camera returned an empty frame", nil)
-        return
-      }
-      self.frameId += 1
-      let dimensions = Self.pixelDimensions(data: data)
-      let resolution: Any = dimensions.map { "\($0.width)x\($0.height)" } ?? NSNull()
-      pending.resolve([
-        "base64": data.base64EncodedString(),
-        "frameId": self.frameId,
-        "capturedAt": Date().timeIntervalSince1970 * 1000,
-        "resolution": resolution,
-        "lensFacing": self.lensFacing,
-      ])
+    // AVCaptureVideoDataOutput invokes this delegate on `queue`, so all frame
+    // and promise state remains serialized without an additional lock.
+    guard output === videoOutput,
+          let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+      return
+    }
+
+    frameId += 1
+    let frame = BufferedVideoFrame(
+      pixelBuffer: pixelBuffer,
+      frameId: frameId,
+      capturedAt: Date().timeIntervalSince1970 * 1000
+    )
+    latestFrame = frame
+
+    if let pending = pendingCapture,
+       frame.frameId > lastDeliveredFrameId {
+      pendingCapture = nil
+      deliver(frame, resolve: pending.resolve, reject: pending.reject)
     }
   }
 
@@ -172,13 +178,48 @@ final class MaculusDeviceCamera: NSObject, AVCapturePhotoCaptureDelegate {
     }
 
     let input = try AVCaptureDeviceInput(device: device)
-    guard session.canAddInput(input), session.canAddOutput(photoOutput) else {
+    guard session.canAddInput(input), session.canAddOutput(videoOutput) else {
       throw MaculusNativeError.message("The phone camera cannot create a capture session")
     }
     session.addInput(input)
-    session.addOutput(photoOutput)
-    photoOutput.isHighResolutionCaptureEnabled = false
+    videoOutput.videoSettings = [
+      kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+    ]
+    videoOutput.alwaysDiscardsLateVideoFrames = true
+    videoOutput.setSampleBufferDelegate(self, queue: queue)
+    session.addOutput(videoOutput)
+    updateVideoOrientation()
     configured = true
+  }
+
+  private func deliver(
+    _ frame: BufferedVideoFrame,
+    resolve: RCTPromiseResolveBlock,
+    reject: RCTPromiseRejectBlock
+  ) {
+    let ciImage = CIImage(cvPixelBuffer: frame.pixelBuffer)
+    guard let cgImage = imageContext.createCGImage(ciImage, from: ciImage.extent),
+          let data = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.82),
+          !data.isEmpty else {
+      reject("DEVICE_CAMERA_CAPTURE_ERROR", "Phone camera could not encode the live frame", nil)
+      return
+    }
+
+    lastDeliveredFrameId = frame.frameId
+    resolve([
+      "base64": data.base64EncodedString(),
+      "frameId": frame.frameId,
+      "capturedAt": frame.capturedAt,
+      "resolution": "\(cgImage.width)x\(cgImage.height)",
+      "lensFacing": lensFacing,
+    ])
+  }
+
+  private func updateVideoOrientation() {
+    if let connection = videoOutput.connection(with: .video),
+       connection.isVideoOrientationSupported {
+      connection.videoOrientation = Self.captureOrientation()
+    }
   }
 
   private func requestPermission(completion: @escaping (Bool) -> Void) {
@@ -201,16 +242,6 @@ final class MaculusDeviceCamera: NSObject, AVCapturePhotoCaptureDelegate {
     }
   }
 
-  private static func pixelDimensions(data: Data) -> (width: Int, height: Int)? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-          let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-          let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
-          let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
-      return nil
-    }
-    return (width.intValue, height.intValue)
-  }
-
   @objc private func applicationDidEnterBackground() {
     queue.async {
       if let pending = self.pendingCapture {
@@ -218,6 +249,8 @@ final class MaculusDeviceCamera: NSObject, AVCapturePhotoCaptureDelegate {
         pending.reject("DEVICE_CAMERA_INTERRUPTED", "Phone camera was interrupted", nil)
       }
       if self.session.isRunning { self.session.stopRunning() }
+      self.latestFrame = nil
+      self.lastDeliveredFrameId = self.frameId
     }
   }
 

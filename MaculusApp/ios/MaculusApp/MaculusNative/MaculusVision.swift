@@ -142,7 +142,7 @@ final class MaculusVision: NSObject {
       }
     case "float32":
       return data.withUnsafeBytes { bytes in
-        Array(bytes.bindMemory(to: Float32.self)).map(Float.init)
+        Array(bytes.bindMemory(to: Float32.self)).map { value in Float(value) }
       }
     default:
       throw MaculusNativeError.message("Unsupported YOLO output type: \(tensor.dataTypeName)")

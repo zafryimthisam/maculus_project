@@ -104,8 +104,10 @@ enum MaculusORT {
     inputName: String?,
     outputName: String?
   ) throws -> MaculusORTOutput {
-    guard let resolvedInput = inputName ?? (try session.inputNames().first),
-          let resolvedOutput = outputName ?? (try session.outputNames().first) else {
+    let availableInputs = try session.inputNames()
+    let availableOutputs = try session.outputNames()
+    guard let resolvedInput = inputName ?? availableInputs.first,
+          let resolvedOutput = outputName ?? availableOutputs.first else {
       throw MaculusNativeError.message("ONNX model has no input or output tensor")
     }
     let tensor = try ORTValue(
@@ -126,11 +128,11 @@ enum MaculusORT {
     let values: [Float]
     switch info.elementType {
     case .float:
-      values = array(from: outputData, as: Float32.self).map(Float.init)
+      values = array(from: outputData, as: Float32.self).map { value in Float(value) }
     case .uInt8:
-      values = [UInt8](outputData).map(Float.init)
+      values = [UInt8](outputData).map { value in Float(value) }
     case .int8:
-      values = array(from: outputData, as: Int8.self).map(Float.init)
+      values = array(from: outputData, as: Int8.self).map { value in Float(value) }
     default:
       throw MaculusNativeError.message("Unsupported ONNX output tensor type: \(info.elementType.rawValue)")
     }
