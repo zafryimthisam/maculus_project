@@ -11,12 +11,13 @@ import {
 } from '../api/piClient';
 import { detectionService } from '../services/DetectionService';
 import { depthService } from '../services/DepthService';
+import { deviceCameraService } from '../services/DeviceCameraService';
 import { reIdService } from '../services/ReIdService';
 import { TemporalSceneEngine } from '../services/TemporalSceneEngine';
 import { describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
 import { tts } from '../services/TTSService';
 import { executeVoiceCommand, voiceCommandService, VoiceCommand, VoiceCommandStatus, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
-import { CapturedFrame, DistanceReading, Detection, GuidanceEvent, PersonEmbedding, TrackedEntity } from '../types';
+import { CameraSource, CapturedFrame, DistanceReading, Detection, GuidanceEvent, PersonEmbedding, TrackedEntity } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
 const OBSTACLE_DISTANCE_DELTA_CM = 20;
@@ -36,7 +37,8 @@ export function useVisionAssistant() {
   const [lastObjects, setLastObjects] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Loading YOLO...');
-  const [cameraAvailable, setCameraAvailable] = useState(false);
+  const [cameraSource, setCameraSourceState] = useState<CameraSource>('none');
+  const cameraAvailable = cameraSource !== 'none';
   const [backend, setBackend] = useState<string>('');
   const [fps, setFps] = useState(0);
   const [previewFrameBase64, setPreviewFrameBase64] = useState<string | null>(null);
@@ -51,7 +53,7 @@ export function useVisionAssistant() {
 
   const distanceRef = useRef<DistanceReading | null>(null);
   const isConnectedRef = useRef(false);
-  const cameraAvailableRef = useRef(false);
+  const cameraSourceRef = useRef<CameraSource>('none');
   const isGuidingRef = useRef(false);
   const isDepthReadyRef = useRef(false);
   const oneShotBusyRef = useRef(false);
@@ -72,9 +74,25 @@ export function useVisionAssistant() {
 
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
   useEffect(() => { distanceRef.current = distance; }, [distance]);
-  useEffect(() => { cameraAvailableRef.current = cameraAvailable; }, [cameraAvailable]);
   useEffect(() => { isDepthReadyRef.current = isDepthReady; }, [isDepthReady]);
   useEffect(() => { hapticAlertsEnabledRef.current = hapticAlertsEnabled; }, [hapticAlertsEnabled]);
+
+  const setActiveCameraSource = useCallback((source: CameraSource) => {
+    cameraSourceRef.current = source;
+    setCameraSourceState(source);
+  }, []);
+
+  const activateDeviceCameraFallback = useCallback(async (): Promise<boolean> => {
+    try {
+      await deviceCameraService.start();
+      setActiveCameraSource('device');
+      return true;
+    } catch (error: any) {
+      console.warn('[Camera] Phone fallback unavailable:', error?.code || error?.message || error);
+      setActiveCameraSource('none');
+      return false;
+    }
+  }, [setActiveCameraSource]);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +142,8 @@ export function useVisionAssistant() {
       isGuidingRef.current = false;
       temporalEngine.reset();
       voiceCommandService.stop();
+      cameraSourceRef.current = 'none';
+      deviceCameraService.stop();
       tts.destroy();
     };
   }, []);
@@ -179,17 +199,39 @@ export function useVisionAssistant() {
       temporalEngineRef.current.reset();
       deferredGuidanceRef.current = null;
       idleObstacleActiveRef.current = false;
-      setCameraAvailable(!!status.camera);
+      let connectedCameraSource: CameraSource = 'none';
+      if (status.camera) {
+        await deviceCameraService.stop();
+        setActiveCameraSource('pi');
+        connectedCameraSource = 'pi';
+      } else if (await activateDeviceCameraFallback()) {
+        connectedCameraSource = 'device';
+      }
       setIsConnected(true);
       try {
         const d = await fetchDistance();
         setDistance(d);
       } catch { /* distance optional at connect time */ }
-      setStatusMessage('Connected to Maculus Pi');
+      const cameraStatus = connectedCameraSource === 'device'
+        ? 'Connected to Maculus Pi - using phone camera'
+        : connectedCameraSource === 'pi'
+        ? 'Connected to Maculus Pi - Pi camera ready'
+        : 'Connected to Maculus Pi - distance monitoring only';
+      setStatusMessage(cameraStatus);
       Vibration.vibrate([0, 40, 100, 40]);
-      tts.speak('Connected to Maculus device', 2, true);
+      tts.speak(
+        connectedCameraSource === 'device'
+          ? 'Connected to Maculus device. Pi camera unavailable, using phone camera.'
+          : connectedCameraSource === 'none'
+          ? 'Connected to Maculus device. No camera available, distance monitoring active.'
+          : 'Connected to Maculus device',
+        2,
+        true,
+      );
       return true;
     } catch (e: any) {
+      await deviceCameraService.stop();
+      setActiveCameraSource('none');
       setIsConnected(false);
       setStatusMessage(silentFailure ? 'Could not auto-find Maculus Pi. Check WiFi or enter the address manually.' : 'Connection failed. Check IP and WiFi.');
       if (!silentFailure) {
@@ -198,7 +240,7 @@ export function useVisionAssistant() {
       }
       return false;
     }
-  }, []);
+  }, [activateDeviceCameraFallback, setActiveCameraSource]);
 
   useEffect(() => {
     if (!isVisionReady || autoConnectAttemptedRef.current) {
@@ -272,10 +314,49 @@ export function useVisionAssistant() {
     };
   }, [isConnected]);
 
+  const captureActiveFrame = useCallback(async (signal: AbortSignal): Promise<CapturedFrame> => {
+    const source = cameraSourceRef.current;
+    if (source === 'device') {
+      try {
+        return await deviceCameraService.captureFrame(signal);
+      } catch (error) {
+        if (!isAbortError(error)) {
+          await deviceCameraService.stop();
+          setActiveCameraSource('none');
+        }
+        throw error;
+      }
+    }
+    if (source !== 'pi') {
+      throw new Error('CAMERA_UNAVAILABLE: No camera source is active');
+    }
+
+    try {
+      return await fetchFrame(signal);
+    } catch (error) {
+      if (isAbortError(error) || !isCameraCaptureError(error)) {
+        throw error;
+      }
+
+      const fallbackReady = await activateDeviceCameraFallback();
+      if (!fallbackReady) {
+        throw error;
+      }
+      temporalEngineRef.current.reset();
+      deferredGuidanceRef.current = null;
+      setPreviewFrameBase64(null);
+      setPreviewResolution(null);
+      setPreviewDetections([]);
+      setStatusMessage('Pi camera unavailable - using phone camera');
+      tts.speak('Pi camera unavailable. Using phone camera.', 1, true);
+      return deviceCameraService.captureFrame(signal);
+    }
+  }, [activateDeviceCameraFallback, setActiveCameraSource]);
+
   const runYoloOnce = useCallback(async (
     signal: AbortSignal,
   ): Promise<{ detections: Detection[]; frame: CapturedFrame }> => {
-    const frame = await fetchFrame(signal);
+    const frame = await captureActiveFrame(signal);
     if (signal.aborted) {
       return { detections: [], frame };
     }
@@ -288,7 +369,7 @@ export function useVisionAssistant() {
     setPreviewDetections(detections);
     setLastObjects(summarizeObjects(detections));
     return { detections, frame };
-  }, []);
+  }, [captureActiveFrame]);
 
   const maybeStartDepthEstimate = useCallback((
     frame: CapturedFrame,
@@ -368,7 +449,7 @@ export function useVisionAssistant() {
         deferredGuidanceRef.current = null;
       }
 
-      if (!cameraAvailableRef.current) {
+      if (cameraSourceRef.current === 'none') {
         const update = temporalEngineRef.current.update({
           frameKey: `sensor:${Date.now()}`,
           timestamp: Date.now(),
@@ -419,8 +500,9 @@ export function useVisionAssistant() {
         if (e?.name === 'AbortError' || e?.code === 'ERR_CANCELED') {
           break;
         }
-        if (typeof e?.message === 'string' && e.message.includes('CAPTURE_ERROR')) {
-          setCameraAvailable(false);
+        if (isCameraCaptureError(e)) {
+          await deviceCameraService.stop();
+          setActiveCameraSource('none');
           setPreviewFrameBase64(null);
           setPreviewResolution(null);
           setPreviewDetections([]);
@@ -444,7 +526,7 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [maybeEmbedPeople, maybeStartDepthEstimate, runYoloOnce, triggerGuidanceHaptic]);
+  }, [maybeEmbedPeople, maybeStartDepthEstimate, runYoloOnce, setActiveCameraSource, triggerGuidanceHaptic]);
 
   const startGuiding = useCallback(() => {
     if (isGuidingRef.current) {
@@ -516,7 +598,7 @@ export function useVisionAssistant() {
     if (isGuidingRef.current || oneShotBusyRef.current) {
       return;
     }
-    if (!cameraAvailableRef.current) {
+    if (cameraSourceRef.current === 'none') {
       tts.speak('Camera not available.', 1);
       return;
     }
@@ -545,8 +627,9 @@ export function useVisionAssistant() {
       }
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
-        if (typeof e?.message === 'string' && e.message.includes('CAPTURE_ERROR')) {
-          setCameraAvailable(false);
+        if (isCameraCaptureError(e)) {
+          await deviceCameraService.stop();
+          setActiveCameraSource('none');
           setPreviewFrameBase64(null);
           setPreviewResolution(null);
           setPreviewDetections([]);
@@ -562,7 +645,7 @@ export function useVisionAssistant() {
         abortRef.current = null;
       }
     }
-  }, [runYoloOnce, triggerGuidanceHaptic]);
+  }, [runYoloOnce, setActiveCameraSource, triggerGuidanceHaptic]);
 
   const handleVoiceCommand = useCallback((command: VoiceCommand) => {
     const result = executeVoiceCommand(command, {
@@ -624,6 +707,7 @@ export function useVisionAssistant() {
     isProcessing,
     statusMessage,
     cameraAvailable,
+    cameraSource,
     backend,
     fps,
     isDepthReady,
@@ -650,9 +734,22 @@ function sleep(ms: number): Promise<void> {
 }
 
 function capturedFrameKey(frame: CapturedFrame): string {
-  if (frame.frameId !== null) {return `frame:${frame.frameId}`;}
-  if (frame.capturedAt !== null) {return `captured:${frame.capturedAt}`;}
-  return `local:${Date.now()}`;
+  if (frame.frameId !== null) {return `${frame.source}:frame:${frame.frameId}`;}
+  if (frame.capturedAt !== null) {return `${frame.source}:captured:${frame.capturedAt}`;}
+  return `${frame.source}:local:${Date.now()}`;
+}
+
+function isAbortError(error: any): boolean {
+  return error?.name === 'AbortError' || error?.code === 'ERR_CANCELED';
+}
+
+function isCameraCaptureError(error: any): boolean {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  const message = typeof error?.message === 'string' ? error.message : '';
+  return code.startsWith('DEVICE_CAMERA_') ||
+    message.includes('CAPTURE_ERROR') ||
+    message.includes('CAMERA_UNAVAILABLE') ||
+    message.includes('DEVICE_CAMERA_');
 }
 
 function summarizeTrackedEntities(tracks: TrackedEntity[]): string {

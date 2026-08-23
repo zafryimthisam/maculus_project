@@ -12,7 +12,8 @@ class MaculusVisionPackage : ReactPackage {
         MaculusVisionModule(reactContext),
         MaculusDepthModule(reactContext),
         MaculusReIdModule(reactContext),
-        MaculusVoiceCommandModule(reactContext)
+        MaculusVoiceCommandModule(reactContext),
+        MaculusDeviceCameraModule(reactContext)
     )
 
     override fun createViewManagers(

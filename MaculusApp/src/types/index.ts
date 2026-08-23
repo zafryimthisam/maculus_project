@@ -15,6 +15,15 @@ export interface CapturedFrame {
   frameId: number | null;
   capturedAt: number | null;
   resolution: string | null;
+  source: CameraSource;
+}
+
+export type CameraSource = 'none' | 'pi' | 'device';
+
+export interface DeviceCameraInfo {
+  started: boolean;
+  alreadyStarted?: boolean;
+  lensFacing: 'back' | 'front';
 }
 
 /**

@@ -56,6 +56,13 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 
+    // Lifecycle-aware rear-camera fallback when the Raspberry Pi camera is unavailable.
+    // 1.4.2 is the latest CameraX line compatible with this RN release's AGP 8.5 toolchain.
+    def cameraxVersion = "1.4.2"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {

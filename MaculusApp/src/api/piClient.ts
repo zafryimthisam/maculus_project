@@ -104,12 +104,23 @@ export const fetchDistance = async (signal?: AbortSignal): Promise<DistanceReadi
 };
 
 export const fetchFrame = async (signal?: AbortSignal): Promise<CapturedFrame> => {
-  const res = await axios.get(`${PI_BASE_URL}/capture`, {
-    responseType: 'arraybuffer',
-    timeout: 8000,
-    signal,
-    headers: { Accept: 'image/jpeg' },
-  });
+  let res;
+  try {
+    res = await axios.get(`${PI_BASE_URL}/capture`, {
+      responseType: 'arraybuffer',
+      timeout: 8000,
+      signal,
+      headers: { Accept: 'image/jpeg' },
+    });
+  } catch (error: any) {
+    // Flask correctly answers 503 when its camera disappears. Normalize that
+    // response so the caller can switch to the phone camera without treating a
+    // general Pi/network outage as a camera failure.
+    if (error?.response?.status === 503) {
+      throw new Error('CAPTURE_ERROR: Raspberry Pi camera is unavailable');
+    }
+    throw error;
+  }
 
   // CRITICAL FIX: Check if server returned an error (e.g. 503 camera not available)
   // When Flask returns JSON error with 503, axios still gives 200 in some configs,
@@ -132,6 +143,7 @@ export const fetchFrame = async (signal?: AbortSignal): Promise<CapturedFrame> =
     frameId: frameIdRaw ? Number(frameIdRaw) : null,
     capturedAt: capturedAtRaw ? Number(capturedAtRaw) : null,
     resolution: (res.headers['x-maculus-resolution'] as string) || null,
+    source: 'pi',
   };
 };
 

@@ -26,6 +26,7 @@ export default function App() {
     isProcessing,
     statusMessage,
     cameraAvailable,
+    cameraSource,
     backend,
     fps,
     isDepthReady,
@@ -122,7 +123,11 @@ export default function App() {
           {isConnected && (
             <View style={[styles.chip, cameraAvailable ? styles.chipGreen : styles.chipRed]}>
               <Text style={styles.chipText}>
-                {cameraAvailable ? 'Camera Ready' : 'No Camera'}
+                {cameraSource === 'pi'
+                  ? 'Pi Camera Ready'
+                  : cameraSource === 'device'
+                  ? 'Phone Camera Fallback'
+                  : 'No Camera - Distance Only'}
                 {isGuiding && fps > 0 ? '  -  ' + fps + ' FPS' : ''}
               </Text>
             </View>
@@ -179,7 +184,8 @@ export default function App() {
           <Text style={styles.footer}>
             {isConnected ? 'Connected' : 'Disconnected'}
             {isGuiding ? ' - Guiding' : ''}
-            {cameraAvailable ? ' - Camera OK' : ''}
+            {cameraSource === 'pi' ? ' - Pi camera' : ''}
+            {cameraSource === 'device' ? ' - Phone camera fallback' : ''}
             {backend ? ' - ' + backend : ''}
             {' - ' + depthStatus}
             {' - ' + voiceStatusText}
