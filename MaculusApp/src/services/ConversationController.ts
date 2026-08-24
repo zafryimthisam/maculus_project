@@ -229,7 +229,7 @@ export class ConversationController {
         kind: 'conversation',
         priority: 0,
         text: text.trim() || 'I’m not sure how to answer that yet.',
-        expiresAt: now + (grounded ? 5000 : 12000),
+        expiresAt: now + (grounded ? 9000 : 15000),
         haptic: false,
         interruption: 'never',
         source: 'conversation',

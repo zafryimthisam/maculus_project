@@ -9,6 +9,7 @@ type SpeechItem = {
   kind: SpeechKind;
   eventKey?: string;
   eventKind?: GuidanceEvent['kind'];
+  source?: GuidanceEvent['source'];
   expiresAt?: number;
 };
 
@@ -155,7 +156,7 @@ export class TTSService {
 
     if (now - this.lastSpeakTime < cooldown && !force) {
       // If high priority and currently speaking low priority, interrupt
-      if (priority >= 1 && this.speaking && this.queue[0]?.priority < priority) {
+      if (priority >= 1 && this.speaking && (this.currentItem?.priority ?? 0) < priority) {
         this.interrupt(text, priority);
         return;
       }
@@ -165,7 +166,7 @@ export class TTSService {
     }
 
     // If currently speaking something lower priority, interrupt
-    if (this.speaking && this.queue.length > 0 && this.queue[0].priority < priority) {
+    if (this.speaking && (this.currentItem?.priority ?? 0) < priority) {
       this.interrupt(text, priority);
       return;
     }
@@ -201,6 +202,7 @@ export class TTSService {
       kind: 'guidance',
       eventKey: event.key,
       eventKind: event.kind,
+      source: event.source,
       expiresAt: event.expiresAt,
     };
 
@@ -211,6 +213,11 @@ export class TTSService {
         this.enqueueItem(item);
         this.processQueue();
       }
+      return;
+    }
+
+    if (event.source === 'conversation') {
+      this.enqueueConversationResponse(item);
       return;
     }
 
@@ -254,6 +261,34 @@ export class TTSService {
       } else {
         this.queue.shift();
       }
+    }
+  }
+
+  private enqueueFrontItem(item: SpeechItem): void {
+    this.queue.unshift(item);
+    if (this.queue.length > this.MAX_QUEUE_SIZE) {
+      this.queue = this.queue.slice(0, this.MAX_QUEUE_SIZE);
+    }
+  }
+
+  private enqueueConversationResponse(item: SpeechItem): void {
+    this.queue = this.queue.filter(q => q.priority >= 1 || q.source === 'conversation');
+    if (
+      this.speaking &&
+      this.currentItem &&
+      this.currentItem.priority === 0 &&
+      this.currentItem.source !== 'conversation'
+    ) {
+      this.interruptItem(item);
+      return;
+    }
+    if (this.queueTimer) {
+      clearTimeout(this.queueTimer);
+      this.queueTimer = null;
+    }
+    this.enqueueFrontItem(item);
+    if (!this.speaking) {
+      this.processQueue();
     }
   }
 

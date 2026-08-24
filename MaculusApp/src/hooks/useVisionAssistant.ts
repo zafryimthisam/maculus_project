@@ -35,6 +35,8 @@ const DEPTH_INTERVAL_MS = 1500;
 const REID_INTERVAL_MS = 500;
 const MAX_REID_PEOPLE_PER_FRAME = 4;
 const HAPTIC_COOLDOWN_MS = 3000;
+const CONVERSATION_RESPONSE_WINDOW_MS = 9000;
+const VOICE_SENSOR_WARNING_DEFER_MS = 4500;
 
 export function useVisionAssistant() {
   const [piUrl, setPiUrlState] = useState(getPiUrl());
@@ -508,6 +510,7 @@ export function useVisionAssistant() {
   }, []);
 
   const dispatchGuidanceEvent = useCallback((event: GuidanceEvent) => {
+    const now = Date.now();
     const currentRevision = groundingContextRef.current?.revision;
     if (
       event.invalidatesOnSceneChange && event.sceneRevision !== undefined &&
@@ -515,11 +518,37 @@ export function useVisionAssistant() {
     ) {
       return;
     }
-    if (event.priority >= 1) {
+    const conversationEvent = event.source === 'conversation';
+    const conversationalVoiceActive = voiceCommandService.isEnabled();
+    const conversationWindowActive = voiceCommandService.isConversationWindowActive(now);
+    const backgroundGuidance = !conversationEvent && event.kind !== 'navigation';
+    if (conversationalVoiceActive && event.key === 'conversation:greeting') {
+      return;
+    }
+    if (conversationalVoiceActive && event.priority === 0 && backgroundGuidance) {
+      return;
+    }
+    if (conversationWindowActive && backgroundGuidance && event.priority < 2) {
+      if (event.kind === 'sensor' && event.interruption === 'after-command') {
+        const pending = deferredGuidanceRef.current;
+        const deferred = {
+          ...event,
+          expiresAt: Math.max(event.expiresAt, now + VOICE_SENSOR_WARNING_DEFER_MS),
+        };
+        if (!pending || deferred.priority >= pending.priority) {
+          deferredGuidanceRef.current = deferred;
+        }
+      }
+      return;
+    }
+    if (event.priority >= 2 || (event.priority >= 1 && !conversationWindowActive)) {
       conversationControllerRef.current.cancelGeneration().catch(() => {});
     }
     if (event.priority >= 2 || event.interruption === 'immediate') {
       voiceCommandService.interruptForEmergency().catch(() => {});
+    }
+    if (conversationEvent) {
+      voiceCommandService.reserveConversationWindow(CONVERSATION_RESPONSE_WINDOW_MS);
     }
     const capturingCommand = voiceCommandService.isCommandCaptureActive();
     if (capturingCommand && event.interruption !== 'immediate') {

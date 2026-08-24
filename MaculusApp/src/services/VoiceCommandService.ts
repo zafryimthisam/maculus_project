@@ -71,6 +71,8 @@ const WAKE_WORD = 'maculus';
 const MIN_CONFIDENCE = 0.35;
 const AUDIO_HANDOFF_MS = 350;
 const EARLY_NO_RESULT_MS = 1800;
+const CONVERSATION_QUIET_MS = 18000;
+const EMPTY_CAPTURE_QUIET_MS = 3500;
 
 const MaculusVoiceCommand = NativeModules.MaculusVoiceCommand as VoiceCommandNativeModule | undefined;
 
@@ -194,6 +196,7 @@ export class VoiceCommandService {
   private status: VoiceCommandStatus = 'off';
   private sessionId = '';
   private safetyInterrupted = false;
+  private conversationQuietUntil = 0;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private onStatus: ((status: VoiceCommandStatus) => void) | null = null;
   private onTurn: ((turn: ConversationTurn, fastCommand: VoiceCommand | null) => void | Promise<void>) | null = null;
@@ -270,6 +273,7 @@ export class VoiceCommandService {
 
     this.commandBusy = true;
     this.safetyInterrupted = false;
+    this.reserveConversationWindow(CONVERSATION_QUIET_MS);
     this.setStatus('wake_detected');
     Vibration.vibrate([0, 60]);
     // Command capture uses a silent haptic acknowledgement. Spoken prompts can
@@ -302,11 +306,13 @@ export class VoiceCommandService {
 
       if (!result?.text) {
         console.log('[Voice] No command transcript returned');
+        this.reserveConversationWindow(EMPTY_CAPTURE_QUIET_MS);
         if (!this.safetyInterrupted) {Vibration.vibrate([0, 45, 60, 45]);}
         return;
       }
 
       this.setStatus('processing');
+      this.reserveConversationWindow(CONVERSATION_QUIET_MS);
       const command = parseVoiceCommand(result.text, result.confidence, {
         requireWakeWord: false,
         ignoreConfidence: true,
@@ -433,6 +439,7 @@ export class VoiceCommandService {
     this.onTurn = null;
     this.sessionId = '';
     this.safetyInterrupted = false;
+    this.conversationQuietUntil = 0;
     this.setStatus('off');
     this.onStatus = null;
   }
@@ -450,6 +457,20 @@ export class VoiceCommandService {
     return this.commandBusy ||
       this.status === 'wake_detected' ||
       this.status === 'command_listening';
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  isConversationWindowActive(now: number = Date.now()): boolean {
+    return this.isCommandCaptureActive() ||
+      this.status === 'processing' ||
+      now < this.conversationQuietUntil;
+  }
+
+  reserveConversationWindow(durationMs: number = CONVERSATION_QUIET_MS): void {
+    this.conversationQuietUntil = Math.max(this.conversationQuietUntil, Date.now() + durationMs);
   }
 }
 

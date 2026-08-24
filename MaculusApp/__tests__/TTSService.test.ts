@@ -3,7 +3,7 @@ import Tts from 'react-native-tts';
 import { TTSService } from '../src/services/TTSService';
 import { GuidanceEvent } from '../src/types';
 
-type QueuedSpeech = { text: string; priority: number; kind: string };
+type QueuedSpeech = { text: string; priority: number; kind: string; source?: string };
 type TestableTTSService = {
   init(): Promise<void>;
   speakGuidance(event: GuidanceEvent): void;
@@ -11,6 +11,7 @@ type TestableTTSService = {
   stop(): void;
   queue: QueuedSpeech[];
   speaking: boolean;
+  currentItem: QueuedSpeech | null;
   lastSpeakTime: number;
   lastText: string;
 };
@@ -79,6 +80,27 @@ describe('TTSService guidance speech', () => {
 
     expect(Tts.stop).toHaveBeenCalledTimes(1);
     expect(service.queue[0]).toMatchObject({ text: 'Stop now.', priority: 2, kind: 'guidance' });
+  });
+
+  it('lets a direct conversation answer jump ahead of disposable guidance', async () => {
+    jest.useFakeTimers();
+    const service = await createService();
+    service.speaking = true;
+    service.currentItem = { text: 'The path ahead is clear now.', priority: 0, kind: 'guidance' };
+    service.speakGuidance(guidance('scene:ambient', 'Chair ahead.'));
+
+    service.speakGuidance(guidance('conversation:answer', 'Yes, I heard you.', 0, {
+      kind: 'conversation',
+      source: 'conversation',
+    }));
+
+    expect(Tts.stop).toHaveBeenCalledTimes(1);
+    expect(service.queue[0]).toMatchObject({
+      text: 'Yes, I heard you.',
+      source: 'conversation',
+      kind: 'guidance',
+    });
+    expect(service.queue.some(item => item.text === 'Chair ahead.')).toBe(false);
   });
 
   it('clears pending guidance on stop', async () => {
