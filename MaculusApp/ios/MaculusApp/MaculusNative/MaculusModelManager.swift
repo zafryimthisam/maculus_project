@@ -277,7 +277,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
       "totalBytes": Self.expectedSize,
       "metered": metered,
       "conversationalSupported": conversationalCapability().supported,
-      "capabilityReason": conversationalCapability().reason ?? NSNull(),
+      "capabilityReason": conversationalCapability().reason.map { $0 as Any } ?? NSNull(),
     ]
   }
 
@@ -297,7 +297,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     let capability = conversationalCapability()
     sendEvent(withName: "MaculusModelDownloadProgress", body: [
       "conversationalSupported": capability.supported,
-      "capabilityReason": capability.reason ?? NSNull(),
+      "capabilityReason": capability.reason.map { $0 as Any } ?? NSNull(),
     ])
   }
 
