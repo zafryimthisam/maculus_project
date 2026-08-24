@@ -23,9 +23,14 @@ android {
         versionName "1.0"
     }
 
-    // Do not compress local model assets; YOLO is mmap-able TFLite and depth is ONNX.
+    sourceSets {
+        main.assets.srcDir("../../src/models")
+    }
+
+    // Do not compress local model assets. The conversational GGUF is downloaded
+    // to app-private storage, while bundled YOLO/depth/ReID assets remain mmap-able.
     androidResources {
-        noCompress "tflite", "onnx"
+        noCompress "tflite", "onnx", "gguf"
     }
     signingConfigs {
         debug {

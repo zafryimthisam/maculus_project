@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useVisionAssistant } from './src/hooks/useVisionAssistant';
 import { AccessibleButton } from './src/components/AccessibleButton';
@@ -33,6 +34,8 @@ export default function App() {
     depthStatus,
     voiceEnabled,
     voiceStatus,
+    modelStatus,
+    llmState,
     hapticAlertsEnabled,
     previewFrameBase64,
     previewResolution,
@@ -41,6 +44,9 @@ export default function App() {
     toggleGuiding,
     describeOnce,
     toggleVoiceCommands,
+    downloadConversationalModel,
+    cancelConversationalModelDownload,
+    deleteConversationalModel,
   } = useVisionAssistant();
 
   const [inputUrl, setInputUrl] = useState(piUrl);
@@ -75,6 +81,36 @@ export default function App() {
     await testConnection();
     setIsConnecting(false);
   };
+
+  const handleModelDownload = () => {
+    if (!modelStatus.metered) {
+      downloadConversationalModel(false);
+      return;
+    }
+    Alert.alert(
+      'Download over cellular?',
+      'The conversational model is approximately 696 MB. Safety guidance works without it.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Download', onPress: () => downloadConversationalModel(true) },
+      ],
+    );
+  };
+
+  const modelPercent = modelStatus.totalBytes > 0
+    ? Math.min(100, Math.round(modelStatus.downloadedBytes * 100 / modelStatus.totalBytes))
+    : 0;
+  const modelStatusText = modelStatus.conversationalSupported === false
+    ? `Conversational guide unavailable: ${modelStatus.capabilityReason || 'device capability'} — safety guidance remains active`
+    : modelStatus.state === 'ready'
+    ? `Conversational model ready${llmState === 'ready' ? ' and loaded' : ''}`
+    : modelStatus.state === 'downloading'
+    ? `Conversational model downloading, ${modelPercent}%`
+    : modelStatus.state === 'paused'
+    ? `Conversational model download paused at ${modelPercent}%`
+    : modelStatus.state === 'error'
+    ? `Conversational model error: ${modelStatus.message || 'unknown error'}`
+    : 'Conversational model not downloaded';
 
   return (
     <SafeAreaView style={styles.container}>
@@ -159,6 +195,46 @@ export default function App() {
 
           <Text style={styles.voiceStatus}>{voiceStatusText}</Text>
 
+          <Text style={styles.modelStatus} accessibilityLiveRegion="polite">
+            {modelStatusText}
+          </Text>
+          <Text style={styles.modelLicense}>
+            Optional offline model · LFM Open License v1.0
+          </Text>
+
+          {modelStatus.state !== 'ready' && modelStatus.state !== 'downloading' && (
+            <AccessibleButton
+              title="Download Conversational Guide (696 MB)"
+              onPress={handleModelDownload}
+              accessibilityHint="Downloads the optional offline language model. Safety guidance works without it."
+              color="#4F46E5"
+              style={styles.modelButton}
+            />
+          )}
+          {modelStatus.state === 'downloading' && (
+            <AccessibleButton
+              title="Pause Model Download"
+              onPress={cancelConversationalModelDownload}
+              color="#92400E"
+              style={styles.modelButton}
+            />
+          )}
+          {modelStatus.state === 'ready' && (
+            <AccessibleButton
+              title="Remove Conversational Model"
+              onPress={() => Alert.alert(
+                'Remove conversational model?',
+                'Open conversation will be unavailable until it is downloaded again. Safety guidance is unaffected.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Remove', style: 'destructive', onPress: deleteConversationalModel },
+                ],
+              )}
+              color="#374151"
+              style={styles.modelButton}
+            />
+          )}
+
           <AccessibleButton
             title={isGuiding ? 'Stop Guidance' : 'Start Guidance'}
             onPress={toggleGuiding}
@@ -230,6 +306,9 @@ const styles = StyleSheet.create({
   voiceBtn: { minHeight: 72, marginTop: 8 },
   voiceBtnText: { fontSize: 22 },
   voiceStatus: { marginTop: 4, marginBottom: 8, fontSize: 15, color: '#A7F3D0' },
+  modelStatus: { marginTop: 2, marginBottom: 8, fontSize: 15, color: '#C7D2FE', textAlign: 'center' },
+  modelLicense: { marginTop: -4, marginBottom: 8, fontSize: 12, color: '#9CA3AF', textAlign: 'center' },
+  modelButton: { minHeight: 56, marginTop: 4 },
   primaryBtn: { minHeight: 84, marginTop: 8 },
   primaryBtnText: { fontSize: 24 },
   footer: { marginTop: 20, fontSize: 14, color: '#6B7280' },

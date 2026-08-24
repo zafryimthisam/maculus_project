@@ -6,19 +6,21 @@
     "android": "react-native run-android",
     "ios": "react-native run-ios",
     "ios:unsigned": "bash scripts/build-ios-unsigned.sh --no-sync",
+    "postinstall": "patch-package",
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest"
   },
   "dependencies": {
+    "@react-native-community/slider": "^4.5.2",
+    "axios": "^1.7.2",
+    "buffer": "^6.0.3",
+    "llama.rn": "https://github.com/mybigday/llama.rn/archive/48a0cd3e338dd6225a4565b752b9984a3a4f9457.tar.gz",
     "react": "18.3.1",
     "react-native": "0.75.4",
-    "react-native-tts": "^4.1.1",
     "react-native-background-timer": "^2.4.1",
-    "@react-native-community/slider": "^4.5.2",
     "react-native-network-info": "^5.2.1",
-    "buffer": "^6.0.3",
-    "axios": "^1.7.2"
+    "react-native-tts": "^4.1.1"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
@@ -33,6 +35,7 @@
     "babel-jest": "^29.6.3",
     "eslint": "^8.19.0",
     "jest": "^29.6.3",
+    "patch-package": "^8.0.0",
     "prettier": "2.8.8",
     "react-test-renderer": "18.3.1",
     "typescript": "5.0.4"

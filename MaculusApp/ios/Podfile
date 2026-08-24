@@ -1,6 +1,10 @@
 require_relative '../node_modules/react-native/scripts/react_native_pods'
 require_relative '../node_modules/@react-native-community/cli-platform-ios/native_modules'
 
+# The pinned llama.rn v0.9 checkout contains current LFM2 support, while its
+# placeholder prebuilt frameworks do not. Compile the audited source instead.
+ENV['RNLLAMA_BUILD_FROM_SOURCE'] = '1'
+
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 

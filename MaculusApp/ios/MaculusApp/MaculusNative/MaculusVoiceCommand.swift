@@ -207,6 +207,19 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     resolve(nil)
   }
 
+  @objc func interruptForEmergency(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter _: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.main.async {
+      self.pausedForTts = true
+      self.stopWakeAudio()
+      self.finishCommand(result: nil)
+      self.emitState(self.wakeEnabled ? "paused" : "off")
+      resolve(nil)
+    }
+  }
+
   @objc func resumeAfterTts(
     _ resolve: @escaping RCTPromiseResolveBlock,
     rejecter reject: @escaping RCTPromiseRejectBlock

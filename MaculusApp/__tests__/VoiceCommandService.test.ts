@@ -7,6 +7,8 @@ const createActions = (isGuiding: boolean = false) => ({
   describeScene: jest.fn(),
   setHapticAlertsEnabled: jest.fn(),
   stopHaptic: jest.fn(),
+  repeatLastGuidance: jest.fn(() => 'Keep slightly left.'),
+  cancelActiveGoal: jest.fn(() => true),
   isGuiding: jest.fn(() => isGuiding),
 });
 
@@ -43,6 +45,8 @@ describe('VoiceCommandService parser', () => {
     expect(parseVoiceCommand('begin guiding', null, { requireWakeWord: false })).toBe('start_guidance');
     expect(parseVoiceCommand("what's around me", null, { requireWakeWord: false })).toBe('describe_scene');
     expect(parseVoiceCommand('haptic off', null, { requireWakeWord: false })).toBe('haptic_off');
+    expect(parseVoiceCommand('repeat that', null, { requireWakeWord: false })).toBe('repeat_guidance');
+    expect(parseVoiceCommand('cancel', null, { requireWakeWord: false })).toBe('cancel_goal');
   });
 
   it('can ignore unreliable recognizer confidence after wake detection', () => {
@@ -64,12 +68,12 @@ describe('VoiceCommandService executor', () => {
     expect(guidingActions.stopGuidance).toHaveBeenCalledTimes(1);
   });
 
-  it('blocks describe scene while guidance is active', () => {
+  it('allows scene questions while guidance is active', () => {
     const actions = createActions(true);
     const result = executeVoiceCommand('describe_scene', actions);
 
-    expect(actions.describeScene).not.toHaveBeenCalled();
-    expect(result.feedback).toContain('stop guidance');
+    expect(actions.describeScene).toHaveBeenCalledTimes(1);
+    expect(result.handled).toBe(true);
   });
 
   it('mutes and restores haptic alerts', () => {
@@ -87,5 +91,12 @@ describe('VoiceCommandService executor', () => {
 
     expect(actions.stopHaptic).toHaveBeenCalledTimes(1);
     expect(actions.setHapticAlertsEnabled).not.toHaveBeenCalled();
+  });
+
+  it('repeats guidance and cancels the active goal through the urgent fast path', () => {
+    const actions = createActions(false);
+    expect(executeVoiceCommand('repeat_guidance', actions).feedback).toBe('Keep slightly left.');
+    expect(executeVoiceCommand('cancel_goal', actions).feedback).toContain('stopped');
+    expect(actions.cancelActiveGoal).toHaveBeenCalledTimes(1);
   });
 });

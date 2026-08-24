@@ -1,4 +1,39 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# Maculus mobile app
+
+## Scene-grounded conversational guide
+
+Maculus keeps collision and walking decisions inside the deterministic temporal
+vision engine. The optional local LFM2.5 companion receives only stabilized,
+expiring scene facts and can understand natural requests, converse briefly, and
+start generic searches for classes supported by the bundled COCO detector.
+Emergency and warning speech never waits for the language model.
+
+After the wake word, speech is free-form rather than limited to a command list.
+For example, the user can ask what is on the right, follow up with “guide me
+toward it,” switch to finding a bag, or ask an unrelated general question. Every
+scene-related turn replaces prior scene data with the current verified revision;
+conversation retains at most six session-only exchanges. The assistant cannot
+identify real people, inspect unseen space, certify that a seat is empty, or
+attach an ultrasonic measurement to an ambiguously matched object.
+
+The first time conversational voice is enabled, the app downloads
+`LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf` (695,755,488 bytes) into app-private storage.
+The download resumes from its `.part` file and is installed only after the pinned
+SHA-256 is verified. No GGUF needs to be copied to Android or macOS build assets.
+All inference is offline after this one-time download.
+
+Model provenance is recorded in
+`src/models/lfm2.5-1.2b-qad-q4_0.provenance.json`; the complete LFM Open License
+v1.0 is in `src/models/LFM_OPEN_LICENSE.txt`. Commercial entities at or above
+the license's USD 10 million annual-revenue threshold need separate permission
+from Liquid AI.
+
+The React Native runtime is pinned to the classic-architecture-compatible
+`llama.rn` source commit in `package.json`. Android builds set
+`rnllamaBuildFromSource=true`; CocoaPods and the unsigned iOS script set
+`RNLLAMA_BUILD_FROM_SOURCE=1` automatically.
+
+This is a [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
 
 # Getting Started
 

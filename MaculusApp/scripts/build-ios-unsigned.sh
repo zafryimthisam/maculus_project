@@ -76,6 +76,7 @@ log "Installing JavaScript dependencies"
 npm ci --no-audit --no-fund
 
 log "Installing CocoaPods dependencies and the local iOS vision modules"
+export RNLLAMA_BUILD_FROM_SOURCE=1
 bundle config set --local path vendor/bundle
 bundle install --jobs 4 --retry 2
 (
@@ -147,6 +148,8 @@ for model_name in \
   yolo11s.tflite.provenance.json \
   depth_anything_v2_small_uint8_256.onnx \
   person_reid_osnet_x0_25.onnx \
+  LFM_OPEN_LICENSE.txt \
+  lfm2.5-1.2b-qad-q4_0.provenance.json \
   melspectrogram.onnx \
   embedding_model.onnx \
   hey_livekit.onnx; do

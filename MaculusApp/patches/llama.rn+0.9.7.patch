@@ -1,0 +1,43 @@
+diff --git a/node_modules/llama.rn/android/src/main/CMakeLists.txt b/node_modules/llama.rn/android/src/main/CMakeLists.txt
+index c9d10e3..c4b8497 100644
+--- a/node_modules/llama.rn/android/src/main/CMakeLists.txt
++++ b/node_modules/llama.rn/android/src/main/CMakeLists.txt
+@@ -113,7 +113,6 @@ if (ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
+     build_rnllama_jni("rnllama_jni_v8_2_dotprod" "rnllama_v8_2_dotprod" "arm" "-march=armv8.2-a+dotprod")
+     build_rnllama_jni("rnllama_jni_v8_2_i8mm" "rnllama_v8_2_i8mm" "arm" "-march=armv8.2-a+i8mm")
+     build_rnllama_jni("rnllama_jni_v8_2_dotprod_i8mm" "rnllama_v8_2_dotprod_i8mm" "arm" "-march=armv8.2-a+dotprod+i8mm")
+-    build_rnllama_jni("rnllama_jni_v8_2_dotprod_i8mm_hexagon_opencl" "rnllama_v8_2_dotprod_i8mm_hexagon_opencl" "arm" "-march=armv8.2-a+dotprod+i8mm")
+ 
+     # https://github.com/ggerganov/llama.cpp/blob/master/docs/android.md#cross-compile-using-android-ndk
+     # llama.cpp will deal with the cpu features
+diff --git a/node_modules/llama.rn/android/src/main/java/com/rnllama/LlamaContext.java b/node_modules/llama.rn/android/src/main/java/com/rnllama/LlamaContext.java
+index 3a5f63b..f1be7f1 100644
+--- a/node_modules/llama.rn/android/src/main/java/com/rnllama/LlamaContext.java
++++ b/node_modules/llama.rn/android/src/main/java/com/rnllama/LlamaContext.java
+@@ -726,11 +726,9 @@ public class LlamaContext {
+     Log.d(NAME, "- hasHexagon: " + hasHexagon);
+ 
+     if (LlamaContext.isArm64V8a()) {
+-      if (hasDotProd && hasI8mm && hasHexagon && hasAdreno) {
+-        Log.d(NAME, "Loading librnllama_jni_v8_2_dotprod_i8mm_hexagon_opencl.so");
+-        System.loadLibrary("rnllama_jni_v8_2_dotprod_i8mm_hexagon_opencl");
+-        loadedLibrary = "rnllama_jni_v8_2_dotprod_i8mm_hexagon_opencl";
+-      } else if (hasDotProd && hasI8mm) {
++      // Maculus v1 intentionally keeps OpenCL and Hexagon disabled. Vision and
++      // emergency work must not depend on vendor-specific SDK assets.
++      if (hasDotProd && hasI8mm) {
+         Log.d(NAME, "Loading librnllama_jni_v8_2_dotprod_i8mm.so");
+         System.loadLibrary("rnllama_jni_v8_2_dotprod_i8mm");
+         loadedLibrary = "rnllama_jni_v8_2_dotprod_i8mm";
+diff --git a/node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt b/node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt
+index 9350cca..5e2b034 100644
+--- a/node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt
++++ b/node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt
+@@ -344,7 +344,6 @@ if (ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
+     build_rnllama_library("rnllama_v8_2_dotprod" "arm" "-march=armv8.2-a+dotprod")
+     build_rnllama_library("rnllama_v8_2_i8mm" "arm" "-march=armv8.2-a+i8mm")
+     build_rnllama_library("rnllama_v8_2_dotprod_i8mm" "arm" "-march=armv8.2-a+dotprod+i8mm")
+-    build_rnllama_library("rnllama_v8_2_dotprod_i8mm_hexagon_opencl" "arm" "-march=armv8.2-a+dotprod+i8mm")
+ 
+ elseif (ANDROID_ABI AND ANDROID_ABI STREQUAL "x86_64")
+     # x86_64 target

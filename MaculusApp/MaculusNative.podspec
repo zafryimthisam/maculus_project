@@ -19,10 +19,12 @@ Pod::Spec.new do |spec|
     'android/app/src/main/assets/depth_anything_v2_small_uint8_256.onnx',
     'android/app/src/main/assets/person_reid_osnet_x0_25.onnx',
     'android/app/src/main/assets/person_reid_osnet_x0_25.onnx.sha256',
-    'android/app/src/main/assets/wakeword/*.onnx'
+    'android/app/src/main/assets/wakeword/*.onnx',
+    'src/models/LFM_OPEN_LICENSE.txt',
+    'src/models/lfm2.5-1.2b-qad-q4_0.provenance.json'
   ]
 
-  spec.frameworks = 'AVFoundation', 'Accelerate', 'ImageIO', 'Speech', 'UIKit'
+  spec.frameworks = 'AVFoundation', 'Accelerate', 'CryptoKit', 'ImageIO', 'Network', 'Speech', 'UIKit'
   spec.dependency 'React-Core'
   # The bundled YOLO model has signed INT8 I/O. TensorFlowLiteObjC exposes
   # that tensor type, whereas the Swift wrapper omits it.

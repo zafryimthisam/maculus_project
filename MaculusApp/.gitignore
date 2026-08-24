@@ -64,3 +64,7 @@ yarn-error.log
 # TFLite models (large binaries)
 *.tflite
 !android/app/src/main/assets/yolo11s.tflite
+
+# Conversational model is downloaded and verified at runtime.
+*.gguf
+*.gguf.part

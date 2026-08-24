@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Vibration } from 'react-native';
+import { AppState, Vibration } from 'react-native';
 import BackgroundTimer from 'react-native-background-timer';
 import {
   fetchDistance,
@@ -16,9 +16,15 @@ import { reIdService } from '../services/ReIdService';
 import { keepAwakeService } from '../services/KeepAwakeService';
 import { TemporalSceneEngine } from '../services/TemporalSceneEngine';
 import { describeScene, formatObstacleDistance, summarizeObjects } from '../services/GuidanceEngine';
+import { MobilityGuide } from '../services/MobilityGuide';
+import { SceneGroundingService } from '../services/SceneGroundingService';
+import { ConversationController } from '../services/ConversationController';
+import { renderDirective, renderGreeting, renderGroundedScene } from '../services/GuidanceLanguageRenderer';
+import { localLlmService, LocalLlmState } from '../services/LocalLlmService';
+import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { tts } from '../services/TTSService';
 import { executeVoiceCommand, voiceCommandService, VoiceCommand, VoiceCommandStatus, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
-import { CameraSource, CapturedFrame, DistanceReading, Detection, GuidanceEvent, PersonEmbedding, TrackedEntity } from '../types';
+import { CameraSource, CapturedFrame, ConversationTurn, DistanceReading, Detection, GuidanceEvent, PersonEmbedding, SceneGroundingContext, TrackedEntity } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
 const OBSTACLE_DISTANCE_DELTA_CM = 20;
@@ -51,11 +57,14 @@ export function useVisionAssistant() {
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<VoiceCommandStatus>('off');
   const [hapticAlertsEnabled, setHapticAlertsEnabledState] = useState(true);
+  const [modelStatus, setModelStatus] = useState<ModelAssetStatus>(modelAssetService.getStatus());
+  const [llmState, setLlmState] = useState<LocalLlmState>('unloaded');
 
   const distanceRef = useRef<DistanceReading | null>(null);
   const isConnectedRef = useRef(false);
   const cameraSourceRef = useRef<CameraSource>('none');
   const isGuidingRef = useRef(false);
+  const voiceEnabledRef = useRef(false);
   const isDepthReadyRef = useRef(false);
   const oneShotBusyRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -71,12 +80,34 @@ export function useVisionAssistant() {
   const isReIdReadyRef = useRef(false);
   const lastReIdTimeRef = useRef(0);
   const temporalEngineRef = useRef(new TemporalSceneEngine());
+  const mobilityGuideRef = useRef(new MobilityGuide());
+  const groundingServiceRef = useRef(new SceneGroundingService());
+  const conversationControllerRef = useRef(new ConversationController());
+  const groundingContextRef = useRef<SceneGroundingContext | null>(null);
   const deferredGuidanceRef = useRef<GuidanceEvent | null>(null);
+  const lastGuidanceTextRef = useRef<string | null>(null);
+  const greetingSpokenRef = useRef(false);
 
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
   useEffect(() => { distanceRef.current = distance; }, [distance]);
   useEffect(() => { isDepthReadyRef.current = isDepthReady; }, [isDepthReady]);
   useEffect(() => { hapticAlertsEnabledRef.current = hapticAlertsEnabled; }, [hapticAlertsEnabled]);
+  useEffect(() => { voiceEnabledRef.current = voiceEnabled; }, [voiceEnabled]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      if (state !== 'active') {
+        conversationControllerRef.current.cancelGeneration().catch(() => {});
+        localLlmService.release().then(() => setLlmState(localLlmService.getState()));
+      } else if (voiceEnabledRef.current) {
+        const status = modelAssetService.getStatus();
+        if (status.state === 'ready' && status.path) {
+          localLlmService.load(status.path).then(() => setLlmState(localLlmService.getState()));
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => {
     keepAwakeService.setEnabled(isGuiding);
@@ -107,8 +138,24 @@ export function useVisionAssistant() {
   useEffect(() => {
     let cancelled = false;
     const temporalEngine = temporalEngineRef.current;
+    const mobilityGuide = mobilityGuideRef.current;
+    const groundingService = groundingServiceRef.current;
+    const conversationController = conversationControllerRef.current;
+    const unsubscribeModel = modelAssetService.subscribe(status => {
+      if (!cancelled) {
+        setModelStatus(status);
+        if (status.conversationalSupported === false) {
+          conversationController.cancelGeneration().catch(() => {});
+          localLlmService.release().then(() => setLlmState('unavailable'));
+        }
+      }
+    });
     const init = async () => {
       try {
+        const assetStatus = await modelAssetService.initialize();
+        // A verified model may remain installed between sessions, but it is
+        // loaded into memory only while conversational voice is enabled.
+        if (assetStatus.state === 'ready') {setLlmState('unloaded');}
         await tts.init();
         if (cancelled) {
           return;
@@ -151,7 +198,14 @@ export function useVisionAssistant() {
       cancelled = true;
       isGuidingRef.current = false;
       temporalEngine.reset();
+      mobilityGuide.reset();
+      groundingService.reset();
+      conversationController.reset();
+      groundingContextRef.current = null;
       voiceCommandService.stop();
+      localLlmService.release();
+      unsubscribeModel();
+      modelAssetService.destroy();
       cameraSourceRef.current = 'none';
       deviceCameraService.stop();
       tts.destroy();
@@ -207,6 +261,10 @@ export function useVisionAssistant() {
       setPiUrlState(discoveredUrl);
       const status = await fetchStatus();
       temporalEngineRef.current.reset();
+      mobilityGuideRef.current.reset();
+      groundingServiceRef.current.reset();
+      conversationControllerRef.current.reset();
+      groundingContextRef.current = null;
       deferredGuidanceRef.current = null;
       idleObstacleActiveRef.current = false;
       let connectedCameraSource: CameraSource = 'none';
@@ -288,19 +346,34 @@ export function useVisionAssistant() {
         setDistance(d);
         if (!isGuidingRef.current && d.obstacle) {
           const now = Date.now();
-          if (voiceCommandService.isCommandCaptureActive() || oneShotBusyRef.current || now < suppressDistanceSpeechUntilRef.current) {
-            return;
-          }
           const spokenDistance = formatObstacleDistance(d.distance_cm);
           const movedCloser = lastObstacleDistRef.current - spokenDistance >= OBSTACLE_DISTANCE_DELTA_CM;
+          const emergency = spokenDistance <= 40;
           if (!idleObstacleActiveRef.current || movedCloser) {
             idleObstacleActiveRef.current = true;
             lastObstacleDistRef.current = spokenDistance;
-            const emergency = spokenDistance <= 40;
+            if (emergency) {
+              conversationControllerRef.current.cancelGeneration().catch(() => {});
+              voiceCommandService.interruptForEmergency().catch(() => {});
+            } else if (
+              voiceCommandService.isCommandCaptureActive() ||
+              oneShotBusyRef.current ||
+              now < suppressDistanceSpeechUntilRef.current
+            ) {
+              // Leave the warning unconsumed so the next 700 ms poll can
+              // announce it after command capture if it is still relevant.
+              idleObstacleActiveRef.current = false;
+              lastObstacleDistRef.current = 999;
+              return;
+            } else {
+              conversationControllerRef.current.cancelGeneration().catch(() => {});
+            }
             tts.speak(
               (emergency ? 'Stop! Obstacle, ' : 'Caution, obstacle, ') + spokenDistance + ' centimeters ahead.',
               emergency ? 2 : 1,
+              emergency,
             );
+            if (emergency) {triggerGuidanceHaptic(2, false);}
           }
         } else if (!d.obstacle) {
           idleObstacleActiveRef.current = false;
@@ -322,7 +395,7 @@ export function useVisionAssistant() {
         distanceTimerRef.current = null;
       }
     };
-  }, [isConnected]);
+  }, [isConnected, triggerGuidanceHaptic]);
 
   const captureActiveFrame = useCallback(async (signal: AbortSignal): Promise<CapturedFrame> => {
     const source = cameraSourceRef.current;
@@ -353,6 +426,10 @@ export function useVisionAssistant() {
         throw error;
       }
       temporalEngineRef.current.reset();
+      mobilityGuideRef.current.reset();
+      groundingServiceRef.current.reset();
+      conversationControllerRef.current.reset();
+      groundingContextRef.current = null;
       deferredGuidanceRef.current = null;
       setPreviewFrameBase64(null);
       setPreviewResolution(null);
@@ -428,24 +505,39 @@ export function useVisionAssistant() {
     return reIdService.embedPeople(frame.base64, detections, indices);
   }, []);
 
+  const dispatchGuidanceEvent = useCallback((event: GuidanceEvent) => {
+    const currentRevision = groundingContextRef.current?.revision;
+    if (
+      event.invalidatesOnSceneChange && event.sceneRevision !== undefined &&
+      currentRevision !== undefined && event.sceneRevision !== currentRevision
+    ) {
+      return;
+    }
+    if (event.priority >= 1) {
+      conversationControllerRef.current.cancelGeneration().catch(() => {});
+    }
+    if (event.priority >= 2 || event.interruption === 'immediate') {
+      voiceCommandService.interruptForEmergency().catch(() => {});
+    }
+    const capturingCommand = voiceCommandService.isCommandCaptureActive();
+    if (capturingCommand && event.interruption !== 'immediate') {
+      if (event.interruption === 'after-command') {
+        const pending = deferredGuidanceRef.current;
+        if (!pending || event.priority >= pending.priority) {
+          deferredGuidanceRef.current = event;
+        }
+      }
+      return;
+    }
+    lastGuidanceTextRef.current = event.text;
+    conversationControllerRef.current.rememberGuidance(event.text);
+    tts.speakGuidance(event);
+    if (event.haptic) {triggerGuidanceHaptic(event.priority);}
+  }, [triggerGuidanceHaptic]);
+
   const guidanceLoop = useCallback(async () => {
     let lastFrameTime = Date.now();
     let smoothedFps = 0;
-
-    const dispatchEvent = (event: GuidanceEvent) => {
-      const capturingCommand = voiceCommandService.isCommandCaptureActive();
-      if (capturingCommand && event.interruption !== 'immediate') {
-        if (event.interruption === 'after-command') {
-          const pending = deferredGuidanceRef.current;
-          if (!pending || event.priority >= pending.priority) {
-            deferredGuidanceRef.current = event;
-          }
-        }
-        return;
-      }
-      tts.speakGuidance(event);
-      if (event.haptic) {triggerGuidanceHaptic(event.priority);}
-    };
 
     while (isGuidingRef.current && isConnectedRef.current) {
       const deferred = deferredGuidanceRef.current;
@@ -454,7 +546,7 @@ export function useVisionAssistant() {
         deferred.expiresAt > Date.now()
       ) {
         deferredGuidanceRef.current = null;
-        dispatchEvent(deferred);
+        dispatchGuidanceEvent(deferred);
       } else if (deferred && deferred.expiresAt <= Date.now()) {
         deferredGuidanceRef.current = null;
       }
@@ -466,7 +558,25 @@ export function useVisionAssistant() {
           detections: [],
           distance: distanceRef.current,
         });
-        update.events.forEach(dispatchEvent);
+        const mobility = mobilityGuideRef.current.assess(update.snapshot, distanceRef.current);
+        const navigation = conversationControllerRef.current.updateNavigation(update.snapshot, mobility);
+        const grounding = groundingServiceRef.current.update({
+          snapshot: update.snapshot,
+          mobility,
+          distance: distanceRef.current,
+          cameraAvailable: false,
+          depthAvailable: isDepthReadyRef.current,
+          activeGoal: navigation.goal,
+          recentChanges: update.events.map(event => event.text),
+        });
+        groundingContextRef.current = grounding;
+        update.events.forEach(dispatchGuidanceEvent);
+        if (mobility.directive && !update.events.some(event => event.priority >= mobility.directive!.priority)) {
+          dispatchGuidanceEvent(directiveEvent(mobility.directive, grounding.revision));
+        }
+        if (navigation.announcement) {
+          dispatchGuidanceEvent(navigationEvent(navigation.announcement, grounding.revision, navigation.goal?.revision));
+        }
         await sleep(800);
         continue;
       }
@@ -494,7 +604,36 @@ export function useVisionAssistant() {
         // correct tracks even if later YOLO frames arrive in a different order.
         maybeStartDepthEstimate(frame, frameKey, detections);
         setLastObjects(summarizeTrackedEntities(update.snapshot.tracks));
-        update.events.forEach(dispatchEvent);
+        const mobility = mobilityGuideRef.current.assess(update.snapshot, distanceRef.current);
+        const navigation = conversationControllerRef.current.updateNavigation(update.snapshot, mobility);
+        const grounding = groundingServiceRef.current.update({
+          snapshot: update.snapshot,
+          mobility,
+          distance: distanceRef.current,
+          cameraAvailable: true,
+          depthAvailable: isDepthReadyRef.current,
+          activeGoal: navigation.goal,
+          recentChanges: update.events.map(event => event.text),
+        });
+        groundingContextRef.current = grounding;
+        update.events.forEach(dispatchGuidanceEvent);
+        if (mobility.directive && !update.events.some(event => event.priority >= mobility.directive!.priority)) {
+          dispatchGuidanceEvent(directiveEvent(mobility.directive, grounding.revision));
+        }
+        if (navigation.announcement) {
+          dispatchGuidanceEvent(navigationEvent(navigation.announcement, grounding.revision, navigation.goal?.revision));
+        } else if (navigation.directive) {
+          dispatchGuidanceEvent(directiveEvent(navigation.directive, grounding.revision, navigation.goal?.query));
+        }
+        if (!greetingSpokenRef.current && groundingServiceRef.current.isStableFor(2000, update.snapshot.timestamp)) {
+          greetingSpokenRef.current = true;
+          dispatchGuidanceEvent({
+            key: 'conversation:greeting', kind: 'conversation', priority: 0,
+            text: renderGreeting(grounding), expiresAt: Date.now() + 5000,
+            haptic: false, interruption: 'never', source: 'conversation',
+            sceneRevision: grounding.revision, invalidatesOnSceneChange: true,
+          });
+        }
 
         const now = Date.now();
         const dt = now - lastFrameTime;
@@ -517,8 +656,12 @@ export function useVisionAssistant() {
           setPreviewResolution(null);
           setPreviewDetections([]);
           temporalEngineRef.current.reset();
+          mobilityGuideRef.current.reset();
+          groundingServiceRef.current.reset();
+          conversationControllerRef.current.reset();
+          groundingContextRef.current = null;
           deferredGuidanceRef.current = null;
-          dispatchEvent({
+          dispatchGuidanceEvent({
             key: 'system:camera-unavailable',
             kind: 'sensor',
             priority: 1,
@@ -536,18 +679,23 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [maybeEmbedPeople, maybeStartDepthEstimate, runYoloOnce, setActiveCameraSource, triggerGuidanceHaptic]);
+  }, [dispatchGuidanceEvent, maybeEmbedPeople, maybeStartDepthEstimate, runYoloOnce, setActiveCameraSource]);
 
-  const startGuiding = useCallback(() => {
+  const startGuiding = useCallback((silent: boolean = false): boolean => {
     if (isGuidingRef.current) {
-      return;
+      return true;
     }
     if (!isConnectedRef.current) {
-      tts.speak('Not connected', 1, true);
-      return;
+      if (!silent) {tts.speak('Not connected', 1, true);}
+      return false;
     }
     temporalEngineRef.current.reset();
+    mobilityGuideRef.current.reset();
+    groundingServiceRef.current.reset();
+    conversationControllerRef.current.reset();
+    groundingContextRef.current = null;
     deferredGuidanceRef.current = null;
+    greetingSpokenRef.current = false;
     idleObstacleActiveRef.current = false;
     lastReIdTimeRef.current = 0;
     reIdService.loadModel().then(info => {
@@ -556,35 +704,41 @@ export function useVisionAssistant() {
     isGuidingRef.current = true;
     setIsGuiding(true);
     setIsProcessing(true);
-    tts.speak('Guidance started', 1, true);
+    if (!silent) {tts.speak('Guidance started', 1, true);}
     guidanceLoop().finally(() => {
       isGuidingRef.current = false;
       setIsGuiding(false);
       setIsProcessing(false);
     });
+    return true;
   }, [guidanceLoop]);
 
-  const stopGuiding = useCallback(() => {
+  const stopGuiding = useCallback((silent: boolean = false): boolean => {
     if (!isGuidingRef.current) {
-      return;
+      return true;
     }
     isGuidingRef.current = false;
     setIsGuiding(false);
     temporalEngineRef.current.reset();
+    mobilityGuideRef.current.reset();
+    groundingServiceRef.current.reset();
+    conversationControllerRef.current.reset();
+    groundingContextRef.current = null;
     deferredGuidanceRef.current = null;
     cancelInFlight();
     cancelHaptics(true);
     tts.stop();
-    tts.speak('Guidance stopped', 1, true);
+    if (!silent) {tts.speak('Guidance stopped', 1, true);}
+    return true;
   }, [cancelHaptics, cancelInFlight]);
 
-  const setHapticAlertsEnabled = useCallback((enabled: boolean) => {
+  const setHapticAlertsEnabled = useCallback((enabled: boolean, silent: boolean = false) => {
     setHapticAlertsEnabledState(enabled);
     hapticAlertsEnabledRef.current = enabled;
     if (!enabled) {
       cancelHaptics(true);
     }
-    tts.speak(enabled ? 'Haptic alerts on' : 'Haptic alerts off', 1, true);
+    if (!silent) {tts.speak(enabled ? 'Haptic alerts on' : 'Haptic alerts off', 1, true);}
   }, [cancelHaptics]);
 
   const stopHaptic = useCallback(() => {
@@ -657,40 +811,198 @@ export function useVisionAssistant() {
     }
   }, [runYoloOnce, setActiveCameraSource, triggerGuidanceHaptic]);
 
-  const handleVoiceCommand = useCallback((command: VoiceCommand) => {
-    const result = executeVoiceCommand(command, {
-      startGuidance: startGuiding,
-      stopGuidance: stopGuiding,
-      describeScene: describeOnce,
-      setHapticAlertsEnabled,
-      stopHaptic,
-      isGuiding: () => isGuidingRef.current,
-    });
-    if (result.feedback) {
-      tts.speak(result.feedback, 1, true);
+  const ensureLlmReady = useCallback(async (
+    allowCellular: boolean = false,
+    loadAfterDownload: boolean = true,
+  ): Promise<boolean> => {
+    let status = await modelAssetService.initialize();
+    if (status.conversationalSupported === false) {
+      await localLlmService.release();
+      setLlmState('unavailable');
+      return false;
     }
-  }, [describeOnce, setHapticAlertsEnabled, startGuiding, stopHaptic, stopGuiding]);
+    if (status.state !== 'ready' || !status.path) {
+      try {
+        status = await modelAssetService.ensureDownloaded(allowCellular);
+      } catch {
+        setLlmState(localLlmService.getState());
+        return false;
+      }
+    }
+    if (!status.path) {return false;}
+    if (!loadAfterDownload) {return true;}
+    const loaded = await localLlmService.load(status.path);
+    setLlmState(localLlmService.getState());
+    return loaded;
+  }, []);
+
+  const refreshGroundingContext = useCallback(async (): Promise<SceneGroundingContext> => {
+    const current = groundingContextRef.current;
+    if (current && Date.now() - current.capturedAt <= 2500) {return current;}
+    if (cameraSourceRef.current === 'none') {
+      const snapshotUpdate = temporalEngineRef.current.update({
+        frameKey: `conversation:sensor:${Date.now()}`,
+        timestamp: Date.now(), detections: [], distance: distanceRef.current,
+      });
+      const mobility = mobilityGuideRef.current.assess(snapshotUpdate.snapshot, distanceRef.current);
+      const navigation = conversationControllerRef.current.updateNavigation(snapshotUpdate.snapshot, mobility);
+      const grounding = groundingServiceRef.current.update({
+        snapshot: snapshotUpdate.snapshot, mobility, distance: distanceRef.current,
+        cameraAvailable: false, depthAvailable: isDepthReadyRef.current, activeGoal: navigation.goal,
+      });
+      groundingContextRef.current = grounding;
+      return grounding;
+    }
+
+    let latest = temporalEngineRef.current.getSnapshot();
+    for (let index = 0; index < 3; index += 1) {
+      const controller = new AbortController();
+      const { detections, frame } = await runYoloOnce(controller.signal);
+      const personEmbeddings = await maybeEmbedPeople(frame, detections);
+      latest = temporalEngineRef.current.update({
+        frameKey: capturedFrameKey(frame), timestamp: Date.now(), detections,
+        distance: distanceRef.current, personEmbeddings,
+      }).snapshot;
+      if (index < 2) {await sleep(120);}
+    }
+    const mobility = mobilityGuideRef.current.assess(latest, distanceRef.current);
+    const navigation = conversationControllerRef.current.updateNavigation(latest, mobility);
+    const grounding = groundingServiceRef.current.update({
+      snapshot: latest, mobility, distance: distanceRef.current,
+      cameraAvailable: true, depthAvailable: isDepthReadyRef.current, activeGoal: navigation.goal,
+    });
+    groundingContextRef.current = grounding;
+    return grounding;
+  }, [maybeEmbedPeople, runYoloOnce]);
+
+  const handleConversationTurn = useCallback(async (turn: ConversationTurn, fastCommand: VoiceCommand | null) => {
+    if (fastCommand && fastCommand !== 'describe_scene') {
+      const result = executeVoiceCommand(fastCommand, {
+        startGuidance: startGuiding,
+        stopGuidance: stopGuiding,
+        describeScene: describeOnce,
+        setHapticAlertsEnabled,
+        stopHaptic,
+        repeatLastGuidance: () => lastGuidanceTextRef.current,
+        cancelActiveGoal: () => conversationControllerRef.current.cancelGoal(),
+        isGuiding: () => isGuidingRef.current,
+      });
+      if (result.feedback) {tts.speak(result.feedback, 1, true);}
+      return;
+    }
+
+    let context: SceneGroundingContext;
+    try {
+      context = await refreshGroundingContext();
+    } catch {
+      tts.speak('I could not refresh the scene. Distance safety monitoring remains active.', 1, true);
+      return;
+    }
+
+    if (fastCommand === 'describe_scene' && localLlmService.getState() !== 'ready') {
+      tts.speak(renderGroundedScene(context), 1, true);
+      return;
+    }
+
+    const currentCapability = await modelAssetService.initialize();
+    if (currentCapability.conversationalSupported === false) {
+      await localLlmService.release();
+      setLlmState('unavailable');
+      tts.speak(
+        fastCommand === 'describe_scene'
+          ? renderGroundedScene(context)
+          : currentCapability.capabilityReason || 'The conversational guide is temporarily unavailable. Safety guidance remains active.',
+        1,
+        true,
+      );
+      return;
+    }
+
+    if (localLlmService.getState() !== 'ready' && !(await ensureLlmReady(false))) {
+      const status = modelAssetService.getStatus();
+      const message = status.message?.includes('cellular')
+        ? 'The conversational model needs permission to download over cellular. Safety guidance is still available.'
+        : status.state === 'downloading'
+        ? 'The conversational model is still downloading. Safety guidance is still available.'
+        : 'The conversational guide is unavailable. Safety guidance is still active.';
+      tts.speak(message, 1, true);
+      return;
+    }
+
+    const snapshot = temporalEngineRef.current.getSnapshot();
+    try {
+      let response = await conversationControllerRef.current.handleTurn(turn, context, snapshot, {
+        startGuidance: startGuiding,
+        stopGuidance: stopGuiding,
+        setHaptics: setHapticAlertsEnabled,
+        repeatLastGuidance: () => lastGuidanceTextRef.current,
+        isGuiding: () => isGuidingRef.current,
+      });
+      const latestContext = groundingContextRef.current;
+      if (
+        response.sceneGrounded && latestContext &&
+        response.sourceSceneRevision !== latestContext.revision
+      ) {
+        response = await conversationControllerRef.current.handleTurn(turn, latestContext, temporalEngineRef.current.getSnapshot(), {
+          startGuidance: startGuiding,
+          stopGuidance: stopGuiding,
+          setHaptics: setHapticAlertsEnabled,
+          repeatLastGuidance: () => lastGuidanceTextRef.current,
+          isGuiding: () => isGuidingRef.current,
+        });
+      }
+      dispatchGuidanceEvent(response.event);
+    } catch {
+      // A safety event or scene invalidation may deliberately cancel inference.
+    } finally {
+      setLlmState(localLlmService.getState());
+    }
+  }, [describeOnce, dispatchGuidanceEvent, ensureLlmReady, refreshGroundingContext, setHapticAlertsEnabled, startGuiding, stopHaptic, stopGuiding]);
 
   const toggleVoiceCommands = useCallback(async () => {
     if (voiceEnabled) {
       await voiceCommandService.stop();
+      conversationControllerRef.current.reset();
+      await localLlmService.release();
+      setLlmState(localLlmService.getState());
       setVoiceEnabled(false);
       setVoiceStatus('off');
       tts.speak('Voice commands off', 1, true);
       return;
     }
 
-    const started = await voiceCommandService.start(handleVoiceCommand, setVoiceStatus);
+    conversationControllerRef.current.reset();
+    const started = await voiceCommandService.start(handleConversationTurn, setVoiceStatus);
     if (started) {
       setVoiceEnabled(true);
       setVoiceStatus('wake_listening');
-      tts.speak('Voice commands on. Say ' + WAKE_WORD_LABEL + '.', 1, true);
+      tts.speak('Conversational guide on. Say ' + WAKE_WORD_LABEL + ', then speak naturally.', 1, true);
+      ensureLlmReady(false).then(() => setLlmState(localLlmService.getState()));
     } else {
       setVoiceEnabled(false);
       setVoiceStatus('unavailable');
       tts.speak('Voice commands unavailable. Check microphone permission and wake word assets.', 1, true);
     }
-  }, [handleVoiceCommand, voiceEnabled]);
+  }, [ensureLlmReady, handleConversationTurn, voiceEnabled]);
+
+  const downloadConversationalModel = useCallback(async (allowCellular: boolean = false) => {
+    const ready = await ensureLlmReady(allowCellular, voiceEnabledRef.current);
+    setLlmState(localLlmService.getState());
+    if (ready) {tts.speak('Conversational guide model is ready.', 1, true);}
+    return ready;
+  }, [ensureLlmReady]);
+
+  const cancelConversationalModelDownload = useCallback(async () => {
+    await modelAssetService.cancelDownload();
+    tts.speak('Model download paused.', 1, true);
+  }, []);
+
+  const deleteConversationalModel = useCallback(async () => {
+    await localLlmService.release();
+    setLlmState(localLlmService.getState());
+    await modelAssetService.deleteModel();
+    tts.speak('Conversational model deleted. Safety guidance is unchanged.', 1, true);
+  }, []);
 
   useEffect(() => () => {
     voiceCommandService.stop();
@@ -701,6 +1013,10 @@ export function useVisionAssistant() {
       isGuidingRef.current = false;
       setIsGuiding(false);
       temporalEngineRef.current.reset();
+      mobilityGuideRef.current.reset();
+      groundingServiceRef.current.reset();
+      conversationControllerRef.current.reset();
+      groundingContextRef.current = null;
       deferredGuidanceRef.current = null;
       cancelInFlight();
       cancelHaptics(true);
@@ -724,6 +1040,8 @@ export function useVisionAssistant() {
     depthStatus,
     voiceEnabled,
     voiceStatus,
+    modelStatus,
+    llmState,
     hapticAlertsEnabled,
     previewFrameBase64,
     previewResolution,
@@ -736,6 +1054,9 @@ export function useVisionAssistant() {
     setHapticAlertsEnabled,
     stopHaptic,
     toggleVoiceCommands,
+    downloadConversationalModel,
+    cancelConversationalModelDownload,
+    deleteConversationalModel,
   };
 }
 
@@ -771,4 +1092,32 @@ function summarizeTrackedEntities(tracks: TrackedEntity[]): string {
     const risk = track.risk === 'none' ? '' : `, ${track.risk}`;
     return `${name} (${location}${risk})`;
   }).join(' · ');
+}
+
+function directiveEvent(
+  directive: import('../types').GuidanceDirective,
+  sceneRevision: number,
+  targetName?: string,
+): GuidanceEvent {
+  return {
+    key: directive.key,
+    kind: 'navigation',
+    priority: directive.priority,
+    text: renderDirective(directive, targetName),
+    expiresAt: directive.expiresAt,
+    haptic: directive.priority >= 1,
+    interruption: directive.priority >= 2 ? 'immediate' : 'after-command',
+    source: directive.priority >= 2 ? 'safety' : 'mobility',
+    sceneRevision,
+    invalidatesOnSceneChange: directive.priority < 2,
+  };
+}
+
+function navigationEvent(text: string, sceneRevision: number, goalRevision?: number): GuidanceEvent {
+  return {
+    key: `navigation:goal:${goalRevision ?? sceneRevision}`,
+    kind: 'navigation', priority: 0, text, expiresAt: Date.now() + 5000,
+    haptic: false, interruption: 'after-command', source: 'mobility',
+    sceneRevision, goalRevision, invalidatesOnSceneChange: true,
+  };
 }

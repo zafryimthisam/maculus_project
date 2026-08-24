@@ -130,6 +130,17 @@ class MaculusVoiceCommandModule(
     }
 
     @ReactMethod
+    fun interruptForEmergency(promise: Promise) {
+        mainHandler.post {
+            wakePausedForTts = true
+            stopWakeLoop()
+            cancelCommandRecognition()
+            emitState(if (wakeEnabled) "paused" else "off")
+            promise.resolve(null)
+        }
+    }
+
+    @ReactMethod
     fun resumeAfterTts(promise: Promise) {
         mainHandler.post {
             wakePausedForTts = false

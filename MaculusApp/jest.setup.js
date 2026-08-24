@@ -103,6 +103,7 @@ NativeModules.MaculusVoiceCommand = {
   stopVoiceControl: jest.fn().mockResolvedValue(undefined),
   listenForCommandOnce: jest.fn().mockResolvedValue(null),
   pauseForTts: jest.fn().mockResolvedValue(undefined),
+  interruptForEmergency: jest.fn().mockResolvedValue(undefined),
   resumeAfterTts: jest.fn().mockResolvedValue(undefined),
 };
 
@@ -125,4 +126,22 @@ NativeModules.MaculusDeviceCamera = {
 
 NativeModules.MaculusKeepAwake = {
   setEnabled: jest.fn().mockResolvedValue(undefined),
+};
+
+NativeModules.MaculusModelManager = {
+  getStatus: jest.fn().mockResolvedValue({
+    state: 'missing', path: null, downloadedBytes: 0, totalBytes: 695755488,
+    metered: false, conversationalSupported: true,
+  }),
+  startDownload: jest.fn().mockRejectedValue(Object.assign(new Error('Download disabled in tests'), { code: 'TEST' })),
+  cancelDownload: jest.fn().mockResolvedValue({
+    state: 'paused', path: null, downloadedBytes: 0, totalBytes: 695755488,
+    metered: false, conversationalSupported: true,
+  }),
+  deleteModel: jest.fn().mockResolvedValue({
+    state: 'missing', path: null, downloadedBytes: 0, totalBytes: 695755488,
+    metered: false, conversationalSupported: true,
+  }),
+  addListener: jest.fn(),
+  removeListeners: jest.fn(),
 };

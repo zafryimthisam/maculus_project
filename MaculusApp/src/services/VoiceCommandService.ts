@@ -1,11 +1,14 @@
 import { EmitterSubscription, NativeEventEmitter, NativeModules, Vibration } from 'react-native';
 import { COMMAND_TIMEOUT_MS, WAKE_WORD_LABEL } from '../config/WakeWordConfig';
 import { tts } from './TTSService';
+import { ConversationTurn } from '../types';
 
 export type VoiceCommand =
   | 'start_guidance'
   | 'stop_guidance'
   | 'describe_scene'
+  | 'repeat_guidance'
+  | 'cancel_goal'
   | 'haptic_off'
   | 'haptic_on'
   | 'stop_haptic';
@@ -45,6 +48,7 @@ type VoiceCommandNativeModule = {
   listenForCommandOnce(timeoutMs: number): Promise<VoiceCommandResult | null>;
   pauseForTts(): Promise<void>;
   resumeAfterTts(): Promise<void>;
+  interruptForEmergency(): Promise<void>;
 };
 
 type VoiceCommandActions = {
@@ -53,6 +57,8 @@ type VoiceCommandActions = {
   describeScene(): void;
   setHapticAlertsEnabled(enabled: boolean): void;
   stopHaptic(): void;
+  repeatLastGuidance(): string | null;
+  cancelActiveGoal(): boolean;
   isGuiding(): boolean;
 };
 
@@ -63,7 +69,6 @@ export type VoiceCommandExecution = {
 
 const WAKE_WORD = 'maculus';
 const MIN_CONFIDENCE = 0.35;
-const UNKNOWN_COMMAND_COOLDOWN_MS = 8000;
 const WAKE_PROMPT_DELAY_MS = 700;
 
 const MaculusVoiceCommand = NativeModules.MaculusVoiceCommand as VoiceCommandNativeModule | undefined;
@@ -90,6 +95,15 @@ export function parseVoiceCommand(
 
   if (!command) {
     return null;
+  }
+
+  if (containsAny(command, ['repeat', 'say again', 'again']) && containsAny(command, ['guidance', 'instruction', 'that', 'last'])) {
+    return 'repeat_guidance';
+  }
+  if (command === 'cancel' || (
+    containsAny(command, ['cancel', 'stop']) && containsAny(command, ['search', 'target', 'goal'])
+  )) {
+    return 'cancel_goal';
   }
 
   const guidanceWords = ['guidance', 'guide', 'guiding'];
@@ -147,14 +161,15 @@ export function executeVoiceCommand(
       actions.stopGuidance();
       return { handled: true };
     case 'describe_scene':
-      if (actions.isGuiding()) {
-        return {
-          handled: true,
-          feedback: 'Guidance is already running. Say stop guidance first.',
-        };
-      }
       actions.describeScene();
       return { handled: true };
+    case 'repeat_guidance':
+      return { handled: true, feedback: actions.repeatLastGuidance() || 'There is no recent guidance to repeat.' };
+    case 'cancel_goal':
+      return {
+        handled: true,
+        feedback: actions.cancelActiveGoal() ? 'Okay, I stopped the current search.' : 'There is no active search to cancel.',
+      };
     case 'haptic_off':
       actions.setHapticAlertsEnabled(false);
       return { handled: true };
@@ -176,13 +191,14 @@ export class VoiceCommandService {
   private enabled = false;
   private commandBusy = false;
   private status: VoiceCommandStatus = 'off';
-  private lastUnknownCommandTime = 0;
+  private sessionId = '';
+  private safetyInterrupted = false;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private onStatus: ((status: VoiceCommandStatus) => void) | null = null;
-  private onCommand: ((command: VoiceCommand, result: VoiceCommandResult) => void) | null = null;
+  private onTurn: ((turn: ConversationTurn, fastCommand: VoiceCommand | null) => void | Promise<void>) | null = null;
 
   async start(
-    onCommand: (command: VoiceCommand, result: VoiceCommandResult) => void,
+    onTurn: (turn: ConversationTurn, fastCommand: VoiceCommand | null) => void | Promise<void>,
     onStatus: (status: VoiceCommandStatus) => void,
   ): Promise<boolean> {
     if (!MaculusVoiceCommand) {
@@ -192,7 +208,8 @@ export class VoiceCommandService {
 
     this.stopLocal();
     this.enabled = true;
-    this.onCommand = onCommand;
+    this.onTurn = onTurn;
+    this.sessionId = `voice:${Date.now()}`;
     this.onStatus = onStatus;
 
     try {
@@ -234,6 +251,16 @@ export class VoiceCommandService {
     }
   }
 
+  async interruptForEmergency(): Promise<void> {
+    this.safetyInterrupted = true;
+    this.commandBusy = false;
+    this.clearRecoveryTimer();
+    this.setStatus(this.enabled ? 'paused' : 'off');
+    if (MaculusVoiceCommand) {
+      await MaculusVoiceCommand.interruptForEmergency().catch(() => {});
+    }
+  }
+
   private handleWakeDetected = async (detection: WakeDetection) => {
     console.log('[Voice] Wake detected:', detection);
     if (!this.enabled || this.commandBusy || !MaculusVoiceCommand) {
@@ -241,13 +268,14 @@ export class VoiceCommandService {
     }
 
     this.commandBusy = true;
+    this.safetyInterrupted = false;
     this.setStatus('wake_detected');
     Vibration.vibrate([0, 60]);
     tts.stop();
     tts.speak('Listening', 1, true);
 
     await sleep(WAKE_PROMPT_DELAY_MS);
-    if (!this.enabled || !MaculusVoiceCommand) {
+    if (!this.enabled || !MaculusVoiceCommand || this.safetyInterrupted) {
       this.commandBusy = false;
       return;
     }
@@ -263,7 +291,7 @@ export class VoiceCommandService {
 
       if (!result?.text) {
         console.log('[Voice] No command transcript returned');
-        tts.speak('No command heard', 1, true);
+        if (!this.safetyInterrupted) {tts.speak('No command heard', 1, true);}
         return;
       }
 
@@ -277,24 +305,22 @@ export class VoiceCommandService {
         confidence: result.confidence,
         command,
       });
-      if (command) {
-        this.onCommand?.(command, result);
-      } else {
-        console.warn('[Voice] Command not recognized:', {
-          text: result.text,
-          confidence: result.confidence,
-        });
-        const now = Date.now();
-        if (now - this.lastUnknownCommandTime > UNKNOWN_COMMAND_COOLDOWN_MS) {
-          this.lastUnknownCommandTime = now;
-          tts.speak('Command not recognized', 1, true);
-        }
-      }
+      // Speech recognition has finished. Mark capture inactive before the
+      // potentially longer local-LLM turn so its response can enter TTS while
+      // emergency guidance remains free to interrupt it.
+      this.commandBusy = false;
+      await this.onTurn?.({
+        transcript: result.text.trim(),
+        timestamp: Date.now(),
+        confidence: typeof result.confidence === 'number' ? result.confidence : null,
+        sessionId: this.sessionId,
+      }, command);
     } catch (e) {
       console.warn('[Voice] Command listen failed:', e);
       this.setStatus('error');
     } finally {
       this.commandBusy = false;
+      this.safetyInterrupted = false;
       if (this.enabled) {
         await this.restartWakeListening();
       }
@@ -393,7 +419,9 @@ export class VoiceCommandService {
     this.ttsSubscription?.();
     this.ttsSubscription = null;
     this.emitter = null;
-    this.onCommand = null;
+    this.onTurn = null;
+    this.sessionId = '';
+    this.safetyInterrupted = false;
     this.setStatus('off');
     this.onStatus = null;
   }
@@ -410,8 +438,7 @@ export class VoiceCommandService {
   isCommandCaptureActive(): boolean {
     return this.commandBusy ||
       this.status === 'wake_detected' ||
-      this.status === 'command_listening' ||
-      this.status === 'processing';
+      this.status === 'command_listening';
   }
 }
 

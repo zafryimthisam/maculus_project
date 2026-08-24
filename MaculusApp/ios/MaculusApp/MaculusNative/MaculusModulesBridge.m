@@ -55,6 +55,20 @@ RCT_EXTERN_METHOD(listenForCommandOnce:(nonnull NSNumber *)timeoutMs
                   rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(pauseForTts:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(interruptForEmergency:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(resumeAfterTts:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+@end
+
+@interface RCT_EXTERN_MODULE(MaculusModelManager, RCTEventEmitter)
+RCT_EXTERN_METHOD(getStatus:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(startDownload:(BOOL)allowCellular
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(cancelDownload:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(deleteModel:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 @end
