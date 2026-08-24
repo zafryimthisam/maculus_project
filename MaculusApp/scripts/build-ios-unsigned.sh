@@ -143,6 +143,8 @@ APP="$(find "$DERIVED_DATA/Build/Products/Release-iphoneos" -maxdepth 1 -name "*
 
 for model_name in \
   yolo11s.tflite \
+  yolo11s.tflite.sha256 \
+  yolo11s.tflite.provenance.json \
   depth_anything_v2_small_uint8_256.onnx \
   person_reid_osnet_x0_25.onnx \
   melspectrogram.onnx \
@@ -151,6 +153,14 @@ for model_name in \
   find "$APP" -name "$model_name" -print -quit | grep -q . ||
     fail "Built app is missing required offline model: $model_name"
 done
+
+YOLO_MODEL="$(find "$APP" -name yolo11s.tflite -print -quit)"
+YOLO_CHECKSUM="$(find "$APP" -name yolo11s.tflite.sha256 -print -quit)"
+read -r EXPECTED_YOLO_SHA _ < "$YOLO_CHECKSUM"
+ACTUAL_YOLO_SHA="$(shasum -a 256 "$YOLO_MODEL")"
+ACTUAL_YOLO_SHA="${ACTUAL_YOLO_SHA%% *}"
+[[ "$ACTUAL_YOLO_SHA" == "$EXPECTED_YOLO_SHA" ]] ||
+  fail "Bundled YOLO model checksum does not match its tracked provenance file."
 
 REID_MODEL="$(find "$APP" -name person_reid_osnet_x0_25.onnx -print -quit)"
 REID_CHECKSUM="$(find "$APP" -name person_reid_osnet_x0_25.onnx.sha256 -print -quit)"

@@ -154,7 +154,7 @@ struct MaculusLetterbox {
   let sourceHeight: CGFloat
 }
 
-enum MaculusImage {
+public enum MaculusImage {
   static func decode(base64: String) throws -> UIImage {
     guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
           !data.isEmpty,
@@ -237,7 +237,8 @@ enum MaculusImage {
     return UIImage(cgImage: cropped, scale: 1, orientation: .up)
   }
 
-  static func rgbBytes(_ image: UIImage) throws -> [UInt8] {
+  /// Returns interleaved RGB pixels in visible top-to-bottom row order.
+  public static func rgbBytes(_ image: UIImage) throws -> [UInt8] {
     guard let cgImage = image.cgImage else {
       throw MaculusNativeError.message("Image has no CGImage")
     }
@@ -256,8 +257,6 @@ enum MaculusImage {
           CGBitmapInfo.byteOrder32Big.rawValue
       ) else { return false }
       context.interpolationQuality = .high
-      context.translateBy(x: 0, y: CGFloat(height))
-      context.scaleBy(x: 1, y: -1)
       context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
       return true
     }

@@ -27,10 +27,10 @@ import java.nio.channels.FileChannel
 /**
  * MaculusVision - YOLO-only on-device object detection.
  *
- * Decode JPEG -> letterbox to 320x320 -> TFLite (NNAPI/GPU/CPU) -> dequantize
+ * Decode JPEG -> letterbox to the model tensor size -> TFLite (NNAPI/GPU/CPU) -> dequantize
  * -> NMS, all in native. Only a small result array crosses the RN bridge.
  *
- * Model: YOLO11s exported int8, imgsz=320. Expected output [1, 84, anchors]
+ * Model: YOLO11s exported int8. Expected output [1, 84, anchors]
  * where 84 = 4 box coords + 80 COCO class scores.
  */
 class MaculusVisionModule(reactContext: ReactApplicationContext) :
@@ -38,7 +38,6 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
 
     companion object {
         private const val TAG = "MaculusVision"
-        private const val INPUT_SIZE = 320
         private const val NUM_CLASSES = 80
         private const val CONF_THRESHOLD = 0.30f
         private const val IOU_THRESHOLD = 0.45f
@@ -74,6 +73,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     private var outputIsQuantized = false
     private var outputScale = 1f
     private var outputZeroPoint = 0
+    private var inputSize = 0
     private var numAnchors = 2100
     private var inputBuffer: ByteBuffer? = null
 
@@ -85,6 +85,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             if (interpreter != null) {
                 val map = Arguments.createMap()
                 map.putString("backend", backend)
+                map.putInt("inputSize", inputSize)
                 map.putBoolean("alreadyLoaded", true)
                 promise.resolve(map)
                 return
@@ -95,7 +96,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             interpreter = tryCreateInterpreter(modelBuffer)
 
             val inputTensor = interpreter!!.getInputTensor(0)
-            validateInputShape(inputTensor.shape())
+            inputSize = validateInputShape(inputTensor.shape())
             inputIsQuantized = inputTensor.dataType() == DataType.UINT8 ||
                 inputTensor.dataType() == DataType.INT8
             inputTensor.quantizationParams()?.let {
@@ -115,7 +116,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
 
             val map = Arguments.createMap()
             map.putString("backend", backend)
-            map.putInt("inputSize", INPUT_SIZE)
+            map.putInt("inputSize", inputSize)
             map.putInt("numAnchors", numAnchors)
             map.putBoolean("quantized", outputIsQuantized)
             promise.resolve(map)
@@ -138,13 +139,16 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun validateInputShape(shape: IntArray) {
-        if (shape.size != 4 || shape[0] != 1 || shape[1] != INPUT_SIZE ||
-            shape[2] != INPUT_SIZE || shape[3] != 3) {
+    private fun validateInputShape(shape: IntArray): Int {
+        val size = shape.getOrNull(1) ?: 0
+        if (shape.size != 4 || shape[0] != 1 || shape[2] != size ||
+            size !in 320..640 || size % 32 != 0 || shape[3] != 3) {
             throw IllegalStateException(
-                "Expected YOLO input shape [1,$INPUT_SIZE,$INPUT_SIZE,3], got ${shape.joinToString(prefix = "[", postfix = "]") }"
+                "Expected square YOLO input [1,size,size,3] with size 320..640 " +
+                    "and divisible by 32, got ${shape.joinToString(prefix = "[", postfix = "]") }"
             )
         }
+        return size
     }
 
     private fun validateOutputShape(shape: IntArray) {
@@ -242,13 +246,13 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     private fun letterbox(src: Bitmap): Letterbox {
         val srcW = src.width
         val srcH = src.height
-        val scale = minOf(INPUT_SIZE.toFloat() / srcW, INPUT_SIZE.toFloat() / srcH)
+        val scale = minOf(inputSize.toFloat() / srcW, inputSize.toFloat() / srcH)
         val newW = Math.round(srcW * scale)
         val newH = Math.round(srcH * scale)
-        val padX = (INPUT_SIZE - newW) / 2f
-        val padY = (INPUT_SIZE - newH) / 2f
+        val padX = (inputSize - newW) / 2f
+        val padY = (inputSize - newH) / 2f
 
-        val canvasBmp = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+        val canvasBmp = Bitmap.createBitmap(inputSize, inputSize, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(canvasBmp)
         canvas.drawColor(Color.rgb(114, 114, 114))
         val scaled = Bitmap.createScaledBitmap(src, newW, newH, true)
@@ -267,7 +271,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     }
 
     private fun fillInputBuffer(bmp: Bitmap): ByteBuffer {
-        val pixelCount = INPUT_SIZE * INPUT_SIZE
+        val pixelCount = inputSize * inputSize
         val bytesPerChannel = if (inputIsQuantized) 1 else 4
         val needed = pixelCount * 3 * bytesPerChannel
         val buf = if (inputBuffer != null && inputBuffer!!.capacity() == needed) {
@@ -280,7 +284,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
         buf.rewind()
 
         val pixels = IntArray(pixelCount)
-        bmp.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        bmp.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
         for (p in pixels) {
             val r = (p shr 16) and 0xFF
             val g = (p shr 8) and 0xFF
@@ -338,16 +342,16 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             val rawW = data[2 * anchors + a]
             val rawH = data[3 * anchors + a]
 
-            // Ultralytics TFLite exports can emit xywh either as 320px model
+            // Ultralytics TFLite exports can emit xywh either as model-pixel
             // coordinates or normalized 0..1 coordinates. Normalize both into
             // letterboxed model pixels before mapping back to the camera frame.
             val outputIsNormalized = maxOf(
                 Math.abs(rawCx), Math.abs(rawCy), Math.abs(rawW), Math.abs(rawH)
             ) <= 2f
-            val modelCx = if (outputIsNormalized) rawCx * INPUT_SIZE else rawCx
-            val modelCy = if (outputIsNormalized) rawCy * INPUT_SIZE else rawCy
-            val modelW = if (outputIsNormalized) rawW * INPUT_SIZE else rawW
-            val modelH = if (outputIsNormalized) rawH * INPUT_SIZE else rawH
+            val modelCx = if (outputIsNormalized) rawCx * inputSize else rawCx
+            val modelCy = if (outputIsNormalized) rawCy * inputSize else rawCy
+            val modelW = if (outputIsNormalized) rawW * inputSize else rawW
+            val modelH = if (outputIsNormalized) rawH * inputSize else rawH
 
             val origCx = (modelCx - lb.padX) / lb.scaleX
             val origCy = (modelCy - lb.padY) / lb.scaleY

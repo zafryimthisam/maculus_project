@@ -1,0 +1,38 @@
+{
+  "baseline": {
+    "asset": "yolo11s.pt",
+    "map50": 0.5758693355900332,
+    "map50_95": 0.41882820006090027,
+    "map75": 0.45154327261271077,
+    "sha256": "85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5",
+    "speedMillisecondsPerImage": {
+      "inference": 95.62368577080524,
+      "loss": 0.0028631616001803194,
+      "postprocess": 1.3335154444013824,
+      "preprocess": 0.43398709699649773
+    }
+  },
+  "dataset": "coco.yaml",
+  "imageSize": [
+    416,
+    416
+  ],
+  "int8": {
+    "asset": "yolo11s.tflite",
+    "map50": 0.5492526686731842,
+    "map50_95": 0.3749594306548265,
+    "map75": 0.40564918807656686,
+    "sha256": "8966b0028ea372b6dfda7ba58ffb239486c61056f3e0ba0fcb624e9c51702b3a",
+    "speedMillisecondsPerImage": {
+      "inference": 45.456837031601566,
+      "loss": 0.003880497795398696,
+      "postprocess": 1.348226679999425,
+      "preprocess": 0.5324610935957025
+    }
+  },
+  "map50_95LossPoints": 4.386876940607376,
+  "maximumAllowedLossPoints": 2.0,
+  "meetsAccuracyTarget": false,
+  "ultralyticsVersion": "8.3.207",
+  "validationFraction": 1.0
+}

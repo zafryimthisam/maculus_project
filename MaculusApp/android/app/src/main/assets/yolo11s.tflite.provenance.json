@@ -1,0 +1,32 @@
+{
+  "architecture": "Ultralytics YOLO11s detection",
+  "asset": "yolo11s.tflite",
+  "export": {
+    "calibrationData": "coco.yaml",
+    "calibrationFraction": 0.1,
+    "classes": 80,
+    "format": "TensorFlow Lite",
+    "imageSize": [
+      416,
+      416
+    ],
+    "integerQuantization": "full INT8",
+    "representativeImages": 500,
+    "toolchain": {
+      "numpy": "1.26.4",
+      "onnx": "1.17.0",
+      "onnx2tf": "1.26.3",
+      "tensorflow": "2.19.0"
+    },
+    "ultralyticsVersion": "8.3.207"
+  },
+  "license": {
+    "name": "AGPL-3.0-or-later or Ultralytics Enterprise License",
+    "url": "https://www.ultralytics.com/license"
+  },
+  "privacy": "Calibration data is used only during export and is not bundled in the app.",
+  "sha256": "8966b0028ea372b6dfda7ba58ffb239486c61056f3e0ba0fcb624e9c51702b3a",
+  "source": "https://docs.ultralytics.com/models/yolo11/",
+  "sourceCheckpoint": "yolo11s.pt",
+  "sourceCheckpointSha256": "85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5"
+}

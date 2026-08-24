@@ -6,7 +6,7 @@ final class MaculusVision: NSObject {
   private let queue = DispatchQueue(label: "com.maculus.vision", qos: .userInitiated)
   private var interpreter: MaculusTFLiteRunner?
   private var labels: [String] = []
-  private let inputSize = 320
+  private var inputSize = 0
   private let classCount = 80
   private let confidenceThreshold: Float = 0.30
   private let iouThreshold: Float = 0.45
@@ -20,7 +20,11 @@ final class MaculusVision: NSObject {
     queue.async {
       do {
         if self.interpreter != nil {
-          resolve(["backend": "TensorFlow Lite CPU", "alreadyLoaded": true])
+          resolve([
+            "backend": "TensorFlow Lite CPU",
+            "inputSize": self.inputSize,
+            "alreadyLoaded": true,
+          ])
           return
         }
         let interpreter = try MaculusTFLiteRunner(
@@ -29,9 +33,15 @@ final class MaculusVision: NSObject {
         let input = interpreter.inputInfo
         let output = interpreter.outputInfo
         let inputShape = input.shape.map(\.intValue)
-        guard inputShape == [1, self.inputSize, self.inputSize, 3] else {
+        guard inputShape.count == 4,
+              inputShape[0] == 1,
+              inputShape[1] == inputShape[2],
+              (320...640).contains(inputShape[1]),
+              inputShape[1].isMultiple(of: 32),
+              inputShape[3] == 3 else {
           throw MaculusNativeError.message(
-            "Expected YOLO input [1,320,320,3], got \(inputShape)"
+            "Expected square YOLO input [1,size,size,3] with size 320...640 " +
+              "and divisible by 32, got \(inputShape)"
           )
         }
         let shape = output.shape.map(\.intValue)
@@ -42,6 +52,7 @@ final class MaculusVision: NSObject {
         }
         self.labels = MaculusResources.textLines("coco-labels", extension: "txt")
         if self.labels.isEmpty { self.labels = Self.fallbackLabels }
+        self.inputSize = inputShape[1]
         self.interpreter = interpreter
         resolve([
           "backend": "TensorFlow Lite CPU",
