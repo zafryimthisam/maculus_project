@@ -330,6 +330,11 @@ export class TTSService {
     this.lastGuidanceKeys.clear();
   }
 
+  async prepareForListening(settleMs: number = 350): Promise<void> {
+    this.stop();
+    await new Promise<void>(resolve => setTimeout(resolve, settleMs));
+  }
+
   destroy(): void {
     this.stop();
     this.listeners.forEach((l) => {

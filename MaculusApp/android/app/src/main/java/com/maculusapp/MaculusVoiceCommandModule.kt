@@ -42,6 +42,8 @@ class MaculusVoiceCommandModule(
     private var recognizer: SpeechRecognizer? = null
     private var commandPromise: Promise? = null
     private var commandTimeoutRunnable: Runnable? = null
+    private var latestCommandText: String? = null
+    private var latestCommandConfidence: Float? = null
     private var pendingWakeStartPromise: Promise? = null
     @Volatile private var wakeLoopId = 0L
 
@@ -342,12 +344,15 @@ class MaculusVoiceCommandModule(
         cancelCommandRecognition()
         ensureRecognizer()
         commandPromise = promise
+        latestCommandText = null
+        latestCommandConfidence = null
         val timeout = Runnable {
             val pending = commandPromise
             commandPromise = null
             try { recognizer?.cancel() } catch (_: Exception) { }
             emitState("wake_listening")
-            pending?.resolve(null)
+            pending?.resolve(latestCommandResult())
+            clearLatestCommandResult()
         }
         commandTimeoutRunnable = timeout
         mainHandler.postDelayed(timeout, timeoutMs.toLong())
@@ -356,7 +361,7 @@ class MaculusVoiceCommandModule(
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, reactContext.packageName)
             if (isOnDeviceAvailable()) {
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
@@ -386,7 +391,9 @@ class MaculusVoiceCommandModule(
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
         override fun onEndOfSpeech() = Unit
-        override fun onPartialResults(partialResults: Bundle?) = Unit
+        override fun onPartialResults(partialResults: Bundle?) {
+            rememberLatestCommand(partialResults)
+        }
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
         override fun onError(error: Int) {
@@ -394,9 +401,11 @@ class MaculusVoiceCommandModule(
             val pending = commandPromise
             clearCommandTimeout()
             commandPromise = null
+            val latest = latestCommandResult()
+            clearLatestCommandResult()
             if (isExpectedCommandMiss(error)) {
                 Log.d(TAG, "Command recognizer ended without command: $message (code=$error)")
-                pending?.resolve(null)
+                pending?.resolve(latest)
                 return
             }
             Log.w(TAG, "Command recognizer error: $message (code=$error)")
@@ -412,24 +421,43 @@ class MaculusVoiceCommandModule(
             val confidences = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
             Log.d(TAG, "Command recognizer results: matches=$matches confidences=${confidences?.joinToString()}")
             if (matches.isEmpty()) {
-                pending?.resolve(null)
+                pending?.resolve(latestCommandResult())
+                clearLatestCommandResult()
                 return
             }
-            pending?.resolve(Arguments.createMap().apply {
-                putString("text", matches[0])
-                if (confidences != null && confidences.isNotEmpty()) {
-                    putDouble("confidence", confidences[0].toDouble())
-                } else {
-                    putNull("confidence")
-                }
-            })
+            latestCommandText = matches[0]
+            latestCommandConfidence = confidences?.firstOrNull()
+            pending?.resolve(latestCommandResult())
+            clearLatestCommandResult()
         }
+    }
+
+    private fun rememberLatestCommand(results: Bundle?) {
+        val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            ?.firstOrNull()?.trim().orEmpty()
+        if (text.isNotEmpty()) {
+            latestCommandText = text
+            latestCommandConfidence = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.firstOrNull()
+        }
+    }
+
+    private fun latestCommandResult() = latestCommandText?.let { text ->
+        Arguments.createMap().apply {
+            putString("text", text)
+            latestCommandConfidence?.let { putDouble("confidence", it.toDouble()) } ?: putNull("confidence")
+        }
+    }
+
+    private fun clearLatestCommandResult() {
+        latestCommandText = null
+        latestCommandConfidence = null
     }
 
     private fun cancelCommandRecognition() {
         clearCommandTimeout()
         commandPromise?.resolve(null)
         commandPromise = null
+        clearLatestCommandResult()
         try { recognizer?.cancel() } catch (_: Exception) { }
     }
 

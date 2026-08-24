@@ -69,7 +69,8 @@ export type VoiceCommandExecution = {
 
 const WAKE_WORD = 'maculus';
 const MIN_CONFIDENCE = 0.35;
-const WAKE_PROMPT_DELAY_MS = 700;
+const AUDIO_HANDOFF_MS = 350;
+const EARLY_NO_RESULT_MS = 1800;
 
 const MaculusVoiceCommand = NativeModules.MaculusVoiceCommand as VoiceCommandNativeModule | undefined;
 
@@ -271,10 +272,12 @@ export class VoiceCommandService {
     this.safetyInterrupted = false;
     this.setStatus('wake_detected');
     Vibration.vibrate([0, 60]);
-    tts.stop();
-    tts.speak('Listening', 1, true);
+    // Command capture uses a silent haptic acknowledgement. Spoken prompts can
+    // keep the iOS audio session occupied and are easy for the recognizer to
+    // mistake for the beginning of the user's question.
+    await MaculusVoiceCommand.pauseForTts().catch(() => {});
+    await tts.prepareForListening(AUDIO_HANDOFF_MS);
 
-    await sleep(WAKE_PROMPT_DELAY_MS);
     if (!this.enabled || !MaculusVoiceCommand || this.safetyInterrupted) {
       this.commandBusy = false;
       return;
@@ -282,7 +285,15 @@ export class VoiceCommandService {
 
     this.setStatus('command_listening');
     try {
-      const result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
+      const captureStartedAt = Date.now();
+      let result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
+      // Some iOS audio routes report an immediate empty result while switching
+      // from TTS output to microphone input. Retry only that early failure;
+      // a genuine full timeout remains silent and returns to wake listening.
+      if (!result?.text && Date.now() - captureStartedAt < EARLY_NO_RESULT_MS && !this.safetyInterrupted) {
+        await sleep(AUDIO_HANDOFF_MS);
+        result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
+      }
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled) {
         this.commandBusy = false;
@@ -291,7 +302,7 @@ export class VoiceCommandService {
 
       if (!result?.text) {
         console.log('[Voice] No command transcript returned');
-        if (!this.safetyInterrupted) {tts.speak('No command heard', 1, true);}
+        if (!this.safetyInterrupted) {Vibration.vibrate([0, 45, 60, 45]);}
         return;
       }
 

@@ -215,8 +215,11 @@ class MaculusModelManagerModule(
         putDouble("totalBytes", EXPECTED_SIZE.toDouble())
         putBoolean("metered", isMeteredConnection())
         val capability = conversationalCapability()
+        val thermal = thermalStatus()
         putBoolean("conversationalSupported", capability.first)
         if (capability.second != null) putString("capabilityReason", capability.second)
+        putBoolean("thermalThrottled", thermal.second)
+        putString("thermalState", thermal.first)
     }
 
     private fun emitProgress(state: String, downloaded: Long, total: Long, message: String?) {
@@ -232,9 +235,12 @@ class MaculusModelManagerModule(
 
     private fun emitCapability() {
         val capability = conversationalCapability()
+        val thermal = thermalStatus()
         val event = Arguments.createMap().apply {
             putBoolean("conversationalSupported", capability.first)
             if (capability.second != null) putString("capabilityReason", capability.second)
+            putBoolean("thermalThrottled", thermal.second)
+            putString("thermalState", thermal.first)
         }
         context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit(EVENT_PROGRESS, event)
@@ -264,11 +270,27 @@ class MaculusModelManagerModule(
         }
         if (Build.VERSION.SDK_INT >= 29) {
             val power = context.getSystemService(PowerManager::class.java)
-            if ((power?.currentThermalStatus ?: PowerManager.THERMAL_STATUS_NONE) >= PowerManager.THERMAL_STATUS_SEVERE) {
-                return false to "The device is too warm to load the conversational model."
+            if ((power?.currentThermalStatus ?: PowerManager.THERMAL_STATUS_NONE) >= PowerManager.THERMAL_STATUS_CRITICAL) {
+                return false to "The device reached the critical thermal safety limit. Conversational guidance will resume after it cools."
             }
         }
         return true to null
+    }
+
+    private fun thermalStatus(): Pair<String, Boolean> {
+        if (Build.VERSION.SDK_INT < 29) return "unknown" to false
+        val value = powerManager?.currentThermalStatus ?: PowerManager.THERMAL_STATUS_NONE
+        val name = when (value) {
+            PowerManager.THERMAL_STATUS_NONE -> "nominal"
+            PowerManager.THERMAL_STATUS_LIGHT -> "light"
+            PowerManager.THERMAL_STATUS_MODERATE -> "moderate"
+            PowerManager.THERMAL_STATUS_SEVERE -> "severe"
+            PowerManager.THERMAL_STATUS_CRITICAL -> "critical"
+            PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
+            else -> "unknown"
+        }
+        return name to (value >= PowerManager.THERMAL_STATUS_SEVERE && value < PowerManager.THERMAL_STATUS_CRITICAL)
     }
 
     private fun sha256(file: File): String {

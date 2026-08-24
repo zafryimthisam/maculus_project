@@ -24,6 +24,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
   private var recognitionTask: SFSpeechRecognitionTask?
   private var commandTimeout: DispatchWorkItem?
+  private var latestCommandResult: [String: Any]?
   private var commandPromise: (
     resolve: RCTPromiseResolveBlock,
     reject: RCTPromiseRejectBlock
@@ -149,7 +150,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
 
         let engine = AVAudioEngine()
         let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = false
+        request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -161,6 +162,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
         }
         self.commandAudioEngine = engine
         self.recognitionRequest = request
+        self.latestCommandResult = nil
         engine.prepare()
         try engine.start()
 
@@ -168,23 +170,27 @@ final class MaculusVoiceCommand: RCTEventEmitter {
         self.emitState("command_listening")
         self.recognitionTask = recognizer.recognitionTask(with: request) { result, error in
           DispatchQueue.main.async {
-            if let result, result.isFinal {
+            if let result {
               let segments = result.bestTranscription.segments
               let confidence = segments.isEmpty
                 ? nil
                 : segments.reduce(Float(0)) { $0 + $1.confidence } / Float(segments.count)
               let bridgedConfidence: Any = confidence.map { NSNumber(value: $0) } ?? NSNull()
-              self.finishCommand(result: [
-                "text": result.bestTranscription.formattedString,
-                "confidence": bridgedConfidence,
-              ])
+              let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+              if !text.isEmpty {
+                self.latestCommandResult = ["text": text, "confidence": bridgedConfidence]
+              }
+              if result.isFinal { self.finishCommand(result: self.latestCommandResult) }
             } else if error != nil {
-              self.finishCommand(result: nil)
+              self.finishCommand(result: self.latestCommandResult)
             }
           }
         }
 
-        let timeout = DispatchWorkItem { [weak self] in self?.finishCommand(result: nil) }
+        let timeout = DispatchWorkItem { [weak self] in
+          guard let strongSelf = self else { return }
+          strongSelf.finishCommand(result: strongSelf.latestCommandResult)
+        }
         self.commandTimeout = timeout
         DispatchQueue.main.asyncAfter(
           deadline: .now() + max(1, timeoutMs.doubleValue / 1000),
@@ -354,6 +360,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     commandAudioEngine = nil
     let promise = commandPromise
     commandPromise = nil
+    latestCommandResult = nil
     promise?.resolve(result)
   }
 

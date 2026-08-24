@@ -7,6 +7,7 @@ type QueuedSpeech = { text: string; priority: number; kind: string };
 type TestableTTSService = {
   init(): Promise<void>;
   speakGuidance(event: GuidanceEvent): void;
+  prepareForListening(settleMs?: number): Promise<void>;
   stop(): void;
   queue: QueuedSpeech[];
   speaking: boolean;
@@ -90,6 +91,20 @@ describe('TTSService guidance speech', () => {
     expect(service.queue).toHaveLength(0);
     expect(service.speaking).toBe(false);
     expect(Tts.stop).toHaveBeenCalled();
+  });
+
+  it('silences speech and allows the audio route to settle before listening', async () => {
+    jest.useFakeTimers();
+    const service = await createService();
+    service.speaking = true;
+    service.speakGuidance(guidance('scene:ambient', 'Person ahead.'));
+
+    const ready = service.prepareForListening(350);
+    expect(service.queue).toHaveLength(0);
+    expect(service.speaking).toBe(false);
+    expect(Tts.stop).toHaveBeenCalled();
+    jest.advanceTimersByTime(350);
+    await ready;
   });
 
   it('drops guidance that expired before it reached the queue', async () => {

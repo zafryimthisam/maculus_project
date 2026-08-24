@@ -117,6 +117,8 @@ function scoreZone(zone: Zone, snapshot: SceneSnapshot): PathZoneAssessment {
     const overlapRatio = overlap / Math.max(0.01, right - left);
     const lowerFrame = clamp01(track.cy + track.h / 2);
     const near = track.nearScore ?? clamp01(track.h * 0.8 + lowerFrame * 0.2);
+    const closeAndLow = near >= 0.72 && lowerFrame >= 0.72;
+    if (track.risk === 'none' && !track.approaching && !closeAndLow) {continue;}
     const risk = track.risk === 'emergency' ? 1 : track.risk === 'warning' ? 0.85 : track.risk === 'advisory' ? 0.55 : 0.25;
     const contribution = overlapRatio * (0.3 + near * 0.35 + lowerFrame * 0.2 + risk * 0.35);
     if (contribution > 0.08) {supportingTrackIds.push(track.id);}

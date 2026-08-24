@@ -270,14 +270,18 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     let partial = try partURL()
     let partialBytes = (try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
     let state = forcedState ?? (installed ? "ready" : partialBytes > 0 ? "paused" : "missing")
+    let capability = conversationalCapability()
+    let thermal = thermalStatus()
     return [
       "state": state,
       "path": installed ? try modelURL().path : NSNull(),
       "downloadedBytes": installed ? Self.expectedSize : partialBytes,
       "totalBytes": Self.expectedSize,
       "metered": metered,
-      "conversationalSupported": conversationalCapability().supported,
-      "capabilityReason": conversationalCapability().reason.map { $0 as Any } ?? NSNull(),
+      "conversationalSupported": capability.supported,
+      "capabilityReason": capability.reason.map { $0 as Any } ?? NSNull(),
+      "thermalThrottled": thermal.throttled,
+      "thermalState": thermal.name,
     ]
   }
 
@@ -295,9 +299,12 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
   private func emitCapability() {
     guard hasListeners else { return }
     let capability = conversationalCapability()
+    let thermal = thermalStatus()
     sendEvent(withName: "MaculusModelDownloadProgress", body: [
       "conversationalSupported": capability.supported,
       "capabilityReason": capability.reason.map { $0 as Any } ?? NSNull(),
+      "thermalThrottled": thermal.throttled,
+      "thermalState": thermal.name,
     ])
   }
 
@@ -331,10 +338,20 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     if ProcessInfo.processInfo.physicalMemory < 3_000_000_000 {
       return (false, "Not enough memory is available for the conversational model.")
     }
-    if ProcessInfo.processInfo.thermalState == .serious || ProcessInfo.processInfo.thermalState == .critical {
-      return (false, "The device is too warm to load the conversational model.")
+    if ProcessInfo.processInfo.thermalState == .critical {
+      return (false, "The device reached the critical thermal safety limit. Conversational guidance will resume after it cools.")
     }
     return (true, nil)
+  }
+
+  private func thermalStatus() -> (name: String, throttled: Bool) {
+    switch ProcessInfo.processInfo.thermalState {
+    case .nominal: return ("nominal", false)
+    case .fair: return ("fair", false)
+    case .serious: return ("serious", true)
+    case .critical: return ("critical", false)
+    @unknown default: return ("unknown", false)
+    }
   }
 
   private func sha256(_ url: URL) throws -> String {

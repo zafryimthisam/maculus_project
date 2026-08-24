@@ -103,7 +103,7 @@ export default function App() {
   const modelStatusText = modelStatus.conversationalSupported === false
     ? `Conversational guide unavailable: ${modelStatus.capabilityReason || 'device capability'} — safety guidance remains active`
     : modelStatus.state === 'ready'
-    ? `Conversational model ready${llmState === 'ready' ? ' and loaded' : ''}`
+    ? `Conversational model ready${llmState === 'ready' ? ' and loaded' : ''}${modelStatus.thermalThrottled ? ' — thermally throttled' : ''}`
     : modelStatus.state === 'downloading'
     ? `Conversational model downloading, ${modelPercent}%`
     : modelStatus.state === 'paused'

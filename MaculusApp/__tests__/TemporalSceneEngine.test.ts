@@ -172,9 +172,23 @@ describe('TemporalSceneEngine risk and depth behavior', () => {
     update(engine, 1000, [detection('chair', 0.5, { nearScore: 0.75, w: 0.25, h: 0.5 })]);
     update(engine, 1500, [detection('chair', 0.5, { nearScore: 0.88, w: 0.35, h: 0.65 })]);
     update(engine, 2000, [detection('chair', 0.5, { nearScore: 0.95, w: 0.42, h: 0.7 })]);
-    const danger = update(engine, 2500, [detection('chair', 0.5, { nearScore: 0.97, w: 0.46, h: 0.74 })]);
+    update(engine, 2500, [detection('chair', 0.5, { nearScore: 0.97, w: 0.46, h: 0.74 })]);
+    const danger = update(engine, 3000, [detection('chair', 0.5, { nearScore: 0.98, w: 0.48, h: 0.76 })]);
 
     expect(danger.events.some(event => event.kind === 'risk' && event.priority >= 1)).toBe(true);
+  });
+
+  it('does not narrate an unchanged ordinary object during a full minute', () => {
+    const engine = new TemporalSceneEngine({ shuffleAliases: false });
+    const stableChair = detection('chair', 0.5, {
+      cy: 0.5, nearScore: 0.35, w: 0.22, h: 0.38,
+    });
+    const events = [] as ReturnType<typeof update>['events'];
+    for (let time = 0; time <= 60000; time += 500) {
+      events.push(...update(engine, time, [stableChair]).events);
+    }
+
+    expect(events.filter(event => event.kind === 'risk' || event.kind === 'scene-change')).toHaveLength(0);
   });
 
   it('uses centimeters for one clear center track and stays generic when ambiguous', () => {

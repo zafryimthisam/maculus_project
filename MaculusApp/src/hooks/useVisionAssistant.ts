@@ -101,6 +101,7 @@ export function useVisionAssistant() {
         localLlmService.release().then(() => setLlmState(localLlmService.getState()));
       } else if (voiceEnabledRef.current) {
         const status = modelAssetService.getStatus();
+        localLlmService.setThermalThrottled(Boolean(status.thermalThrottled));
         if (status.state === 'ready' && status.path) {
           localLlmService.load(status.path).then(() => setLlmState(localLlmService.getState()));
         }
@@ -144,6 +145,7 @@ export function useVisionAssistant() {
     const unsubscribeModel = modelAssetService.subscribe(status => {
       if (!cancelled) {
         setModelStatus(status);
+        localLlmService.setThermalThrottled(Boolean(status.thermalThrottled));
         if (status.conversationalSupported === false) {
           conversationController.cancelGeneration().catch(() => {});
           localLlmService.release().then(() => setLlmState('unavailable'));
@@ -816,6 +818,7 @@ export function useVisionAssistant() {
     loadAfterDownload: boolean = true,
   ): Promise<boolean> => {
     let status = await modelAssetService.initialize();
+    localLlmService.setThermalThrottled(Boolean(status.thermalThrottled));
     if (status.conversationalSupported === false) {
       await localLlmService.release();
       setLlmState('unavailable');
@@ -824,6 +827,7 @@ export function useVisionAssistant() {
     if (status.state !== 'ready' || !status.path) {
       try {
         status = await modelAssetService.ensureDownloaded(allowCellular);
+        localLlmService.setThermalThrottled(Boolean(status.thermalThrottled));
       } catch {
         setLlmState(localLlmService.getState());
         return false;

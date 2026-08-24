@@ -15,10 +15,10 @@ const MIN_SCORE = 0.3;
 const PERSON_CONFIRM_HITS = 3;
 const PERSON_CONFIRM_MS = 2000;
 const PERSON_MEMORY_MS = 10000;
-const OBJECT_MEMORY_MS = 2500;
+const OBJECT_MEMORY_MS = 6000;
 const FRAME_ASSIGNMENT_MEMORY_MS = 4000;
 const AMBIENT_STABLE_MS = 2000;
-const AMBIENT_COOLDOWN_MS = 12000;
+const AMBIENT_COOLDOWN_MS = 20000;
 const EVENT_COOLDOWN_MS = 3000;
 const ACTIVE_REID_SIMILARITY = 0.75;
 const DORMANT_REID_SIMILARITY = 0.82;
@@ -42,6 +42,8 @@ type InternalTrack = TrackedEntity & {
   embeddingSamples: number;
   reliableAppearanceStreak: number;
   motionCandidateHits: number;
+  approachCandidateHits: number;
+  approachClearHits: number;
   history: Sample[];
   zoneCandidate: Zone;
   zoneCandidateHits: number;
@@ -342,6 +344,8 @@ export class TemporalSceneEngine {
       embeddingSamples: embedding ? 1 : 0,
       reliableAppearanceStreak: embedding ? 1 : 0,
       motionCandidateHits: 0,
+      approachCandidateHits: 0,
+      approachClearHits: 0,
       history: [],
       zoneCandidate: zone,
       zoneCandidateHits: 0,
@@ -450,7 +454,16 @@ export class TemporalSceneEngine {
       : 0;
     const area = boxArea(track);
     const areaGrowth = baseline.area > 0 ? (area - baseline.area) / baseline.area : 0;
-    track.approaching = nearDelta >= 0.12 || areaGrowth >= 0.25;
+    const approachCandidate = nearDelta >= 0.12 || areaGrowth >= 0.25;
+    if (approachCandidate) {
+      track.approachCandidateHits += 1;
+      track.approachClearHits = 0;
+    } else {
+      track.approachCandidateHits = 0;
+      track.approachClearHits += 1;
+    }
+    if (track.approachCandidateHits >= 3) {track.approaching = true;}
+    if (track.approachClearHits >= 3) {track.approaching = false;}
 
     const detectedZone = zoneOf(track.detection);
     let zoneChanged = false;
@@ -685,7 +698,12 @@ export class TemporalSceneEngine {
     }
 
     const structural = snapshot.tracks
-      .filter(track => STRUCTURAL_HAZARDS.has(track.label) && track.inPath)
+      .filter(track => {
+        const lowerEdge = track.cy + track.h / 2;
+        const near = track.nearScore ?? Math.min(1, track.w * track.h * 5);
+        return STRUCTURAL_HAZARDS.has(track.label) && track.inPath &&
+          (track.approaching || (near >= 0.72 && lowerEdge >= 0.68));
+      })
       .map(track => track.label)
       .sort()
       .join(',');
@@ -809,16 +827,16 @@ export class TemporalSceneEngine {
   }
 }
 
-function visualRisk(track: InternalTrack, areaGrowth: number): RiskState {
+function visualRisk(track: InternalTrack, _areaGrowth: number): RiskState {
   if (!track.inPath) {return 'none';}
   const near = track.nearScore ?? Math.min(1, boxArea(track) * 5);
   const area = boxArea(track);
+  const lowerEdge = track.cy + track.h / 2;
   if (near >= 0.94 && track.approaching && area >= 0.18) {return 'emergency';}
   if ((near >= 0.82 || area >= 0.18) && track.approaching) {return 'warning';}
   if (
-    STRUCTURAL_HAZARDS.has(track.label) ||
     (near >= 0.68 && track.approaching) ||
-    (area >= 0.12 && areaGrowth >= 0.2)
+    (STRUCTURAL_HAZARDS.has(track.label) && near >= 0.72 && lowerEdge >= 0.68)
   ) {return 'advisory';}
   return 'none';
 }

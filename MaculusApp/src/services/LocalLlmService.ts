@@ -22,9 +22,12 @@ export class LocalLlmService {
   private generationId = 0;
   private modelPath: string | null = null;
   private lastError: string | null = null;
+  private thermalThrottled = false;
+  private lastCompletionEndedAt = 0;
 
   getState(): LocalLlmState {return this.state;}
   getLastError(): string | null {return this.lastError;}
+  setThermalThrottled(throttled: boolean): void {this.thermalThrottled = throttled;}
 
   async load(modelPath: string): Promise<boolean> {
     if (this.context && this.modelPath === modelPath) {return true;}
@@ -39,7 +42,7 @@ export class LocalLlmService {
         model: modelPath.startsWith('file://') ? modelPath : `file://${modelPath}`,
         n_ctx: 2048,
         n_batch: 128,
-        n_threads: Platform.OS === 'android' ? 2 : 4,
+        n_threads: this.thermalThrottled ? 1 : Platform.OS === 'android' ? 2 : 4,
         n_gpu_layers: Platform.OS === 'ios' ? 99 : 0,
         use_mmap: true,
         use_mlock: false,
@@ -64,6 +67,13 @@ export class LocalLlmService {
     this.state = 'generating';
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
+      if (this.thermalThrottled) {
+        const remainingCooldown = 1200 - (Date.now() - this.lastCompletionEndedAt);
+        if (remainingCooldown > 0) {
+          await new Promise<void>(resolve => setTimeout(resolve, remainingCooldown));
+        }
+        if (generation !== this.generationId) {throw new Error('Local response was cancelled.');}
+      }
       await this.context.clearCache(true);
       const completionPromise = this.context.completion({
         messages: request.messages,
@@ -72,7 +82,7 @@ export class LocalLlmService {
         top_p: 0.9,
         min_p: 0.1,
         repeat_penalty: 1.05,
-        n_predict: request.maxTokens,
+        n_predict: this.thermalThrottled ? Math.min(request.maxTokens, 48) : request.maxTokens,
         stop: ['<|endoftext|>', '<|im_end|>', '<|end_of_turn|>'],
         response_format: request.jsonSchema ? {
           type: 'json_schema',
@@ -92,6 +102,7 @@ export class LocalLlmService {
       throw error;
     } finally {
       if (timeout) {clearTimeout(timeout);}
+      this.lastCompletionEndedAt = Date.now();
       if (generation === this.generationId && this.context) {this.state = 'ready';}
     }
   }

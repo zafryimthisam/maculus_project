@@ -10,6 +10,8 @@ export interface ModelAssetStatus {
   metered: boolean;
   conversationalSupported?: boolean;
   capabilityReason?: string;
+  thermalThrottled?: boolean;
+  thermalState?: string;
   message?: string;
 }
 
@@ -106,6 +108,8 @@ function normalize(status: ModelAssetStatus): ModelAssetStatus {
     metered: Boolean(status.metered),
     conversationalSupported: status.conversationalSupported !== false,
     capabilityReason: status.capabilityReason,
+    thermalThrottled: Boolean(status.thermalThrottled),
+    thermalState: status.thermalState || 'unknown',
     message: status.message,
   };
 }
