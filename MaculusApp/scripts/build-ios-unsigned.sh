@@ -106,9 +106,25 @@ BUILD_LOG="$LOG_DIR/ios-unsigned-build.log"
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/maculus-ios-derived.XXXXXX")"
 IPA_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/maculus-ios-ipa.XXXXXX")"
+GENERATED_TRACKED_FILES=(
+  "MaculusApp/ios/MaculusApp.xcodeproj/project.pbxproj"
+)
+GENERATED_TRACKED_CLEAN_AT_START=()
+for generated_file in "${GENERATED_TRACKED_FILES[@]}"; do
+  if git -C "$REPOSITORY_ROOT" ls-files --error-unmatch "$generated_file" >/dev/null 2>&1 &&
+    git -C "$REPOSITORY_ROOT" diff --quiet -- "$generated_file" &&
+    git -C "$REPOSITORY_ROOT" diff --cached --quiet -- "$generated_file"; then
+    GENERATED_TRACKED_CLEAN_AT_START+=("$generated_file")
+  fi
+done
 
 cleanup() {
   rm -rf "$DERIVED_DATA" "$IPA_TEMP"
+  for generated_file in "${GENERATED_TRACKED_CLEAN_AT_START[@]}"; do
+    if ! git -C "$REPOSITORY_ROOT" diff --quiet -- "$generated_file"; then
+      git -C "$REPOSITORY_ROOT" restore -- "$generated_file" || true
+    fi
+  done
 }
 trap cleanup EXIT
 
