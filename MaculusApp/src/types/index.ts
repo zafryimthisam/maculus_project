@@ -236,11 +236,18 @@ export interface SceneGroundingContext {
   };
   unavailableCapabilities: string[];
   cannotDetermine: string[];
+  /**
+   * Rolling list of human-readable scene-change summaries from
+   * `LiveAIService.pushSceneDelta`. Populated only when Live Mode is on.
+   * Bounded — see `LiveAIService` for the cap.
+   */
+  recentSceneSummary?: string[];
 }
 
 export type AssistantToolName =
   | 'respond'
   | 'describe_scene'
+  | 'narrate_scene_change'
   | 'search_visible_target'
   | 'focus_tracked_entity'
   | 'start_local_approach'
@@ -259,4 +266,66 @@ export interface AssistantToolCall {
   trackId?: number;
   enabled?: boolean;
   approachRequested?: boolean;
+}
+
+// ── Live Mode ───────────────────────────────────────────────────────────
+
+/**
+ * High-level state of the live AI session. Owned by `LiveAIService`. The
+ * loop reads this to decide whether to speak proactively, respond, or stay
+ * silent.
+ */
+export type LiveSession =
+  | 'idle'              // waiting for user speech
+  | 'user_speaking'     // user is mid-sentence
+  | 'ai_thinking'       // LLM is generating a reply
+  | 'ai_speaking'       // LLM reply is being spoken
+  | 'safety_hold';      // SafetyInterrupter is holding the channel
+
+/**
+ * A short, human-readable summary of a scene change. The LiveAIService
+ * accumulates these into a rolling history that the LLM sees as
+ * `RECENT_SCENE_SUMMARY`. Capped at ~4 KB total text.
+ */
+export interface SceneDelta {
+  revision: number;
+  timestamp: number;
+  summary: string;
+  trackId?: number;
+  kind: 'enter' | 'exit' | 'movement' | 'risk' | 'path' | 'ambient';
+}
+
+/**
+ * The decision returned by `LiveAIService.processTick`. Drives whether the
+ * TTS queue gets a new event, the LLM is invoked, or the loop stays silent.
+ */
+export type LiveDecision =
+  | { kind: 'silent'; reason: 'no_change' | 'safety_hold' | 'user_speaking' | 'ai_speaking' | 'cooldown' }
+  | { kind: 'narrate'; text: string; profile: 'scene' | 'conversational'; delta: SceneDelta }
+  | { kind: 'respond'; turn: ConversationTurn; sceneRevision: number }
+  | { kind: 'speak_safety'; text: string; priority: 2 };
+
+/**
+ * Input to `LiveAIService.processTick`. Bundles everything the AI needs
+ * to decide whether to speak.
+ */
+export interface LiveTickInput {
+  timestamp: number;
+  sceneRevision: number;
+  groundingContext: SceneGroundingContext;
+  latestEvents: GuidanceEvent[];
+  userTranscript?: string;
+  isUserTurnFinal?: boolean;
+  llmReady: boolean;
+  safetyHolding: boolean;
+}
+
+/**
+ * Input to `SafetyInterrupter.evaluate`. Strictly the minimum needed to
+ * decide whether to interrupt.
+ */
+export interface SafetyInput {
+  distance: DistanceReading | null;
+  latestEvents: GuidanceEvent[];
+  now: number;
 }

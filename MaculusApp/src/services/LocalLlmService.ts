@@ -16,6 +16,11 @@ type LlamaContextLike = {
   release(): Promise<void>;
 };
 
+export interface LocalLlmStreamChunk {
+  token: string;
+  done: boolean;
+}
+
 export class LocalLlmService {
   private context: LlamaContextLike | null = null;
   private state: LocalLlmState = 'unloaded';
@@ -102,6 +107,94 @@ export class LocalLlmService {
       throw error;
     } finally {
       if (timeout) {clearTimeout(timeout);}
+      this.lastCompletionEndedAt = Date.now();
+      if (generation === this.generationId && this.context) {this.state = 'ready';}
+    }
+  }
+
+  /**
+   * Stream tokens from the LLM. Yields { token, done } pairs. Respects the
+   * same generationId as complete() so cancel() between tokens stops the
+   * stream. Used by Live Mode to speak the first sentence while the LLM
+   * continues generating the rest.
+   *
+   * Implementation: the llama.rn completion callback fires per token and
+   * cannot yield directly. We push tokens onto a buffer and resolve a
+   * "wake" promise; the consumer pulls from the buffer and waits on the
+   * promise when the buffer is empty.
+   */
+  async *completeStream(request: LocalLlmCompletionRequest): AsyncGenerator<LocalLlmStreamChunk, void, void> {
+    if (!this.context || (this.state !== 'ready' && this.state !== 'generating')) {
+      throw new Error('Conversational model is not ready.');
+    }
+    const generation = ++this.generationId;
+    this.state = 'generating';
+    if (this.thermalThrottled) {
+      const remainingCooldown = 1200 - (Date.now() - this.lastCompletionEndedAt);
+      if (remainingCooldown > 0) {
+        await new Promise<void>(resolve => setTimeout(resolve, remainingCooldown));
+      }
+      if (generation !== this.generationId) {throw new Error('Local response was cancelled.');}
+    }
+    const buffer: string[] = [];
+    let wake: (() => void) | null = null;
+    const wakePromise = new Promise<void>(resolve => { wake = resolve; });
+    const wakeMe = () => { if (wake) { const w = wake; wake = null; w(); } };
+    let done = false;
+    let errorToThrow: unknown = null;
+    try {
+      await this.context.clearCache(true);
+      const completionPromise = this.context.completion({
+        messages: request.messages,
+        jinja: true,
+        temperature: 0.3,
+        top_p: 0.9,
+        min_p: 0.1,
+        repeat_penalty: 1.05,
+        n_predict: this.thermalThrottled ? Math.min(request.maxTokens, 48) : request.maxTokens,
+        stop: ['<|endoftext|>', '<|im_end|>', '<|end_of_turn|>'],
+      }, (chunk: { token?: string }) => {
+        if (generation !== this.generationId) {return;}
+        const token = chunk?.token;
+        if (typeof token === 'string' && token.length > 0) {
+          buffer.push(token);
+          wakeMe();
+        }
+      });
+      const start = Date.now();
+      const settled = completionPromise.then(
+        () => { done = true; wakeMe(); },
+        (err) => { done = true; errorToThrow = err; wakeMe(); },
+      );
+      while (true) {
+        if (generation !== this.generationId) {return;}
+        if (buffer.length === 0 && done) {
+          if (errorToThrow) {throw errorToThrow;}
+          return;
+        }
+        while (buffer.length > 0) {
+          if (generation !== this.generationId) {return;}
+          const token = buffer.shift()!;
+          yield { token, done: false };
+        }
+        if (Date.now() - start > request.timeoutMs) {
+          await this.context.stopCompletion().catch(() => {});
+          throw new Error('Local response timed out.');
+        }
+        // Wait for the next callback or completion.
+        await Promise.race([
+          wakePromise,
+          new Promise<void>(r => setTimeout(r, 25)),
+        ]);
+        // Re-arm the wake promise for the next callback.
+        if (!wake) {
+          await new Promise<void>(resolve => { wake = resolve; });
+        }
+      }
+      // settled is intentionally not awaited here — it stays pending
+      // until the consumer drains the buffer.
+      void settled;
+    } finally {
       this.lastCompletionEndedAt = Date.now();
       if (generation === this.generationId && this.context) {this.state = 'ready';}
     }

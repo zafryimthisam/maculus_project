@@ -48,6 +48,9 @@ export default function App() {
     cancelConversationalModelDownload,
     deleteConversationalModel,
     lastSpokenProfile,
+    liveMode,
+    liveSession,
+    toggleLiveMode,
   } = useVisionAssistant();
   const [pipelineProfile, setPipelineProfile] = useState<string>(lastSpokenProfile.current);
   useEffect(() => {
@@ -248,26 +251,53 @@ export default function App() {
           )}
 
           <AccessibleButton
-            title={isGuiding ? 'Stop Guidance' : 'Start Guidance'}
-            onPress={toggleGuiding}
+            title={liveMode ? 'Live Mode On' : 'Live Mode Off'}
+            onPress={toggleLiveMode}
             disabled={!isConnected}
             accessibilityHint={
-              isGuiding
-                ? 'Stops continuous scene narration'
-                : 'Starts continuous scene narration and obstacle guidance'
+              liveMode
+                ? 'Stops the live AI session. Safety guidance remains available via the secondary controls.'
+                : 'Starts a real-time AI session: the assistant watches the camera, narrates scene changes, and answers questions. Safety always wins.'
             }
-            color={isGuiding ? '#DC2626' : '#059669'}
+            color={liveMode ? '#10B981' : '#4F46E5'}
             style={styles.primaryBtn}
             textStyle={styles.primaryBtnText}
           />
 
-          <AccessibleButton
-            title="What's around me?"
-            onPress={describeOnce}
-            disabled={!isConnected || isGuiding || isProcessing || !cameraAvailable}
-            accessibilityHint="Describes what is currently in front of you, once"
-            color="#7C3AED"
-          />
+          {liveMode && (
+            <Text style={styles.liveStatus}>
+              AI: {liveSession === 'idle' ? 'listening'
+                : liveSession === 'user_speaking' ? 'hearing you'
+                : liveSession === 'ai_thinking' ? 'thinking'
+                : liveSession === 'ai_speaking' ? 'speaking'
+                : 'safety hold'}
+            </Text>
+          )}
+
+          {!liveMode && (
+            <>
+              <AccessibleButton
+                title={isGuiding ? 'Stop Guidance' : 'Start Guidance'}
+                onPress={toggleGuiding}
+                disabled={!isConnected}
+                accessibilityHint={
+                  isGuiding
+                    ? 'Stops continuous scene narration'
+                    : 'Starts continuous scene narration and obstacle guidance'
+                }
+                color={isGuiding ? '#DC2626' : '#059669'}
+                style={styles.secondaryBtn}
+              />
+              <AccessibleButton
+                title="What's around me?"
+                onPress={describeOnce}
+                disabled={!isConnected || isGuiding || isProcessing || !cameraAvailable}
+                accessibilityHint="Describes what is currently in front of you, once"
+                color="#7C3AED"
+                style={styles.secondaryBtn}
+              />
+            </>
+          )}
 
           <Text style={styles.footer}>
             {isConnected ? 'Connected' : 'Disconnected'}
@@ -329,6 +359,14 @@ const styles = StyleSheet.create({
   modelButton: { minHeight: 56, marginTop: 4 },
   primaryBtn: { minHeight: 84, marginTop: 8 },
   primaryBtnText: { fontSize: 24 },
+  secondaryBtn: { minHeight: 60, marginTop: 6 },
+  liveStatus: {
+    marginTop: 8,
+    fontSize: 18,
+    color: '#34D399',
+    textAlign: 'center',
+    fontWeight: '600',
+  },
   footer: { marginTop: 20, fontSize: 14, color: '#6B7280' },
   devRow: { marginTop: 4, fontSize: 12, color: '#9CA3AF', textAlign: 'center' },
 });

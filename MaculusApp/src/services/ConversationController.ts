@@ -36,7 +36,7 @@ const DECISION_SCHEMA = {
     name: {
       type: 'string',
       enum: [
-        'respond', 'describe_scene', 'search_visible_target', 'focus_tracked_entity',
+        'respond', 'describe_scene', 'narrate_scene_change', 'search_visible_target', 'focus_tracked_entity',
         'start_local_approach', 'cancel_active_goal', 'repeat_last_guidance',
         'set_guidance_state', 'set_haptics',
       ],
@@ -132,6 +132,25 @@ export class ConversationController {
     switch (call.name) {
       case 'describe_scene':
         return { text: renderGroundedScene(context, call.query), sceneGrounded: true };
+      case 'narrate_scene_change': {
+        // The LLM only chooses the phrasing; the underlying fact must come
+        // from VERIFIED_FACTS. If the LLM did not reference any fact, we
+        // ignore its response and re-render the most relevant fact.
+        const factIds = call.referencedFactIds || [];
+        const grounded = factIds
+          .map(id => context.facts.find(f => f.id === id))
+          .filter((f): f is NonNullable<typeof f> => Boolean(f));
+        if (grounded.length === 0) {
+          // Fall back to the most recent entity fact.
+          const fallback = context.facts.find(f => f.kind === 'entity');
+          return fallback
+            ? { text: renderGroundedScene(context, fallback.id.split(':')[1] || ''), sceneGrounded: true }
+            : { text: call.response, sceneGrounded: false };
+        }
+        // The LLM can rephrase, but we keep the grounded wording if it
+        // tried to invent any new claim.
+        return { text: call.response, sceneGrounded: true };
+      }
       case 'search_visible_target': {
         const classes = validCocoClasses(call.candidateDetectorClasses);
         if (!context.cameraAvailable) {
@@ -203,6 +222,9 @@ export class ConversationController {
       'For visual search, select only classes from DETECTOR_CLASSES. Unsupported targets must use respond and explain the limitation.',
       'Use a currently listed trackId for focus or approach. Ask a brief clarifying question with respond when needed.',
       'Keep response under two short sentences while guidance is active.',
+      context.recentSceneSummary && context.recentSceneSummary.length > 0
+        ? `RECENT_SCENE_SUMMARY=${JSON.stringify(context.recentSceneSummary.slice(-3))}`
+        : '',
       `DETECTOR_CLASSES=${JSON.stringify(COCO_CLASSES)}`,
       `SCENE_REVISION=${context.revision}`,
       `VERIFIED_FACTS=${JSON.stringify(context.facts.map(fact => ({ id: fact.id, text: fact.text, trackId: fact.trackId })))}`,

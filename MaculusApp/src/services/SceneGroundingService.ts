@@ -17,6 +17,8 @@ export interface GroundingInput {
   depthAvailable: boolean;
   activeGoal: NavigationGoal | null;
   recentChanges?: string[];
+  /** Populated by Live Mode via LiveAIService.pushSceneDelta. */
+  recentSceneSummary?: string[];
 }
 
 export class SceneGroundingService {
@@ -68,6 +70,7 @@ export class SceneGroundingService {
         'anything outside the current camera view',
         'a route beyond the currently visible corridor',
       ],
+      recentSceneSummary: input.recentSceneSummary,
     };
     return this.context;
   }

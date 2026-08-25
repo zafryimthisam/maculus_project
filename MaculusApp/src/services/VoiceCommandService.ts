@@ -202,12 +202,19 @@ export class VoiceCommandService {
   private safetyInterrupted = false;
   private conversationQuietUntil = 0;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private alwaysListening = false;
+  // Timestamp after which the next user turn must be preceded by the wake
+  // word. Reset on every successful turn when alwaysListening is on.
+  private followupWindowUntil = 0;
+  private followupWindowTimer: ReturnType<typeof setTimeout> | null = null;
   private onStatus: ((status: VoiceCommandStatus) => void) | null = null;
   private onTurn: ((turn: ConversationTurn, fastCommand: VoiceCommand | null) => void | Promise<void>) | null = null;
+  private onTurnComplete: (() => Promise<void> | void) | null = null;
 
   async start(
     onTurn: (turn: ConversationTurn, fastCommand: VoiceCommand | null) => void | Promise<void>,
     onStatus: (status: VoiceCommandStatus) => void,
+    options: { alwaysListening?: boolean; onTurnComplete?: () => Promise<void> | void } = {},
   ): Promise<boolean> {
     if (!MaculusVoiceCommand) {
       onStatus('unavailable');
@@ -216,7 +223,9 @@ export class VoiceCommandService {
 
     this.stopLocal();
     this.enabled = true;
+    this.alwaysListening = Boolean(options.alwaysListening);
     this.onTurn = onTurn;
+    this.onTurnComplete = options.onTurnComplete ?? null;
     this.sessionId = `voice:${Date.now()}`;
     this.onStatus = onStatus;
 
@@ -353,7 +362,11 @@ export class VoiceCommandService {
       this.commandBusy = false;
       this.safetyInterrupted = false;
       if (this.enabled) {
-        await this.restartWakeListening();
+        if (this.onTurnComplete) {
+          await this.onTurnComplete();
+        } else {
+          await this.restartWakeListening();
+        }
       }
     }
   };
@@ -451,12 +464,17 @@ export class VoiceCommandService {
     this.clearRecoveryTimer();
     this.enabled = false;
     this.commandBusy = false;
+    this.alwaysListening = false;
+    this.followupWindowUntil = 0;
+    if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
+    this.followupWindowTimer = null;
     this.subscriptions.forEach(subscription => subscription.remove());
     this.subscriptions = [];
     this.ttsSubscription?.();
     this.ttsSubscription = null;
     this.emitter = null;
     this.onTurn = null;
+    this.onTurnComplete = null;
     this.sessionId = '';
     this.safetyInterrupted = false;
     this.conversationQuietUntil = 0;
@@ -492,6 +510,32 @@ export class VoiceCommandService {
   reserveConversationWindow(durationMs?: number): void {
     const effective = durationMs ?? this.effectiveQuietMs();
     this.conversationQuietUntil = Math.max(this.conversationQuietUntil, Date.now() + effective);
+  }
+
+  /**
+   * In alwaysListening (Live Mode), open a short follow-up window during
+   * which the user can speak again without saying the wake word. Called
+   * by the hook after the LLM reply completes. The window auto-closes
+   * after FOLLOWUP_WINDOW_MS; the next user turn after that requires the
+   * wake word again.
+   */
+  static readonly FOLLOWUP_WINDOW_MS = 8000;
+
+  isAlwaysListening(): boolean {return this.alwaysListening;}
+
+  wakeWordRequired(now: number = Date.now()): boolean {
+    if (!this.alwaysListening) {return true;}
+    return now >= this.followupWindowUntil;
+  }
+
+  openFollowupWindow(): void {
+    if (!this.alwaysListening) {return;}
+    this.followupWindowUntil = Date.now() + VoiceCommandService.FOLLOWUP_WINDOW_MS;
+    if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
+    this.followupWindowTimer = setTimeout(() => {
+      this.followupWindowUntil = 0;
+      this.followupWindowTimer = null;
+    }, VoiceCommandService.FOLLOWUP_WINDOW_MS);
   }
 }
 

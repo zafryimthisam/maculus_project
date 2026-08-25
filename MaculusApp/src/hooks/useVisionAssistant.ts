@@ -24,7 +24,9 @@ import { localLlmService, LocalLlmState } from '../services/LocalLlmService';
 import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { tts } from '../services/TTSService';
 import { executeVoiceCommand, voiceCommandService, VoiceCommand, VoiceCommandStatus, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
-import { CameraSource, CapturedFrame, ConversationTurn, DistanceReading, Detection, GuidanceEvent, PersonEmbedding, SceneGroundingContext, TrackedEntity } from '../types';
+import { LiveAIService } from '../services/LiveAIService';
+import { SafetyInterrupter } from '../services/SafetyInterrupter';
+import { CameraSource, CapturedFrame, ConversationTurn, DistanceReading, Detection, GuidanceEvent, LiveSession, PersonEmbedding, SceneGroundingContext, TrackedEntity } from '../types';
 
 const DISTANCE_INTERVAL_MS = 700;
 const OBSTACLE_DISTANCE_DELTA_CM = 20;
@@ -67,6 +69,8 @@ export function useVisionAssistant() {
   const [depthStatus, setDepthStatus] = useState('Depth unavailable');
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<VoiceCommandStatus>('off');
+  const [liveMode, setLiveMode] = useState(false);
+  const [liveSession, setLiveSession] = useState<LiveSession>('idle');
   const [hapticAlertsEnabled, setHapticAlertsEnabledState] = useState(true);
   const [modelStatus, setModelStatus] = useState<ModelAssetStatus>(modelAssetService.getStatus());
   const [llmState, setLlmState] = useState<LocalLlmState>('unloaded');
@@ -94,6 +98,9 @@ export function useVisionAssistant() {
   const mobilityGuideRef = useRef(new MobilityGuide());
   const groundingServiceRef = useRef(new SceneGroundingService());
   const conversationControllerRef = useRef(new ConversationController());
+  const liveAiRef = useRef(new LiveAIService(conversationControllerRef.current));
+  const safetyInterrupterRef = useRef(new SafetyInterrupter());
+  const liveModeRef = useRef(false);
   const groundingContextRef = useRef<SceneGroundingContext | null>(null);
   const deferredGuidanceRef = useRef<GuidanceEvent | null>(null);
   const lastGuidanceTextRef = useRef<string | null>(null);
@@ -174,6 +181,9 @@ export function useVisionAssistant() {
         // loaded into memory only while conversational voice is enabled.
         if (assetStatus.state === 'ready') {setLlmState('unloaded');}
         await tts.init();
+        safetyInterrupterRef.current.setTts(tts);
+        liveAiRef.current.setSafetyInterrupter(safetyInterrupterRef.current);
+        liveAiRef.current.setOnSessionChange(setLiveSession);
         if (cancelled) {
           return;
         }
@@ -214,6 +224,7 @@ export function useVisionAssistant() {
     return () => {
       cancelled = true;
       isGuidingRef.current = false;
+      liveModeRef.current = false;
       temporalEngine.reset();
       mobilityGuide.reset();
       groundingService.reset();
@@ -221,6 +232,8 @@ export function useVisionAssistant() {
       groundingContextRef.current = null;
       voiceCommandService.stop();
       localLlmService.release();
+      liveAiRef.current.reset();
+      safetyInterrupterRef.current.release();
       unsubscribeModel();
       modelAssetService.destroy();
       cameraSourceRef.current = 'none';
@@ -615,6 +628,84 @@ export function useVisionAssistant() {
     if (event.haptic) {triggerGuidanceHaptic(event.priority);}
   }, [triggerGuidanceHaptic]);
 
+  /**
+   * Run the live-mode tick after the regular per-frame dispatch. Only does
+   * anything when liveModeRef is true. Captures the latest events into
+   * the live AI's history, evaluates safety first, and either narrates
+   * a scene change or starts an LLM turn.
+   */
+  const runLiveTick = useCallback((events: GuidanceEvent[], now: number) => {
+    if (!liveModeRef.current) {return;}
+    // Push all events into history so the LLM can read them.
+    for (const event of events) {
+      liveAiRef.current.pushSceneDelta({
+        revision: groundingContextRef.current?.revision ?? 0,
+        timestamp: now,
+        summary: event.text,
+        trackId: undefined,
+        kind: event.kind === 'scene-change' ? 'ambient'
+          : event.kind === 'person-movement' ? 'movement'
+          : event.kind === 'risk' ? 'risk'
+          : 'path',
+      });
+    }
+    // Safety check first.
+    const safetyTriggered = safetyInterrupterRef.current.evaluate({
+      distance: distanceRef.current,
+      latestEvents: events,
+      now,
+    });
+    if (safetyTriggered) {
+      liveAiRef.current.enterSafetyHold();
+      return;
+    }
+    const tickInput = {
+      timestamp: now,
+      sceneRevision: groundingContextRef.current?.revision ?? 0,
+      groundingContext: groundingContextRef.current ?? {
+        revision: 0, capturedAt: now, stableSince: now, facts: [],
+        pathZones: { left: { zone: 'left', obstruction: 0, state: 'unknown', supportingTrackIds: [] },
+                     ahead: { zone: 'ahead', obstruction: 0, state: 'unknown', supportingTrackIds: [] },
+                     right: { zone: 'right', obstruction: 0, state: 'unknown', supportingTrackIds: [] } },
+        activeGoal: null, cameraAvailable: false, depthAvailable: false,
+        ultrasonicAvailable: false, ultrasonic: { obstacle: false, distanceCm: null, association: 'unassociated' },
+        unavailableCapabilities: [], cannotDetermine: [],
+      },
+      latestEvents: events,
+      llmReady: localLlmService.getState() === 'ready',
+      safetyHolding: false,
+    };
+    const decision = liveAiRef.current.processTick(tickInput);
+    if (!decision) {return;}
+    if (decision.kind === 'silent') {return;}
+    if (decision.kind === 'speak_safety') {
+      tts.speakWithProsody(decision.text, 'emergency', { force: true });
+      return;
+    }
+    if (decision.kind === 'narrate') {
+      tts.speakWithProsody(decision.text, decision.profile, { force: false });
+      return;
+    }
+    if (decision.kind === 'respond') {
+      // Push recent history into the grounding context for the LLM turn.
+      const context = groundingContextRef.current;
+      if (!context) {return;}
+      const enriched: SceneGroundingContext = {
+        ...context,
+        recentSceneSummary: liveAiRef.current.getHistorySnapshot().map(d => d.summary),
+      };
+      liveAiRef.current.streamReplyToTts(decision.turn, enriched)
+        .then(() => {
+          if (liveModeRef.current) {
+            voiceCommandService.openFollowupWindow();
+          }
+        })
+        .catch((err) => {
+          console.warn('[LiveAI] stream failed:', err?.message || err);
+        });
+    }
+  }, []);
+
   const guidanceLoop = useCallback(async () => {
     let lastFrameTime = Date.now();
     let smoothedFps = 0;
@@ -657,6 +748,7 @@ export function useVisionAssistant() {
         if (navigation.announcement) {
           dispatchGuidanceEvent(navigationEvent(navigation.announcement, grounding.revision, navigation.goal?.revision));
         }
+        runLiveTick(update.events, Date.now());
         await sleep(800);
         continue;
       }
@@ -705,6 +797,7 @@ export function useVisionAssistant() {
         } else if (navigation.directive) {
           dispatchGuidanceEvent(directiveEvent(navigation.directive, grounding.revision, navigation.goal?.query));
         }
+        runLiveTick(update.events, Date.now());
         if (!greetingSpokenRef.current && groundingServiceRef.current.isStableFor(2000, update.snapshot.timestamp)) {
           greetingSpokenRef.current = true;
           dispatchGuidanceEvent({
@@ -759,7 +852,7 @@ export function useVisionAssistant() {
       }
     }
     setFps(0);
-  }, [dispatchGuidanceEvent, maybeEmbedPeople, maybeStartDepthEstimate, runYoloOnce, setActiveCameraSource]);
+  }, [dispatchGuidanceEvent, maybeEmbedPeople, maybeStartDepthEstimate, runLiveTick, runYoloOnce, setActiveCameraSource]);
 
   const startGuiding = useCallback((silent: boolean = false): boolean => {
     if (isGuidingRef.current) {
@@ -958,6 +1051,14 @@ export function useVisionAssistant() {
   }, [maybeEmbedPeople, runYoloOnce]);
 
   const handleConversationTurn = useCallback(async (turn: ConversationTurn, fastCommand: VoiceCommand | null) => {
+    // In Live Mode, queue the turn for the live service to pick up on the
+    // next tick. The live service will start the LLM call itself; we do
+    // not need to do it here.
+    if (liveModeRef.current) {
+      const context = groundingContextRef.current;
+      liveAiRef.current.notifyUserTurnEnded(turn, context?.revision ?? 0);
+      return;
+    }
     if (fastCommand && fastCommand !== 'describe_scene') {
       const result = executeVoiceCommand(fastCommand, {
         startGuidance: startGuiding,
@@ -1099,6 +1200,68 @@ export function useVisionAssistant() {
     tts.speak('Conversational model deleted. Safety guidance is unchanged.', 1, true);
   }, []);
 
+  const toggleLiveMode = useCallback(async () => {
+    if (liveModeRef.current) {
+      liveModeRef.current = false;
+      liveAiRef.current.reset();
+      safetyInterrupterRef.current.release();
+      await voiceCommandService.stop();
+      await localLlmService.release();
+      setLlmState(localLlmService.getState());
+      setLiveMode(false);
+      setLiveSession('idle');
+      tts.speak('Live mode off', 1, true);
+      return;
+    }
+    // Start live mode. We start the voice service in alwaysListening
+    // mode and the safety interrupter is already wired by the init
+    // effect. The LLM may load lazily when the first turn happens.
+    liveModeRef.current = true;
+    const started = await voiceCommandService.start(
+      handleConversationTurn,
+      setVoiceStatus,
+      {
+        alwaysListening: true,
+        onTurnComplete: async () => {
+          // After a turn completes, re-arm the voice capture for the
+          // next follow-up. We delegate to the live service for the
+          // exact behavior, but a default re-arm is to call
+          // listenForCommandOnce again (i.e. the wake word is not
+          // required during the follow-up window).
+          voiceCommandService.openFollowupWindow();
+          // Restart listening by calling restartWakeListening (which
+          // restarts the wake loop) AND then immediately starting
+          // command capture again. The follow-up window will be open.
+          // We achieve this by simply calling the same start path
+          // through the existing flow: the iOS side already has the
+          // ASR engine paused after listenForCommandOnce returns, so
+          // we don't need to do anything explicit here — the next
+          // wake event will retrigger the cycle. Instead, we manually
+          // re-prime the recognizer by re-calling listenForCommandOnce
+          // via the wake-side API.
+        },
+      },
+    );
+    if (!started) {
+      liveModeRef.current = false;
+      setLiveMode(false);
+      tts.speak('Live mode unavailable. Check microphone permission.', 1, true);
+      return;
+    }
+    setLiveMode(true);
+    setVoiceEnabled(true);
+    setVoiceStatus('wake_listening');
+    tts.speakWithProsody(
+      'Live mode on. Say ' + WAKE_WORD_LABEL + ', then speak naturally. I will keep an eye on the scene.',
+      'conversational',
+      { force: true },
+    );
+    // Load the LLM in the background.
+    ensureLlmReady(false)
+      .then(() => setLlmState(localLlmService.getState()))
+      .catch(() => setLlmState(localLlmService.getState()));
+  }, [ensureLlmReady, handleConversationTurn]);
+
   useEffect(() => () => {
     voiceCommandService.stop();
   }, []);
@@ -1153,6 +1316,9 @@ export function useVisionAssistant() {
     cancelConversationalModelDownload,
     deleteConversationalModel,
     lastSpokenProfile: lastSpokenProfileRef,
+    liveMode,
+    liveSession,
+    toggleLiveMode,
   };
 }
 
