@@ -18,7 +18,7 @@ const PERSON_MEMORY_MS = 10000;
 const OBJECT_MEMORY_MS = 6000;
 const FRAME_ASSIGNMENT_MEMORY_MS = 4000;
 const AMBIENT_STABLE_MS = 1400;
-const AMBIENT_COOLDOWN_MS = 12000;
+const AMBIENT_COOLDOWN_MS = 25_000;
 const EVENT_COOLDOWN_MS = 2200;
 const ACTIVE_REID_SIMILARITY = 0.75;
 const DORMANT_REID_SIMILARITY = 0.82;
@@ -108,6 +108,7 @@ export class TemporalSceneEngine {
   private pendingAmbientSignature: string | null = null;
   private pendingAmbientSince = 0;
   private lastAmbientAt = 0;
+  private ambientFireCount = 0;
   private lastSnapshot: SceneSnapshot = {
     timestamp: 0,
     tracks: [],
@@ -143,6 +144,7 @@ export class TemporalSceneEngine {
     this.pendingAmbientSignature = null;
     this.pendingAmbientSince = 0;
     this.lastAmbientAt = 0;
+    this.ambientFireCount = 0;
     this.lastSnapshot = {
       timestamp: 0,
       tracks: [],
@@ -723,8 +725,13 @@ export class TemporalSceneEngine {
         const text = ambientText(snapshot, structural);
         if (text) {
           this.lastAmbientAt = now;
+          // Embed a fire-counter into the key so the dispatcher's
+          // recently-spoken map treats each ambient as a distinct event.
+          // The engine's own AMBIENT_COOLDOWN_MS already rate-limits to
+          // ~25 s between fires.
+          this.ambientFireCount += 1;
           events.push({
-            key: 'scene:ambient',
+            key: `scene:ambient:${this.ambientFireCount}`,
             kind: 'scene-change',
             priority: 0,
             text,

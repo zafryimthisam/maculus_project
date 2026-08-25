@@ -168,7 +168,7 @@ describe('TTSService guidance speech', () => {
 
     (service as any).speakWithProsody('Chair to your left.', 'scene', { force: true });
 
-    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.55);
+    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.5);
     expect(Tts.setDefaultPitch).toHaveBeenCalledWith(1.0);
     expect(Tts.speak).toHaveBeenCalledWith('Chair to your left.');
   });
@@ -180,7 +180,7 @@ describe('TTSService guidance speech', () => {
 
     (service as any).speakWithProsody('Stop! Obstacle ahead.', 'emergency', { force: true });
 
-    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.6);
+    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.55);
     expect(Tts.setDefaultPitch).toHaveBeenCalledWith(0.95);
   });
 

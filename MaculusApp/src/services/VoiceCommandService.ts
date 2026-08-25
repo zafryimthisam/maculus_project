@@ -71,7 +71,6 @@ export type VoiceCommandExecution = {
 const WAKE_WORD = WAKE_WORD_PARSER_TOKEN;
 const MIN_CONFIDENCE = 0.35;
 const AUDIO_HANDOFF_MS = 350;
-const EARLY_NO_RESULT_MS = 1800;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
@@ -294,15 +293,14 @@ export class VoiceCommandService {
 
     this.setStatus('command_listening');
     try {
-      const captureStartedAt = Date.now();
-      let result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
-      // Some iOS audio routes report an immediate empty result while switching
-      // from TTS output to microphone input. Retry only that early failure;
-      // a genuine full timeout remains silent and returns to wake listening.
-      if (!result?.text && Date.now() - captureStartedAt < EARLY_NO_RESULT_MS && !this.safetyInterrupted) {
-        await sleep(AUDIO_HANDOFF_MS);
-        result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
-      }
+      // Wait for the recognizer to finalize naturally. We do not retry on an
+      // early empty result: if iOS's SFSpeechAudioBufferRecognitionRequest
+      // is still producing partials (e.g. the user is mid-sentence), a retry
+      // tears down the audio engine and aborts the in-flight recognition.
+      // pauseForTts + tts.prepareForListening already handle the audio
+      // session handoff, so the recognizer has time to start. A genuine
+      // empty capture will be caught by COMMAND_TIMEOUT_MS below.
+      const result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled) {
         this.commandBusy = false;

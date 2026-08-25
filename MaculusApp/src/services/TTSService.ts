@@ -46,11 +46,18 @@ export class TTSService {
   private readonly MAX_QUEUE_SIZE = 8;
 
   // Prosody profiles — vary TTS rate and pitch by event type so the assistant
-  // sounds more human. Per-call Tts.speak options are preferred on Android/iOS
-  // bindings that support them; otherwise we set the default right before
-  // each speak.
-  private readonly DEFAULT_RATE = 0.55;
-  private readonly PROFILES: Record<TtsProsodyProfile, { rate: number; pitch: number }> = {
+  // sounds more human. AVSpeech (iOS) treats 0.5 as "normal", while the
+  // Android TTS engine on most OEM builds treats 0.55 as a comfortable
+  // mid-tempo. Per-platform defaults keep the perceived pace consistent.
+  private readonly IS_IOS = Platform.OS === 'ios';
+  private readonly DEFAULT_RATE = Platform.OS === 'ios' ? 0.5 : 0.55;
+  private readonly PROFILES: Record<TtsProsodyProfile, { rate: number; pitch: number }> = Platform.OS === 'ios' ? {
+    emergency: { rate: 0.55, pitch: 0.95 },
+    urgent: { rate: 0.52, pitch: 0.97 },
+    scene: { rate: 0.5, pitch: 1.0 },
+    ack: { rate: 0.48, pitch: 1.05 },
+    conversational: { rate: 0.5, pitch: 1.02 },
+  } : {
     emergency: { rate: 0.6, pitch: 0.95 },
     urgent: { rate: 0.58, pitch: 0.97 },
     scene: { rate: 0.55, pitch: 1.0 },

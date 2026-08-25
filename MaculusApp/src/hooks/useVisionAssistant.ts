@@ -38,7 +38,14 @@ const HAPTIC_COOLDOWN_MS = 3000;
 const CONVERSATION_RESPONSE_WINDOW_MS = 9000;
 const VOICE_SENSOR_WARNING_DEFER_MS = 4500;
 const BACKGROUND_GUIDANCE_INTERVAL_MS = 4500;
-const ACK_MIN_INTERVAL_MS = 2500;
+// Ack lead-in is short and human, but it stacks behind real speech if fired
+// on every event. Only fire when the previous spoken guidance was more than
+// this long ago — otherwise it becomes noise.
+const ACK_MIN_INTERVAL_MS = 8000;
+// Recently-spoken dedup window for the dispatcher layer. The temporal
+// engine handles per-track cooldowns; this is a safety net keyed on
+// (trackKey, stateKey) so the same object-state doesn't repeat.
+const RECENTLY_SPOKEN_MS = 12_000;
 
 export function useVisionAssistant() {
   const [piUrl, setPiUrlState] = useState(getPiUrl());
@@ -90,7 +97,7 @@ export function useVisionAssistant() {
   const groundingContextRef = useRef<SceneGroundingContext | null>(null);
   const deferredGuidanceRef = useRef<GuidanceEvent | null>(null);
   const lastGuidanceTextRef = useRef<string | null>(null);
-  const lastSpokenTextRef = useRef<{ text: string; at: number } | null>(null);
+  const recentlySpokenRef = useRef<Map<string, number>>(new Map());
   const lastAckAtRef = useRef(0);
   const lastBackgroundGuidanceAtRef = useRef(0);
   const lastSpokenProfileRef = useRef<string>('scene');
@@ -571,24 +578,38 @@ export function useVisionAssistant() {
       }
       return;
     }
-    // Recently-spoken memory: drop the event if we already said the same
-    // sentence within the last 10 s. Stored on the dispatcher side because
-    // the temporal engine can mint a fresh eventKey for a stable scene.
-    if (event.priority === 0 && event.kind !== 'conversation') {
-      const last = lastSpokenTextRef.current;
-      if (last && last.text === event.text && now - last.at < 10_000) {
+    // Recently-spoken memory: dedup on (trackKey, stateKey) rather than raw
+    // text. The temporal engine's per-track cooldown already prevents
+    // repeating the same eventKey; this guards against engine drift where
+    // two different eventKeys describe the same track state (e.g. two
+    // "scene:ambient" events for the same stable scene).
+    if (event.priority <= 1 && event.kind !== 'conversation') {
+      const memoryKey = `${event.kind}:${event.key}`;
+      const lastAt = recentlySpokenRef.current.get(memoryKey) || 0;
+      if (now - lastAt < RECENTLY_SPOKEN_MS) {
         return;
       }
+      recentlySpokenRef.current.set(memoryKey, now);
+      if (recentlySpokenRef.current.size > 128) {
+        for (const [k, at] of recentlySpokenRef.current.entries()) {
+          if (now - at > RECENTLY_SPOKEN_MS) {
+            recentlySpokenRef.current.delete(k);
+          }
+        }
+      }
     }
-    // Acknowledgment lead-in: for non-conversation p=0 events, queue a soft
-    // ack first if the previous guidance was spoken more than ACK_MIN_INTERVAL_MS
-    // ago. The TTS ack profile uses its own short delay.
-    if (event.priority === 0 && event.kind !== 'conversation' && now - lastAckAtRef.current > ACK_MIN_INTERVAL_MS) {
+    // Acknowledgment lead-in: only fires when the previous spoken guidance
+    // was a long time ago, and only on scene-change kind. This prevents
+    // "Got it." from stacking on every routine event.
+    if (
+      event.kind === 'scene-change' &&
+      event.priority === 0 &&
+      now - lastAckAtRef.current > ACK_MIN_INTERVAL_MS
+    ) {
       lastAckAtRef.current = now;
       tts.speakWithProsody(renderAck('acknowledge'), 'ack', { force: false, eventKey: 'ack:pre' });
     }
     lastGuidanceTextRef.current = event.text;
-    lastSpokenTextRef.current = { text: event.text, at: now };
     conversationControllerRef.current.rememberGuidance(event.text);
     tts.speakGuidance(event);
     if (event.haptic) {triggerGuidanceHaptic(event.priority);}
