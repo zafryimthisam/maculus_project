@@ -23,6 +23,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import android.os.Handler
+import android.os.Looper
 
 /**
  * MaculusVision - YOLO-only on-device object detection.
@@ -76,6 +80,15 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     private var inputSize = 0
     private var numAnchors = 2100
     private var inputBuffer: ByteBuffer? = null
+
+    // Single-thread executor for inference. TFLite Interpreter.run() is not safe
+    // to call concurrently, so we serialize all detections here and resolve the
+    // JS promise on the main looper. This frees the RN bridge from the cost of
+    // base64 decode + BitmapFactory + letterbox + TFLite run.
+    private val inferenceExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "maculus-vision-inference").apply { isDaemon = true }
+    }
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun getName(): String = "MaculusVision"
 
@@ -131,12 +144,27 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             promise.reject("NOT_LOADED", "Model not loaded. Call loadModel() first.")
             return
         }
-        try {
-            val result = runDetector(base64Jpeg)
-            promise.resolve(toWritableDetections(result))
-        } catch (e: Exception) {
-            promise.reject("DETECT_ERROR", e.message, e)
+        inferenceExecutor.execute {
+            try {
+                val result = runDetector(base64Jpeg)
+                mainHandler.post {
+                    if (interpreter == null) {
+                        promise.reject("NOT_LOADED", "Model not loaded. Call loadModel() first.")
+                    } else {
+                        promise.resolve(toWritableDetections(result))
+                    }
+                }
+            } catch (e: Throwable) {
+                mainHandler.post {
+                    promise.reject("DETECT_ERROR", e.message ?: "Detection failed", e)
+                }
+            }
         }
+    }
+
+    override fun invalidate() {
+        super.invalidate()
+        inferenceExecutor.shutdown()
     }
 
     private fun validateInputShape(shape: IntArray): Int {

@@ -14,29 +14,29 @@ const createActions = (isGuiding: boolean = false) => ({
 
 describe('VoiceCommandService parser', () => {
   it('accepts wake-word guidance commands', () => {
-    expect(parseVoiceCommand('Maculus start guidance')).toBe('start_guidance');
-    expect(parseVoiceCommand('please Maculus stop guidance now')).toBe('stop_guidance');
+    expect(parseVoiceCommand('Livekit start guidance')).toBe('start_guidance');
+    expect(parseVoiceCommand('please Livekit stop guidance now')).toBe('stop_guidance');
   });
 
   it('accepts wake-word scene description commands', () => {
-    expect(parseVoiceCommand("Maculus what's around me")).toBe('describe_scene');
-    expect(parseVoiceCommand('Maculus what is around me')).toBe('describe_scene');
-    expect(parseVoiceCommand('Maculus describe scene')).toBe('describe_scene');
+    expect(parseVoiceCommand("Livekit what's around me")).toBe('describe_scene');
+    expect(parseVoiceCommand('Livekit what is around me')).toBe('describe_scene');
+    expect(parseVoiceCommand('Livekit describe scene')).toBe('describe_scene');
   });
 
   it('accepts wake-word haptic commands', () => {
-    expect(parseVoiceCommand('Maculus haptic off')).toBe('haptic_off');
-    expect(parseVoiceCommand('Maculus haptics off')).toBe('haptic_off');
-    expect(parseVoiceCommand('Maculus mute vibration')).toBe('haptic_off');
-    expect(parseVoiceCommand('Maculus haptic on')).toBe('haptic_on');
-    expect(parseVoiceCommand('Maculus enable vibrations')).toBe('haptic_on');
-    expect(parseVoiceCommand('Maculus stop haptic')).toBe('stop_haptic');
-    expect(parseVoiceCommand('Maculus stop vibration')).toBe('stop_haptic');
+    expect(parseVoiceCommand('Livekit haptic off')).toBe('haptic_off');
+    expect(parseVoiceCommand('Livekit haptics off')).toBe('haptic_off');
+    expect(parseVoiceCommand('Livekit mute vibration')).toBe('haptic_off');
+    expect(parseVoiceCommand('Livekit haptic on')).toBe('haptic_on');
+    expect(parseVoiceCommand('Livekit enable vibrations')).toBe('haptic_on');
+    expect(parseVoiceCommand('Livekit stop haptic')).toBe('stop_haptic');
+    expect(parseVoiceCommand('Livekit stop vibration')).toBe('stop_haptic');
   });
 
   it('rejects phrases without the wake word before wake detection and low-confidence phrases', () => {
     expect(parseVoiceCommand('start guidance')).toBeNull();
-    expect(parseVoiceCommand('Maculus start guidance', 0.2)).toBeNull();
+    expect(parseVoiceCommand('Livekit start guidance', 0.2)).toBeNull();
   });
 
   it('accepts command-only phrases after wake detection', () => {
@@ -54,6 +54,13 @@ describe('VoiceCommandService parser', () => {
       requireWakeWord: false,
       ignoreConfidence: true,
     })).toBe('start_guidance');
+  });
+
+  it('matches the user-spoken wake phrase after the wake-word change', () => {
+    // The parser should accept the "Hey LiveKit" label as the wake token
+    // and still route to the same commands.
+    expect(parseVoiceCommand('Livekit what is around me', null, { requireWakeWord: true })).toBe('describe_scene');
+    expect(parseVoiceCommand('Livekit start guidance', null, { requireWakeWord: true })).toBe('start_guidance');
   });
 });
 

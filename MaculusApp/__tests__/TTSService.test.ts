@@ -157,8 +157,44 @@ describe('TTSService guidance speech', () => {
     service.speakGuidance(guidance('scene:new', 'The room changed.'));
     expect(Tts.speak).not.toHaveBeenCalled();
 
-    jest.advanceTimersByTime(3500);
+    jest.advanceTimersByTime(2000);
     expect(Tts.speak).toHaveBeenCalledWith('The room changed.');
+  });
+
+  it('applies scene prosody rate and pitch via speakWithProsody', async () => {
+    const service = await createService();
+    service.speaking = false;
+    service.lastSpeakTime = 0;
+
+    (service as any).speakWithProsody('Chair to your left.', 'scene', { force: true });
+
+    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.55);
+    expect(Tts.setDefaultPitch).toHaveBeenCalledWith(1.0);
+    expect(Tts.speak).toHaveBeenCalledWith('Chair to your left.');
+  });
+
+  it('applies emergency prosody rate and pitch via speakWithProsody', async () => {
+    const service = await createService();
+    service.speaking = false;
+    service.lastSpeakTime = 0;
+
+    (service as any).speakWithProsody('Stop! Obstacle ahead.', 'emergency', { force: true });
+
+    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.6);
+    expect(Tts.setDefaultPitch).toHaveBeenCalledWith(0.95);
+  });
+
+  it('deduplicates near-identical utterances within 10 seconds', async () => {
+    const service = await createService();
+    service.speaking = false;
+    service.lastSpeakTime = 0;
+
+    // First call records the prefix; second call (without force) should be
+    // dropped by the fuzzy dedup.
+    (service as any).speakWithProsody('There is a chair to your left.', 'scene', { force: true });
+    (service as any).speakWithProsody('There is a chair to your left.', 'scene', { eventKey: 'k2' });
+
+    expect(Tts.speak).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -90,6 +90,17 @@ function zoneOf(cx: number, x1?: number, x2?: number): Zone {
   return horizontalOffset(cx) < 0 ? 'left' : 'right';
 }
 
+// Threshold for "looks like" / "might be" hedging. Below MIN_SCORE is dropped
+// entirely; between LOW and MIN_SCORE we soften the wording.
+const LOW_CONFIDENCE = 0.45;
+
+export function uncertainLabel(label: string, score: number): string {
+  if (score < LOW_CONFIDENCE) {
+    return `what looks like ${aOrAn(label)}`;
+  }
+  return aOrAn(label);
+}
+
 // Box-size to proximity (larger box is roughly closer).
 
 function boxArea(d: Detection): number {
@@ -183,6 +194,46 @@ export function formatObstacleDistance(distanceCm: number): number {
   return Math.max(10, Math.round(distanceCm / 10) * 10);
 }
 
+/**
+ * Decision-first phrasing: when something is in the user's path and the
+ * ultrasonic sensor confirms an obstacle, speak the action ("Step to the
+ * right") instead of describing the object ("chair to your left"). Returns
+ * null when the situation doesn't justify a directive.
+ */
+export function buildDecision(
+  detection: Detection,
+  distance: DistanceReading | null,
+): Guidance | null {
+  if (!distance?.obstacle) {return null;}
+  // People are passed through with the descriptive path — the user might
+  // know the person and only want to be told they're there.
+  if (detection.label === 'person') {return null;}
+  if (zoneOf(detection.cx, detection.x1, detection.x2) !== 'ahead') {return null;}
+
+  const offset = horizontalOffset(detection.cx);
+  const absoluteOffset = Math.abs(offset);
+  const cm = formatObstacleDistance(distance.distance_cm);
+  const emergency = cm <= 40;
+
+  let text: string;
+  if (absoluteOffset <= DIRECT_AHEAD_OFFSET) {
+    text = emergency ? 'Stop ahead.' : 'Careful, something in your path.';
+  } else if (absoluteOffset <= SIDE_OFFSET) {
+    text = offset < 0 ? 'Step to the right.' : 'Step to the left.';
+  } else {
+    // Far to either side — the user can step around comfortably.
+    text = offset < 0
+      ? `Step around the ${detection.label} to your right.`
+      : `Step around the ${detection.label} to your left.`;
+  }
+
+  return {
+    text,
+    priority: emergency ? PRIORITY.EMERGENCY : PRIORITY.HIGH,
+    haptic: distance.distance_cm < HAPTIC_DISTANCE_CM,
+  };
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 /**
@@ -198,10 +249,14 @@ export function buildGuidance(
   // 1. Emergency — ultrasonic says something is dangerously close.
   if (distance?.obstacle) {
     const cm = formatObstacleDistance(distance.distance_cm);
-    const ahead = strong
-      .filter(d => zoneOf(d.cx, d.x1, d.x2) === 'ahead')
-      .sort((a, b) => rank(b) - rank(a))[0];
-    const what = ahead ? ahead.label : 'obstacle';
+    const ranked = [...strong].sort((a, b) => rank(b) - rank(a));
+    // Decision-first: when an in-path object is the most likely culprit,
+    // speak the action instead of the description.
+    for (const det of ranked) {
+      const decision = buildDecision(det, distance);
+      if (decision) {return decision;}
+    }
+    const what = ranked[0] ? ranked[0].label : 'obstacle';
     const emergency = cm <= 40;
     return {
       text: emergency
@@ -282,11 +337,14 @@ export function describeScene(
     for (const z of zoneOrder) {
       const objs = groups[z];
       if (!objs || objs.length === 0) continue;
+      // Find the strongest detection in this zone for uncertainty wrapping.
+      const top = [...objs].sort((a, b) => b.score - a.score)[0];
       const labels = objs.map(d => d.label);
       if (labels.length === 1) {
         const prox = proximityHint(objs[0]);
         const detail = prox ? `, ${prox}` : '';
-        sentences.push(`there is ${aOrAn(labels[0])}${detail} ${z}`);
+        const label = uncertainLabel(labels[0], top.score);
+        sentences.push(`there is ${label}${detail} ${z}`);
       } else if (labels.length === 2) {
         sentences.push(`there is ${aOrAn(labels[0])} and ${aOrAn(labels[1])} ${z}`);
       } else {
@@ -298,12 +356,24 @@ export function describeScene(
     if (sentences.length === 0) {
       body = `I can see some objects but I'm having trouble placing them precisely.`;
     } else {
-      // Scene intro
-      const intro = scene.confidence > 0.3
+      // Scene intro. If we already know the path is blocked, drop the
+      // "You appear to be in" lead-in — the user cares about the obstacle.
+      const pathBlocked = Boolean(distance?.obstacle);
+      const intro = pathBlocked
+        ? ''
+        : scene.confidence > 0.3
         ? `You appear to be in ${scene.type}. `
         : 'Looking around, ';
 
       body = cap(intro + sentences.join('. ') + '.');
+
+      // Lightly signal continuity if the top object is the same as last time.
+      const previousTop = describeSceneMemory.top;
+      const currentTop = strong[0] ? strong[0].label : null;
+      if (previousTop && currentTop && previousTop === currentTop) {
+        body = 'Still, ' + body.charAt(0).toLowerCase() + body.slice(1);
+      }
+      describeSceneMemory.top = currentTop;
 
       // Distance warning
       if (distance?.obstacle) {
@@ -336,4 +406,12 @@ export function summarizeObjects(detections: Detection[]): string {
     out.push(`${d.label} (${extra})`);
   }
   return out.join(' · ');
+}
+
+// Tiny module-local memory used by describeScene to add the "Still," prefix
+// when the top object hasn't changed between calls. Resets on module reload.
+const describeSceneMemory: { top: string | null } = { top: null };
+
+export function _resetDescribeSceneMemory(): void {
+  describeSceneMemory.top = null;
 }

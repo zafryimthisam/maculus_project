@@ -1,6 +1,7 @@
 import { EmitterSubscription, NativeEventEmitter, NativeModules, Vibration } from 'react-native';
-import { COMMAND_TIMEOUT_MS, WAKE_WORD_LABEL } from '../config/WakeWordConfig';
+import { COMMAND_TIMEOUT_MS, WAKE_WORD_LABEL, WAKE_WORD_PARSER_TOKEN } from '../config/WakeWordConfig';
 import { tts } from './TTSService';
+import { localLlmService } from './LocalLlmService';
 import { ConversationTurn } from '../types';
 
 export type VoiceCommand =
@@ -67,12 +68,16 @@ export type VoiceCommandExecution = {
   feedback?: string;
 };
 
-const WAKE_WORD = 'maculus';
+const WAKE_WORD = WAKE_WORD_PARSER_TOKEN;
 const MIN_CONFIDENCE = 0.35;
 const AUDIO_HANDOFF_MS = 350;
 const EARLY_NO_RESULT_MS = 1800;
-const CONVERSATION_QUIET_MS = 18000;
-const EMPTY_CAPTURE_QUIET_MS = 3500;
+const CONVERSATION_QUIET_MS_LLM_READY = 12000;
+const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
+const EMPTY_CAPTURE_QUIET_MS = 2500;
+const NO_COMMAND_FEEDBACK = "I heard you, but I didn't catch a question. Try again.";
+const NO_QUESTION_FALLBACK =
+  "I can describe what I see, but for deeper questions I need the conversational model. Safety guidance is still active.";
 
 const MaculusVoiceCommand = NativeModules.MaculusVoiceCommand as VoiceCommandNativeModule | undefined;
 
@@ -273,7 +278,7 @@ export class VoiceCommandService {
 
     this.commandBusy = true;
     this.safetyInterrupted = false;
-    this.reserveConversationWindow(CONVERSATION_QUIET_MS);
+    this.reserveConversationWindow(this.effectiveQuietMs());
     this.setStatus('wake_detected');
     Vibration.vibrate([0, 60]);
     // Command capture uses a silent haptic acknowledgement. Spoken prompts can
@@ -312,7 +317,7 @@ export class VoiceCommandService {
       }
 
       this.setStatus('processing');
-      this.reserveConversationWindow(CONVERSATION_QUIET_MS);
+      this.reserveConversationWindow(this.effectiveQuietMs());
       const command = parseVoiceCommand(result.text, result.confidence, {
         requireWakeWord: false,
         ignoreConfidence: true,
@@ -326,6 +331,17 @@ export class VoiceCommandService {
       // potentially longer local-LLM turn so its response can enter TTS while
       // emergency guidance remains free to interrupt it.
       this.commandBusy = false;
+      const llmReady = localLlmService.getState() === 'ready';
+      // If the grammar parser didn't recognize the phrase but the LLM is
+      // available, send the raw transcript so the model gets a chance.
+      // If the LLM isn't ready, give the user honest spoken feedback.
+      if (command === null && !llmReady) {
+        if (!this.safetyInterrupted) {
+          Vibration.vibrate([0, 45, 60, 45]);
+          tts.speakWithProsody(NO_COMMAND_FEEDBACK, 'conversational', { force: true });
+        }
+        return;
+      }
       await this.onTurn?.({
         transcript: result.text.trim(),
         timestamp: Date.now(),
@@ -343,6 +359,12 @@ export class VoiceCommandService {
       }
     }
   };
+
+  private effectiveQuietMs(): number {
+    return localLlmService.getState() === 'ready'
+      ? CONVERSATION_QUIET_MS_LLM_READY
+      : CONVERSATION_QUIET_MS_LLM_LOADING;
+  }
 
   private handleState = (state: { state?: VoiceCommandStatus }) => {
     if (!this.enabled || !state.state) {
@@ -469,8 +491,9 @@ export class VoiceCommandService {
       now < this.conversationQuietUntil;
   }
 
-  reserveConversationWindow(durationMs: number = CONVERSATION_QUIET_MS): void {
-    this.conversationQuietUntil = Math.max(this.conversationQuietUntil, Date.now() + durationMs);
+  reserveConversationWindow(durationMs?: number): void {
+    const effective = durationMs ?? this.effectiveQuietMs();
+    this.conversationQuietUntil = Math.max(this.conversationQuietUntil, Date.now() + effective);
   }
 }
 

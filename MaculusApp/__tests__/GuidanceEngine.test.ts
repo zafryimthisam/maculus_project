@@ -46,7 +46,45 @@ describe('GuidanceEngine camera position logic', () => {
       threshold_cm: 120,
     });
 
+    // Person is skipped by the decision-first path, so the descriptive
+    // "person, N centimeters ahead" wording is used.
     expect(guidance.text).toContain('person, 80 centimeters ahead');
+  });
+
+  it('returns a step directive when an in-path non-person object is detected', () => {
+    const guidance = buildGuidance([
+      detection({ label: 'chair', cx: 0.34, x1: 0.18, x2: 0.5, score: 0.7 }),
+    ], {
+      obstacle: true,
+      distance_cm: 60,
+      threshold_cm: 100,
+    });
+
+    // cx 0.34 (offset -0.16) is just left of center, so the user is told
+    // to step right. The bounding box still crosses the centerline so
+    // zoneOf returns 'ahead'.
+    expect(guidance.text).toMatch(/^Step to the right\./);
+    expect(guidance.priority).toBeGreaterThanOrEqual(1);
+  });
+
+  it('returns "Step to the left" when the in-path object is to the right of center', () => {
+    const guidance = buildGuidance([
+      detection({ label: 'bench', cx: 0.66, x1: 0.5, x2: 0.82, score: 0.7 }),
+    ], {
+      obstacle: true,
+      distance_cm: 60,
+      threshold_cm: 100,
+    });
+
+    expect(guidance.text).toMatch(/^Step to the left\./);
+  });
+
+  it('uses "looks like" for low-confidence detections in describeScene', () => {
+    const text = describeScene([
+      detection({ label: 'chair', cx: 0.5, x1: 0.4, x2: 0.6, score: 0.36 }),
+    ], null).text;
+
+    expect(text.toLowerCase()).toContain('looks like a chair');
   });
 
 

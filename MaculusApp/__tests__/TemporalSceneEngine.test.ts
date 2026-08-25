@@ -231,4 +231,12 @@ describe('TemporalSceneEngine risk and depth behavior', () => {
     expect(chair?.nearScore).toBeCloseTo(0.9);
     expect(bottle?.nearScore).toBeCloseTo(0.1);
   });
+
+  it('promotes a person to confirmed within the tightened PERSON_CONFIRM_MS window', () => {
+    const engine = new TemporalSceneEngine({ shuffleAliases: false });
+    update(engine, 0, [detection('person', 0.5)]);
+    const later = update(engine, 1500, [detection('person', 0.5)]);
+    const person = later.snapshot.tracks.find(track => track.label === 'person');
+    expect(person?.confirmed).toBe(true);
+  });
 });

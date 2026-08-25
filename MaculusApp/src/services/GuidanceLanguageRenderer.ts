@@ -51,6 +51,19 @@ export function renderGreeting(context: SceneGroundingContext, date: Date = new 
   return `${greeting}. I’m ready. Give me a moment to keep checking the path.`;
 }
 
+/**
+ * Short acknowledgement lead-in spoken before descriptive guidance. The
+ * dispatcher calls this with profile 'ack' so it carries a slightly higher
+ * pitch and a 160 ms pre-delay.
+ */
+export function renderAck(kind: 'start' | 'acknowledge' | 'hold'): string {
+  switch (kind) {
+    case 'start': return 'Okay.';
+    case 'acknowledge': return 'Got it.';
+    case 'hold': return 'One moment.';
+  }
+}
+
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }

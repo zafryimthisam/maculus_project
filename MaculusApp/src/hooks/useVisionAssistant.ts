@@ -19,7 +19,7 @@ import { describeScene, formatObstacleDistance, summarizeObjects } from '../serv
 import { MobilityGuide } from '../services/MobilityGuide';
 import { SceneGroundingService } from '../services/SceneGroundingService';
 import { ConversationController } from '../services/ConversationController';
-import { renderDirective, renderGreeting, renderGroundedScene } from '../services/GuidanceLanguageRenderer';
+import { renderDirective, renderGreeting, renderGroundedScene, renderAck } from '../services/GuidanceLanguageRenderer';
 import { localLlmService, LocalLlmState } from '../services/LocalLlmService';
 import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { tts } from '../services/TTSService';
@@ -29,14 +29,16 @@ import { CameraSource, CapturedFrame, ConversationTurn, DistanceReading, Detecti
 const DISTANCE_INTERVAL_MS = 700;
 const OBSTACLE_DISTANCE_DELTA_CM = 20;
 const OBSTACLE_SUPPRESS_AFTER_ONE_SHOT_MS = 12000;
-const LOOP_IDLE_DELAY_MS = 80;
-const LOOP_ERROR_DELAY_MS = 500;
+const LOOP_IDLE_DELAY_MS = 40;
+const LOOP_ERROR_DELAY_MS = 350;
 const DEPTH_INTERVAL_MS = 1500;
 const REID_INTERVAL_MS = 500;
 const MAX_REID_PEOPLE_PER_FRAME = 4;
 const HAPTIC_COOLDOWN_MS = 3000;
 const CONVERSATION_RESPONSE_WINDOW_MS = 9000;
 const VOICE_SENSOR_WARNING_DEFER_MS = 4500;
+const BACKGROUND_GUIDANCE_INTERVAL_MS = 4500;
+const ACK_MIN_INTERVAL_MS = 2500;
 
 export function useVisionAssistant() {
   const [piUrl, setPiUrlState] = useState(getPiUrl());
@@ -88,6 +90,10 @@ export function useVisionAssistant() {
   const groundingContextRef = useRef<SceneGroundingContext | null>(null);
   const deferredGuidanceRef = useRef<GuidanceEvent | null>(null);
   const lastGuidanceTextRef = useRef<string | null>(null);
+  const lastSpokenTextRef = useRef<{ text: string; at: number } | null>(null);
+  const lastAckAtRef = useRef(0);
+  const lastBackgroundGuidanceAtRef = useRef(0);
+  const lastSpokenProfileRef = useRef<string>('scene');
   const greetingSpokenRef = useRef(false);
 
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
@@ -525,8 +531,13 @@ export function useVisionAssistant() {
     if (conversationalVoiceActive && event.key === 'conversation:greeting') {
       return;
     }
+    // When voice is on, background p=0 guidance is throttled, not silenced,
+    // so the user remains oriented. Safety (p>=1) and conversation always pass.
     if (conversationalVoiceActive && event.priority === 0 && backgroundGuidance) {
-      return;
+      if (now - lastBackgroundGuidanceAtRef.current < BACKGROUND_GUIDANCE_INTERVAL_MS) {
+        return;
+      }
+      lastBackgroundGuidanceAtRef.current = now;
     }
     if (conversationWindowActive && backgroundGuidance && event.priority < 2) {
       if (event.kind === 'sensor' && event.interruption === 'after-command') {
@@ -560,7 +571,24 @@ export function useVisionAssistant() {
       }
       return;
     }
+    // Recently-spoken memory: drop the event if we already said the same
+    // sentence within the last 10 s. Stored on the dispatcher side because
+    // the temporal engine can mint a fresh eventKey for a stable scene.
+    if (event.priority === 0 && event.kind !== 'conversation') {
+      const last = lastSpokenTextRef.current;
+      if (last && last.text === event.text && now - last.at < 10_000) {
+        return;
+      }
+    }
+    // Acknowledgment lead-in: for non-conversation p=0 events, queue a soft
+    // ack first if the previous guidance was spoken more than ACK_MIN_INTERVAL_MS
+    // ago. The TTS ack profile uses its own short delay.
+    if (event.priority === 0 && event.kind !== 'conversation' && now - lastAckAtRef.current > ACK_MIN_INTERVAL_MS) {
+      lastAckAtRef.current = now;
+      tts.speakWithProsody(renderAck('acknowledge'), 'ack', { force: false, eventKey: 'ack:pre' });
+    }
     lastGuidanceTextRef.current = event.text;
+    lastSpokenTextRef.current = { text: event.text, at: now };
     conversationControllerRef.current.rememberGuidance(event.text);
     tts.speakGuidance(event);
     if (event.haptic) {triggerGuidanceHaptic(event.priority);}
@@ -933,7 +961,7 @@ export function useVisionAssistant() {
     }
 
     if (fastCommand === 'describe_scene' && localLlmService.getState() !== 'ready') {
-      tts.speak(renderGroundedScene(context), 1, true);
+      tts.speakWithProsody(renderGroundedScene(context), 'conversational', { force: true });
       return;
     }
 
@@ -941,24 +969,28 @@ export function useVisionAssistant() {
     if (currentCapability.conversationalSupported === false) {
       await localLlmService.release();
       setLlmState('unavailable');
-      tts.speak(
+      tts.speakWithProsody(
         fastCommand === 'describe_scene'
           ? renderGroundedScene(context)
           : currentCapability.capabilityReason || 'The conversational guide is temporarily unavailable. Safety guidance remains active.',
-        1,
-        true,
+        'conversational',
+        { force: true },
       );
       return;
     }
 
     if (localLlmService.getState() !== 'ready' && !(await ensureLlmReady(false))) {
+      // Free-form question with no LLM: speak the grounded scene, then a
+      // short honest follow-up so the user knows what to expect.
       const status = modelAssetService.getStatus();
-      const message = status.message?.includes('cellular')
+      const blockerMessage = status.message?.includes('cellular')
         ? 'The conversational model needs permission to download over cellular. Safety guidance is still available.'
         : status.state === 'downloading'
         ? 'The conversational model is still downloading. Safety guidance is still available.'
         : 'The conversational guide is unavailable. Safety guidance is still active.';
-      tts.speak(message, 1, true);
+      tts.speakWithProsody(renderGroundedScene(context), 'conversational', { force: true });
+      tts.speakWithProsody(blockerMessage, 'conversational', { force: true });
+      setLlmState(localLlmService.getState());
       return;
     }
 
@@ -1005,12 +1037,21 @@ export function useVisionAssistant() {
     }
 
     conversationControllerRef.current.reset();
+    // Reflect the current LLM state in the UI immediately so the user can
+    // see why "Hey LiveKit" may be silent while the model is loading.
+    setLlmState(localLlmService.getState());
     const started = await voiceCommandService.start(handleConversationTurn, setVoiceStatus);
     if (started) {
       setVoiceEnabled(true);
       setVoiceStatus('wake_listening');
-      tts.speak('Conversational guide on. Say ' + WAKE_WORD_LABEL + ', then speak naturally.', 1, true);
-      ensureLlmReady(false).then(() => setLlmState(localLlmService.getState()));
+      tts.speakWithProsody(
+        'Conversational guide on. Say ' + WAKE_WORD_LABEL + ', then speak naturally.',
+        'conversational',
+        { force: true },
+      );
+      ensureLlmReady(false)
+        .then(() => setLlmState(localLlmService.getState()))
+        .catch(() => setLlmState(localLlmService.getState()));
     } else {
       setVoiceEnabled(false);
       setVoiceStatus('unavailable');
@@ -1090,6 +1131,7 @@ export function useVisionAssistant() {
     downloadConversationalModel,
     cancelConversationalModelDownload,
     deleteConversationalModel,
+    lastSpokenProfile: lastSpokenProfileRef,
   };
 }
 

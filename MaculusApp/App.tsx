@@ -47,7 +47,13 @@ export default function App() {
     downloadConversationalModel,
     cancelConversationalModelDownload,
     deleteConversationalModel,
+    lastSpokenProfile,
   } = useVisionAssistant();
+  const [pipelineProfile, setPipelineProfile] = useState<string>(lastSpokenProfile.current);
+  useEffect(() => {
+    const id = setInterval(() => setPipelineProfile(lastSpokenProfile.current), 500);
+    return () => clearInterval(id);
+  }, [lastSpokenProfile]);
 
   const [inputUrl, setInputUrl] = useState(piUrl);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -66,6 +72,9 @@ export default function App() {
     : voiceStatus === 'error'
     ? 'Voice error'
     : 'Voice off';
+  const llmStatusText = voiceEnabled
+    ? `LLM: ${llmState === 'ready' ? 'ready' : llmState === 'loading' ? 'loading' : llmState === 'generating' ? 'generating' : llmState === 'error' ? 'error' : llmState === 'unavailable' ? 'unavailable' : 'unloaded'}`
+    : null;
 
   useEffect(() => {
     setInputUrl(piUrl);
@@ -194,6 +203,9 @@ export default function App() {
           />
 
           <Text style={styles.voiceStatus}>{voiceStatusText}</Text>
+          {llmStatusText && (
+            <Text style={styles.llmStatus}>{llmStatusText}</Text>
+          )}
 
           <Text style={styles.modelStatus} accessibilityLiveRegion="polite">
             {modelStatusText}
@@ -267,6 +279,11 @@ export default function App() {
             {' - ' + voiceStatusText}
             {hapticAlertsEnabled ? ' - Haptics on' : ' - Haptics off'}
           </Text>
+          {__DEV__ && (
+            <Text style={styles.devRow}>
+              {isGuiding && fps > 0 ? fps + ' fps · ' : ''}TTS: {pipelineProfile}
+            </Text>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -306,10 +323,12 @@ const styles = StyleSheet.create({
   voiceBtn: { minHeight: 72, marginTop: 8 },
   voiceBtnText: { fontSize: 22 },
   voiceStatus: { marginTop: 4, marginBottom: 8, fontSize: 15, color: '#A7F3D0' },
+  llmStatus: { marginTop: -4, marginBottom: 8, fontSize: 13, color: '#FCD34D', textAlign: 'center' },
   modelStatus: { marginTop: 2, marginBottom: 8, fontSize: 15, color: '#C7D2FE', textAlign: 'center' },
   modelLicense: { marginTop: -4, marginBottom: 8, fontSize: 12, color: '#9CA3AF', textAlign: 'center' },
   modelButton: { minHeight: 56, marginTop: 4 },
   primaryBtn: { minHeight: 84, marginTop: 8 },
   primaryBtnText: { fontSize: 24 },
   footer: { marginTop: 20, fontSize: 14, color: '#6B7280' },
+  devRow: { marginTop: 4, fontSize: 12, color: '#9CA3AF', textAlign: 'center' },
 });

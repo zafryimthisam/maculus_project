@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 import { GuidanceEvent } from '../types';
 
 type SpeechKind = 'normal' | 'guidance';
+export type TtsProsodyProfile = 'emergency' | 'urgent' | 'scene' | 'ack' | 'conversational';
 type SpeechItem = {
   text: string;
   priority: number;
@@ -11,6 +12,7 @@ type SpeechItem = {
   eventKind?: GuidanceEvent['kind'];
   source?: GuidanceEvent['source'];
   expiresAt?: number;
+  profile?: TtsProsodyProfile;
 };
 
 /**
@@ -33,12 +35,34 @@ export class TTSService {
   private lastGuidanceKeys = new Map<string, number>();
   private listeners: Array<{ name: string; handler: any }> = [];
   private speakingListeners = new Set<(speaking: boolean) => void>();
+  private lastUtteranceAtByPrefix = new Map<string, number>();
+  private profileListeners = new Set<(profile: TtsProsodyProfile) => void>();
+  private lastProfile: TtsProsodyProfile = 'scene';
 
   // Rate limits (ms)
-  private readonly NORMAL_COOLDOWN = 3500;
-  private readonly PRIORITY_COOLDOWN = 1200;
-  private readonly EMERGENCY_COOLDOWN = 600;
-  private readonly MAX_QUEUE_SIZE = 10;
+  private readonly NORMAL_COOLDOWN = 1800;
+  private readonly PRIORITY_COOLDOWN = 900;
+  private readonly EMERGENCY_COOLDOWN = 450;
+  private readonly MAX_QUEUE_SIZE = 8;
+
+  // Prosody profiles — vary TTS rate and pitch by event type so the assistant
+  // sounds more human. Per-call Tts.speak options are preferred on Android/iOS
+  // bindings that support them; otherwise we set the default right before
+  // each speak.
+  private readonly DEFAULT_RATE = 0.55;
+  private readonly PROFILES: Record<TtsProsodyProfile, { rate: number; pitch: number }> = {
+    emergency: { rate: 0.6, pitch: 0.95 },
+    urgent: { rate: 0.58, pitch: 0.97 },
+    scene: { rate: 0.55, pitch: 1.0 },
+    ack: { rate: 0.5, pitch: 1.05 },
+    conversational: { rate: 0.52, pitch: 1.02 },
+  };
+
+  // Suppresses the same sentence (or any sentence with the same 5-word prefix)
+  // for this long, even if the event key differs. Stops "person ahead, person
+  // ahead, person ahead" repeats on a stable scene.
+  private readonly SEMANTIC_DEDUP_MS = 10_000;
+  private readonly ACK_DELAY_MS = 160;
 
   async init(): Promise<void> {
     if (this.initialized) {
@@ -70,10 +94,12 @@ export class TTSService {
       });
 
       Tts.setDefaultLanguage('en-US');
-      Tts.setDefaultRate(0.42);
-      Tts.setDefaultPitch(1.0);
+      Tts.setDefaultRate(this.DEFAULT_RATE);
+      Tts.setDefaultPitch(this.PROFILES.scene.pitch);
 
-      // iOS: stop on finish to release audio session
+      // iOS: stop on finish to release audio session. AVSpeech treats 0.5 as
+      // normal, so the 0.55 default reads slightly faster than the old 0.42
+      // without sounding robotic.
       if (Platform.OS === 'ios') {
         Tts.setDucking(true);
       }
@@ -128,6 +154,100 @@ export class TTSService {
     return () => {
       this.speakingListeners.delete(listener);
     };
+  }
+
+  onProfileChange(listener: (profile: TtsProsodyProfile) => void): () => void {
+    this.profileListeners.add(listener);
+    listener(this.lastProfile);
+    return () => {
+      this.profileListeners.delete(listener);
+    };
+  }
+
+  getLastProfile(): TtsProsodyProfile {
+    return this.lastProfile;
+  }
+
+  /**
+   * Speak with an explicit prosody profile. Used by the renderer / dispatcher
+   * to give scene narration a softer tone, emergencies a faster + lower
+   * pitch, and conversation replies a more natural cadence.
+   */
+  speakWithProsody(
+    text: string,
+    profile: TtsProsodyProfile = 'scene',
+    opts: { force?: boolean; priority?: number; eventKey?: string; onDone?: () => void } = {},
+  ): void {
+    if (!this.initialized) {
+      console.warn('[TTS] Not initialized, dropping prosody speak:', text);
+      return;
+    }
+    if (!text) {
+      return;
+    }
+
+    // Fuzzy recent-utterance dedup. We compare the first five normalized words
+    // and drop if we've already spoken something with the same prefix inside
+    // the dedup window. Emergency priority is never deduped. The prefix is
+    // always recorded (even for `force: true`) so a forced utterance still
+    // suppresses a follow-up duplicate.
+    const priority = opts.priority ?? (profile === 'emergency' ? 2 : profile === 'urgent' ? 2 : 1);
+    const isEmergency = priority >= 2;
+    const prefix = this.utterancePrefix(text);
+    if (prefix) {
+      const lastAt = this.lastUtteranceAtByPrefix.get(prefix) || 0;
+      if (!opts.force && !isEmergency && Date.now() - lastAt < this.SEMANTIC_DEDUP_MS) {
+        return;
+      }
+      this.lastUtteranceAtByPrefix.set(prefix, Date.now());
+      if (this.lastUtteranceAtByPrefix.size > 64) {
+        this.prunePrefixes();
+      }
+    }
+
+    const p = this.PROFILES[profile];
+    const speak = () => {
+      this.lastProfile = profile;
+      this.profileListeners.forEach(listener => listener(profile));
+      try {
+        // react-native-tts supports per-call rate/pitch via setDefaultRate +
+        // setDefaultPitch on every binding; using options on speak() is not
+        // universal across versions.
+        Tts.setDefaultRate(p.rate);
+        Tts.setDefaultPitch(p.pitch);
+        Tts.speak(text);
+      } catch (err: any) {
+        console.error('[TTS] Speak error:', err);
+      }
+    };
+
+    if (this.speaking && (this.currentItem?.priority ?? 0) < priority) {
+      // Interrupt lower-priority speech and queue this one at the front.
+      Tts.stop();
+      this.currentItem = null;
+      this.setSpeaking(false);
+      this.queue.unshift({
+        text,
+        priority,
+        kind: 'normal',
+        eventKey: opts.eventKey,
+        profile,
+        expiresAt: Date.now() + 30_000,
+      });
+      this.trimQueueFront();
+      setTimeout(() => {
+        this.processQueue();
+        opts.onDone?.();
+      }, 150);
+      return;
+    }
+
+    if (profile === 'ack' && this.ACK_DELAY_MS > 0) {
+      setTimeout(speak, this.ACK_DELAY_MS);
+    } else {
+      speak();
+    }
+    opts.onDone?.();
   }
 
   /**
@@ -312,6 +432,31 @@ export class TTSService {
       : this.NORMAL_COOLDOWN;
   }
 
+  private utterancePrefix(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join(' ');
+  }
+
+  private prunePrefixes(): void {
+    const now = Date.now();
+    for (const [prefix, at] of this.lastUtteranceAtByPrefix.entries()) {
+      if (now - at > this.SEMANTIC_DEDUP_MS) {
+        this.lastUtteranceAtByPrefix.delete(prefix);
+      }
+    }
+  }
+
+  private trimQueueFront(): void {
+    if (this.queue.length > this.MAX_QUEUE_SIZE) {
+      this.queue = this.queue.slice(0, this.MAX_QUEUE_SIZE);
+    }
+  }
+
   private scheduleQueue(delay: number): void {
     if (this.queueTimer) {clearTimeout(this.queueTimer);}
     this.queueTimer = setTimeout(() => {
@@ -336,7 +481,16 @@ export class TTSService {
     if (item.eventKey) {this.lastGuidanceKeys.set(item.eventKey, now);}
     this.setSpeaking(true);
 
+    // Apply the item's prosody profile *immediately before* speaking so the
+    // iOS AVSpeech queue isn't flushed mid-sequence. We always restore
+    // setDefaultPitch too in case the previous item left it modified.
+    const profile = item.profile ?? (item.priority >= 2 ? 'emergency' : item.priority >= 1 ? 'scene' : 'scene');
+    const p = this.PROFILES[profile];
+    this.lastProfile = profile;
+    this.profileListeners.forEach(listener => listener(profile));
     try {
+      Tts.setDefaultRate(p.rate);
+      Tts.setDefaultPitch(p.pitch);
       Tts.speak(item.text);
     } catch (err: any) {
       console.error('[TTS] Speak error:', err);
