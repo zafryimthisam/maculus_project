@@ -46,10 +46,19 @@ def stream():
 
     def generate():
         output = _camera.get_stream_output()
+        last_frame_id = 0
         while True:
             with output.condition:
-                output.condition.wait()
-                frame = output.frame
+                ready = output.condition.wait_for(
+                    lambda: output.frame is not None and output.frame_id != last_frame_id,
+                    timeout=2.0,
+                )
+                if not ready:
+                    if not _camera.is_available():
+                        return
+                    continue
+                frame = bytes(output.frame)
+                last_frame_id = output.frame_id
             header = b'--FRAME\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(frame)).encode() + b'\r\n\r\n'
             yield header + frame + b'\r\n'
 
@@ -59,15 +68,24 @@ def stream():
 @app.route('/distance')
 def distance():
     if _sensor is None:
-        return jsonify({"error": "Sensor not initialized"}), 500
-    return jsonify(_sensor.get_reading())
+        return jsonify({
+            "distance_cm": None,
+            "obstacle": False,
+            "threshold_cm": None,
+            "valid": False,
+            "healthy": False,
+            "error": "Sensor not initialized",
+        }), 503
+    reading = _sensor.get_reading()
+    return jsonify(reading), 200 if reading["valid"] else 503
 
 @app.route('/status')
 def status():
     return jsonify({
         "system": "Maculus Pi",
         "camera": _camera is not None and getattr(_camera, 'is_available', lambda: False)(),
-        "sensor": _sensor is not None and getattr(_sensor, '_running', False)
+        "sensor": _sensor is not None and getattr(_sensor, '_running', False),
+        "sensor_healthy": _sensor is not None and getattr(_sensor, 'is_healthy', lambda: False)(),
     })
 
 def start_server(host, port, camera, sensor):

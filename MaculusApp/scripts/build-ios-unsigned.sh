@@ -192,6 +192,10 @@ ACTUAL_REID_SHA="${ACTUAL_REID_SHA%% *}"
 
 plutil -lint "$APP/Info.plist" >/dev/null
 
+PRIVACY_MANIFEST="$(find "$APP" -name PrivacyInfo.xcprivacy -print -quit)"
+[[ -f "$PRIVACY_MANIFEST" ]] || fail "Built app is missing PrivacyInfo.xcprivacy."
+plutil -lint "$PRIVACY_MANIFEST" >/dev/null
+
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 IPA="$OUTPUT_DIR/Maculus-unsigned-$TIMESTAMP.ipa"
 

@@ -24,6 +24,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
   private var completion: (resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock)?
   private var cancelled = false
   private var memoryPressureUntil: Date?
+  private var verifiedInstalledFingerprint: String?
   private lazy var session = URLSession(
     configuration: .default,
     delegate: self,
@@ -176,6 +177,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
       self.task = nil
       self.fileHandle?.closeFile()
       self.fileHandle = nil
+      self.verifiedInstalledFingerprint = nil
       do {
         for url in [try self.modelURL(), try self.partURL()] where FileManager.default.fileExists(atPath: url.path) {
           try FileManager.default.removeItem(at: url)
@@ -246,6 +248,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
           try FileManager.default.removeItem(at: installed)
         }
         try FileManager.default.moveItem(at: partial, to: installed)
+        self.verifiedInstalledFingerprint = self.fileFingerprint(installed)
         self.emit(state: "ready")
         self.completion?.resolve(try self.status(forcedState: "ready"))
         self.completion = nil
@@ -323,7 +326,25 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
 
   private func isInstalled() -> Bool {
     guard let url = try? modelURL(), FileManager.default.fileExists(atPath: url.path) else { return false }
-    return ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0) == Self.expectedSize
+    guard ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0) == Self.expectedSize else {
+      verifiedInstalledFingerprint = nil
+      return false
+    }
+    let fingerprint = fileFingerprint(url)
+    if fingerprint != nil && fingerprint == verifiedInstalledFingerprint { return true }
+    guard (try? sha256(url)) == Self.expectedSHA256 else {
+      verifiedInstalledFingerprint = nil
+      return false
+    }
+    verifiedInstalledFingerprint = fingerprint
+    return true
+  }
+
+  private func fileFingerprint(_ url: URL) -> String? {
+    guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+          let size = values.fileSize,
+          let modified = values.contentModificationDate else { return nil }
+    return "\(size):\(modified.timeIntervalSince1970)"
   }
 
   private func availableCapacity() throws -> Int64 {

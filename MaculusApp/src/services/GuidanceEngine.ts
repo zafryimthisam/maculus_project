@@ -109,12 +109,12 @@ function boxArea(d: Detection): number {
 
 function proximityHint(d: Detection): string {
   if (d.nearScore !== undefined) {
-    if (d.nearScore >= VERY_CLOSE_DEPTH_SCORE) return 'very close';
-    if (d.nearScore >= CLOSE_DEPTH_SCORE) return 'close';
+    if (d.nearScore >= VERY_CLOSE_DEPTH_SCORE) {return 'very close';}
+    if (d.nearScore >= CLOSE_DEPTH_SCORE) {return 'close';}
   }
   const area = boxArea(d);
-  if (area > 0.25) return 'very close';
-  if (area > 0.12) return 'close';
+  if (area > 0.25) {return 'very close';}
+  if (area > 0.12) {return 'close';}
   return '';
 }
 
@@ -175,15 +175,15 @@ function inferScene(detections: Detection[]): SceneContext {
   ];
 
   const best = scores.reduce((a, b) => (b[1] > a[1] ? b : a), ['a space', 0]);
-  if (best[1] >= 2) return { type: best[0], confidence: Math.min(1, best[1] / 4) };
-  if (labels.size >= 3) return { type: 'an indoor space', confidence: 0.3 };
+  if (best[1] >= 2) {return { type: best[0], confidence: Math.min(1, best[1] / 4) };}
+  if (labels.size >= 3) {return { type: 'an indoor space', confidence: 0.3 };}
   return { type: 'a space', confidence: 0.0 };
 }
 
 // ── Natural language helpers ────────────────────────────────────────────
 
 function aOrAn(word: string): string {
-  if (!word) return word;
+  if (!word) {return word;}
   return /^[aeiou]/i.test(word) ? `an ${word}` : `a ${word}`;
 }
 function cap(s: string): string {
@@ -314,14 +314,14 @@ export function describeScene(
       priority = PRIORITY.HIGH;
       haptic = distance.distance_cm < HAPTIC_DISTANCE_CM;
     } else {
-      body = `I don't see any distinct objects around you. The path appears clear.`;
+      body = 'I don\'t see any distinct objects around you. The path appears clear.';
     }
   } else {
     // Group by zone with distinct object identities.
     const groups: Record<string, Detection[]> = {};
     for (const d of strong) {
       const z = describePosition(d.cx, d.x1, d.x2);
-      if (!groups[z]) groups[z] = [];
+      if (!groups[z]) {groups[z] = [];}
       // Only add if this label isn't already in the zone (dedup by label).
       if (!groups[z].some(e => e.label === d.label)) {
         groups[z].push(d);
@@ -336,7 +336,7 @@ export function describeScene(
 
     for (const z of zoneOrder) {
       const objs = groups[z];
-      if (!objs || objs.length === 0) continue;
+      if (!objs || objs.length === 0) {continue;}
       // Find the strongest detection in this zone for uncertainty wrapping.
       const top = [...objs].sort((a, b) => b.score - a.score)[0];
       const labels = objs.map(d => d.label);
@@ -354,7 +354,7 @@ export function describeScene(
     }
 
     if (sentences.length === 0) {
-      body = `I can see some objects but I'm having trouble placing them precisely.`;
+      body = 'I can see some objects but I\'m having trouble placing them precisely.';
     } else {
       // Scene intro. If we already know the path is blocked, drop the
       // "You appear to be in" lead-in — the user cares about the obstacle.
@@ -397,8 +397,8 @@ export function summarizeObjects(detections: Detection[]): string {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const d of detections) {
-    if (d.score < MIN_SCORE) continue;
-    if (seen.has(d.label)) continue;
+    if (d.score < MIN_SCORE) {continue;}
+    if (seen.has(d.label)) {continue;}
     seen.add(d.label);
     const pos = describePosition(d.cx, d.x1, d.x2);
     const prox = proximityHint(d);

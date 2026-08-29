@@ -1,7 +1,6 @@
 import { describe, expect, it, beforeEach } from '@jest/globals';
 import { LiveAIService } from '../src/services/LiveAIService';
 import { ConversationController } from '../src/services/ConversationController';
-import { SafetyInterrupter } from '../src/services/SafetyInterrupter';
 import { GuidanceEvent, LiveTickInput, SceneGroundingContext } from '../src/types';
 
 const buildContext = (overrides: Partial<SceneGroundingContext> = {}): SceneGroundingContext => ({

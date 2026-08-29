@@ -27,6 +27,8 @@ export const AccessibleButton: React.FC<Props> = ({
     onPress();
   };
 
+  const backgroundStyle = { backgroundColor: disabled ? '#9CA3AF' : color };
+
   return (
     <TouchableOpacity
       onPress={handlePress}
@@ -36,7 +38,7 @@ export const AccessibleButton: React.FC<Props> = ({
       accessibilityLabel={accessibilityLabel || title}
       accessibilityHint={accessibilityHint}
       accessibilityState={{ disabled }}
-      style={[styles.button, { backgroundColor: disabled ? '#9CA3AF' : color }, style]}
+      style={[styles.button, backgroundStyle, style]}
     >
       <Text style={[styles.text, textStyle]}>{title}</Text>
     </TouchableOpacity>

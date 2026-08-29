@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, jest } from '@jest/globals';
+import { describe, expect, it, beforeEach } from '@jest/globals';
 import { SafetyInterrupter } from '../src/services/SafetyInterrupter';
 import { TTSService } from '../src/services/TTSService';
 import { GuidanceEvent } from '../src/types';

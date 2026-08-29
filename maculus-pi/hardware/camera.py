@@ -64,6 +64,7 @@ class Camera:
             
     def stop(self):
         self._running = False
+        self._available = False
         if self.picam2:
             try:
                 logger.info("[Camera] Stopping...")
@@ -72,6 +73,9 @@ class Camera:
             except Exception as e:
                 logger.warning(f"[Camera] Error stopping: {e}")
             self.picam2 = None
+        with self.output.condition:
+            self.output.frame = None
+            self.output.condition.notify_all()
             
     def get_frame(self):
         """Return the latest JPEG frame and metadata immediately.
@@ -83,21 +87,15 @@ class Camera:
         """
         if not self._available:
             return None
-        # Fast path: a frame is already buffered.
-        if self.output.frame is not None:
-            return {
-                "bytes": self.output.frame,
-                "frame_id": self.output.frame_id,
-                "timestamp": self.output.timestamp,
-                "resolution": self.resolution,
-            }
-        # Cold start: wait briefly for the first frame.
         with self.output.condition:
-            self.output.condition.wait(timeout=2.0)
+            if self.output.frame is None:
+                self.output.condition.wait(timeout=2.0)
             if self.output.frame is None:
                 return None
+            # Copy bytes and metadata under the same lock so frame identifiers
+            # can never describe a different JPEG.
             return {
-                "bytes": self.output.frame,
+                "bytes": bytes(self.output.frame),
                 "frame_id": self.output.frame_id,
                 "timestamp": self.output.timestamp,
                 "resolution": self.resolution,

@@ -101,6 +101,7 @@ export function useVisionAssistant() {
   const liveAiRef = useRef(new LiveAIService(conversationControllerRef.current));
   const safetyInterrupterRef = useRef(new SafetyInterrupter());
   const liveModeRef = useRef(false);
+  const liveStartedGuidanceRef = useRef(false);
   const groundingContextRef = useRef<SceneGroundingContext | null>(null);
   const deferredGuidanceRef = useRef<GuidanceEvent | null>(null);
   const lastGuidanceTextRef = useRef<string | null>(null);
@@ -160,6 +161,8 @@ export function useVisionAssistant() {
 
   useEffect(() => {
     let cancelled = false;
+    const liveAi = liveAiRef.current;
+    const safetyInterrupter = safetyInterrupterRef.current;
     const temporalEngine = temporalEngineRef.current;
     const mobilityGuide = mobilityGuideRef.current;
     const groundingService = groundingServiceRef.current;
@@ -232,8 +235,8 @@ export function useVisionAssistant() {
       groundingContextRef.current = null;
       voiceCommandService.stop();
       localLlmService.release();
-      liveAiRef.current.reset();
-      safetyInterrupterRef.current.release();
+      liveAi.reset();
+      safetyInterrupter.release();
       unsubscribeModel();
       modelAssetService.destroy();
       cameraSourceRef.current = 'none';
@@ -1206,16 +1209,28 @@ export function useVisionAssistant() {
       liveAiRef.current.reset();
       safetyInterrupterRef.current.release();
       await voiceCommandService.stop();
+      if (liveStartedGuidanceRef.current) {
+        stopGuiding(true);
+      }
+      liveStartedGuidanceRef.current = false;
       await localLlmService.release();
       setLlmState(localLlmService.getState());
       setLiveMode(false);
       setLiveSession('idle');
+      setVoiceEnabled(false);
+      setVoiceStatus('off');
       tts.speak('Live mode off', 1, true);
       return;
     }
     // Start live mode. We start the voice service in alwaysListening
     // mode and the safety interrupter is already wired by the init
     // effect. The LLM may load lazily when the first turn happens.
+    const guidanceWasRunning = isGuidingRef.current;
+    if (!startGuiding(true)) {
+      tts.speak('Live mode needs an active camera or sensor connection.', 1, true);
+      return;
+    }
+    liveStartedGuidanceRef.current = !guidanceWasRunning;
     liveModeRef.current = true;
     const started = await voiceCommandService.start(
       handleConversationTurn,
@@ -1244,6 +1259,10 @@ export function useVisionAssistant() {
     );
     if (!started) {
       liveModeRef.current = false;
+      if (liveStartedGuidanceRef.current) {
+        stopGuiding(true);
+      }
+      liveStartedGuidanceRef.current = false;
       setLiveMode(false);
       tts.speak('Live mode unavailable. Check microphone permission.', 1, true);
       return;
@@ -1260,7 +1279,7 @@ export function useVisionAssistant() {
     ensureLlmReady(false)
       .then(() => setLlmState(localLlmService.getState()))
       .catch(() => setLlmState(localLlmService.getState()));
-  }, [ensureLlmReady, handleConversationTurn]);
+  }, [ensureLlmReady, handleConversationTurn, startGuiding, stopGuiding]);
 
   useEffect(() => () => {
     voiceCommandService.stop();

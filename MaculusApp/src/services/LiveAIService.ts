@@ -4,14 +4,12 @@ import { SafetyInterrupter } from './SafetyInterrupter';
 import { tts } from './TTSService';
 import {
   ConversationTurn,
-  GuidanceEvent,
   LiveDecision,
   LiveSession,
   LiveTickInput,
   SceneDelta,
   SceneGroundingContext,
 } from '../types';
-import { renderGroundedScene } from './GuidanceLanguageRenderer';
 
 /**
  * LiveAIService — orchestrator for Live Mode.
@@ -236,6 +234,7 @@ export class LiveAIService {
       let buffer = '';
       let spoken = '';
       let firstSpoken = false;
+      let firstSentenceLength = 0;
       for await (const chunk of stream) {
         if (chunk.done) {break;}
         buffer += chunk.token;
@@ -248,6 +247,7 @@ export class LiveAIService {
               tts.speakWithProsody(sentence, 'conversational', { force: false });
               spoken = sentence;
               firstSpoken = true;
+              firstSentenceLength = sentenceEnd + 1;
               this.markAiSpeakingStarted();
             }
           }
@@ -262,6 +262,12 @@ export class LiveAIService {
         tts.speakWithProsody(buffer.trim(), 'conversational', { force: true });
         spoken = buffer.trim();
         this.markAiSpeakingStarted();
+      } else if (firstSpoken) {
+        const remainder = buffer.slice(firstSentenceLength).trim();
+        if (remainder.length > 0) {
+          tts.speakWithProsody(remainder, 'conversational', { force: false });
+          spoken = buffer.trim();
+        }
       }
       return spoken || buffer.trim();
     } finally {

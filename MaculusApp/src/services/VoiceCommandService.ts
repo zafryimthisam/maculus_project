@@ -74,9 +74,7 @@ const AUDIO_HANDOFF_MS = 350;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
-const NO_COMMAND_FEEDBACK = "I heard you, but I didn't catch a question. Try again.";
-const NO_QUESTION_FALLBACK =
-  "I can describe what I see, but for deeper questions I need the conversational model. Safety guidance is still active.";
+const NO_COMMAND_FEEDBACK = 'I heard you, but I did not catch a question. Try again.';
 
 const MaculusVoiceCommand = NativeModules.MaculusVoiceCommand as VoiceCommandNativeModule | undefined;
 
@@ -364,9 +362,11 @@ export class VoiceCommandService {
       if (this.enabled) {
         if (this.onTurnComplete) {
           await this.onTurnComplete();
-        } else {
-          await this.restartWakeListening();
         }
+        // A completion callback may update conversation state, but it must not
+        // replace re-arming the recognizer. Previously Live Mode stopped after
+        // its first command because this restart only ran without a callback.
+        await this.restartWakeListening();
       }
     }
   };
@@ -407,6 +407,26 @@ export class VoiceCommandService {
     if (speaking) {
       MaculusVoiceCommand.pauseForTts().catch(() => {});
       this.setStatus('paused');
+      return;
+    }
+    if (this.safetyInterrupted) {
+      // An emergency cancellation must never be interpreted as the end of a
+      // conversational answer or reopen hands-free capture.
+      this.safetyInterrupted = false;
+      this.followupWindowUntil = 0;
+      if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
+      this.followupWindowTimer = null;
+    } else if (this.alwaysListening && !this.wakeWordRequired()) {
+      this.followupWindowUntil = 0;
+      if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
+      this.followupWindowTimer = null;
+      // A completed conversational reply opens one direct capture. This gives
+      // Live Mode a natural follow-up turn without leaving an always-open mic.
+      this.handleWakeDetected({ name: 'followup', label: 'Follow-up', confidence: 1 })
+        .catch(error => {
+          console.warn('[Voice] Follow-up capture failed:', error);
+          this.scheduleWakeRecovery();
+        });
       return;
     }
     MaculusVoiceCommand.resumeAfterTts()
@@ -519,7 +539,7 @@ export class VoiceCommandService {
    * after FOLLOWUP_WINDOW_MS; the next user turn after that requires the
    * wake word again.
    */
-  static readonly FOLLOWUP_WINDOW_MS = 8000;
+  static readonly FOLLOWUP_WINDOW_MS = 12000;
 
   isAlwaysListening(): boolean {return this.alwaysListening;}
 
@@ -549,10 +569,6 @@ function normalizeSpeech(text: string): string {
 
 function containsAny(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word));
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export const voiceCommandService = new VoiceCommandService();

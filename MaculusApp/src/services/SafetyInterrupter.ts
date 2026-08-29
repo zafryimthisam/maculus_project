@@ -1,6 +1,6 @@
 import { TTSService } from './TTSService';
 import { formatObstacleDistance } from './GuidanceEngine';
-import { DistanceReading, GuidanceEvent, SafetyInput } from '../types';
+import { DistanceReading, SafetyInput } from '../types';
 
 /**
  * Hard safety layer for Live Mode.

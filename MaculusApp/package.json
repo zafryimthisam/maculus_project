@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@react-native-community/slider": "^4.5.2",
-    "axios": "^1.7.2",
+    "axios": "^1.20.0",
     "buffer": "^6.0.3",
     "llama.rn": "https://github.com/mybigday/llama.rn/archive/48a0cd3e338dd6225a4565b752b9984a3a4f9457.tar.gz",
     "react": "18.3.1",

@@ -4,8 +4,8 @@
 #import <React/RCTLog.h>
 #import <React/RCTRootView.h>
 
-#define TIMEOUT_SECONDS 600
-#define TEXT_TO_LOOK_FOR @"Welcome to React"
+#define TIMEOUT_SECONDS 30
+#define TEXT_TO_LOOK_FOR @"Start Maculus"
 
 @interface MaculusAppTests : XCTestCase
 

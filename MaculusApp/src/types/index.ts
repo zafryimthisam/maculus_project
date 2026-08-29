@@ -2,12 +2,25 @@ export interface PiStatus {
   system: string;
   camera: boolean;
   sensor: boolean;
+  sensor_healthy?: boolean;
 }
 
 export interface DistanceReading {
   distance_cm: number;
   obstacle: boolean;
   threshold_cm: number;
+  /** True only when this value came from a successful physical sample. */
+  valid?: boolean;
+  /** Overall accessory health. A running thread is not necessarily healthy. */
+  healthy?: boolean;
+  /** Monotonically increasing sample number assigned by the accessory. */
+  sequence?: number;
+  /** Unix timestamp, in seconds, when the physical sample was captured. */
+  sampled_at?: number;
+  /** Reading age calculated by the accessory when it served the response. */
+  age_ms?: number;
+  /** Diagnostic only. Never present a sensor error as a clear path. */
+  error?: string | null;
 }
 
 export interface CapturedFrame {

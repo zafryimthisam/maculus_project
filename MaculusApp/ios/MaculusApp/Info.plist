@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>MaculusApp</string>
+	<string>Maculus</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -39,7 +39,7 @@
 		<string>_http._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>Maculus uses the iPhone camera only when the Raspberry Pi camera is unavailable.</string>
+	<string>Maculus processes the iPhone camera on this device to describe the visible scene and detect changes.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Maculus listens locally for the wake word and your guidance commands.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

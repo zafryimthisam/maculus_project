@@ -1,0 +1,413 @@
+import { Detection } from '../types';
+import {
+  NextSceneEntity,
+  NextSceneSnapshot,
+  SceneChange,
+  SceneObservation,
+} from './domain';
+
+type Identity = { id: number; alias: string; embedding?: number[]; samples: number };
+type InternalTrack = NextSceneEntity & {
+  hits: number;
+  lastAnnouncedCx: number;
+  lastAnnouncedZone: NextSceneEntity['zone'];
+  embedding?: number[];
+  wasInPath: boolean;
+};
+
+const MIN_SCORE = 0.45;
+const OCCLUSION_AFTER_MS = 1800;
+const ACTIVE_MATCH_MS = 5000;
+const PERSON_REID_SIMILARITY = 0.82;
+const MAX_SESSION_TRACKS = 256;
+const DEFAULT_ALIASES = [
+  'Alex', 'Sam', 'Jordan', 'Casey', 'Taylor', 'Robin', 'Morgan', 'Jamie',
+  'Avery', 'Riley', 'Cameron', 'Drew', 'Quinn', 'Skyler', 'Reese', 'Parker',
+];
+
+export class SessionSceneStore {
+  private tracks = new Map<number, InternalTrack>();
+  private identities = new Map<number, Identity>();
+  private nextTrackId = 1;
+  private nextIdentityId = 1;
+  private aliasIndex = 0;
+  private revision = 0;
+  private lastFrameKey = '';
+  private lastPathBlocked = false;
+  private aliases: string[];
+
+  constructor(aliases: string[] = shuffled(DEFAULT_ALIASES)) {
+    this.aliases = aliases.length > 0 ? [...aliases] : [...DEFAULT_ALIASES];
+  }
+
+  reset(): void {
+    this.tracks.clear();
+    this.identities.clear();
+    this.nextTrackId = 1;
+    this.nextIdentityId = 1;
+    this.aliasIndex = 0;
+    this.revision = 0;
+    this.lastFrameKey = '';
+    this.lastPathBlocked = false;
+  }
+
+  update(observation: SceneObservation): NextSceneSnapshot {
+    if (observation.frameKey === this.lastFrameKey) {
+      return this.snapshot(observation.timestamp, []);
+    }
+    this.lastFrameKey = observation.frameKey;
+    const indexed = observation.detections
+      .map((detection, originalIndex) => ({ detection, originalIndex }))
+      .filter(item => item.detection.score >= MIN_SCORE);
+    const embeddingByOriginalIndex = new Map(
+      (observation.personEmbeddings || []).map(item => [item.detectionIndex, normalize(item.embedding)]),
+    );
+    const unmatchedTrackIds = new Set(this.tracks.keys());
+    const changes: SceneChange[] = [];
+
+    for (const item of indexed) {
+      const embedding = embeddingByOriginalIndex.get(item.originalIndex);
+      const track = this.findTrack(item.detection, embedding, unmatchedTrackIds, observation.timestamp);
+      if (track) {
+        unmatchedTrackIds.delete(track.id);
+        changes.push(...this.updateTrack(track, item.detection, embedding, observation.timestamp));
+      } else {
+        const created = this.createTrack(item.detection, embedding, observation.timestamp);
+        unmatchedTrackIds.delete(created.id);
+      }
+    }
+
+    for (const trackId of unmatchedTrackIds) {
+      const track = this.tracks.get(trackId);
+      if (!track || track.visibility === 'occluded' || observation.timestamp - track.lastSeenAt < OCCLUSION_AFTER_MS) {
+        continue;
+      }
+      track.visibility = 'occluded';
+      if (track.confirmed) {
+        changes.push({
+          key: `left:${track.id}:${observation.timestamp}`,
+          kind: 'left',
+          entityId: track.id,
+          timestamp: observation.timestamp,
+          speak: track.wasInPath,
+          text: track.wasInPath
+            ? `${displayName(track)} is no longer in the center path.`
+            : `${displayName(track)} is no longer visible.`,
+        });
+      }
+    }
+
+    const pathBlocked = this.visibleConfirmed().some(entity => entity.inPath && visualNear(entity));
+    if (pathBlocked !== this.lastPathBlocked) {
+      changes.push({
+        key: `path:${pathBlocked ? 'blocked' : 'clear'}:${observation.timestamp}`,
+        kind: pathBlocked ? 'path-blocked' : 'path-cleared',
+        timestamp: observation.timestamp,
+        speak: true,
+        text: pathBlocked
+          ? 'Something has moved into the visible center path. Pause while I keep checking.'
+          : 'The visible center path appears open again. Confirm with the obstacle sensor before moving.',
+      });
+      this.lastPathBlocked = pathBlocked;
+    }
+    if (changes.length > 0) {this.revision += 1;}
+    this.trimTracks();
+    return this.snapshot(observation.timestamp, dedupeChanges(changes));
+  }
+
+  getSnapshot(timestamp: number = Date.now()): NextSceneSnapshot {
+    return this.snapshot(timestamp, []);
+  }
+
+  private findTrack(
+    detection: Detection,
+    embedding: number[] | undefined,
+    candidates: Set<number>,
+    now: number,
+  ): InternalTrack | null {
+    let best: InternalTrack | null = null;
+    let bestScore = -Infinity;
+    for (const id of candidates) {
+      const track = this.tracks.get(id);
+      if (!track || track.label !== detection.label) {continue;}
+      const age = now - track.lastSeenAt;
+      const similarity = detection.label === 'person' && embedding && track.embedding
+        ? cosineSimilarity(embedding, track.embedding)
+        : null;
+      if (age > ACTIVE_MATCH_MS && (similarity === null || similarity < PERSON_REID_SIMILARITY)) {continue;}
+      const centerDistance = Math.hypot(detection.cx - track.cx, detection.cy - track.cy);
+      const overlap = iou(detection, track);
+      if (similarity !== null && similarity < 0.55 && overlap < 0.25) {continue;}
+      if (similarity === null && overlap < 0.06 && centerDistance > 0.28) {continue;}
+      const score = overlap * 2 + Math.max(0, 1 - centerDistance * 2.5) + (similarity ?? 0) * 2.5;
+      if (score > bestScore) {
+        bestScore = score;
+        best = track;
+      }
+    }
+    return best;
+  }
+
+  private createTrack(detection: Detection, embedding: number[] | undefined, now: number): InternalTrack {
+    const zone = zoneOf(detection.cx);
+    const inPath = isInPath(detection);
+    const identity = detection.label === 'person' ? this.resolveIdentity(embedding) : null;
+    const track: InternalTrack = {
+      id: this.nextTrackId++,
+      identityId: identity?.id,
+      label: detection.label,
+      alias: identity?.alias,
+      confidence: detection.score,
+      zone,
+      inPath,
+      nearScore: detection.nearScore ?? detection.h,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      visibility: 'visible',
+      confirmed: false,
+      cx: detection.cx,
+      cy: detection.cy,
+      w: detection.w,
+      h: detection.h,
+      hits: 1,
+      lastAnnouncedCx: detection.cx,
+      lastAnnouncedZone: zone,
+      embedding,
+      wasInPath: inPath,
+    };
+    this.tracks.set(track.id, track);
+    return track;
+  }
+
+  private updateTrack(
+    track: InternalTrack,
+    detection: Detection,
+    embedding: number[] | undefined,
+    now: number,
+  ): SceneChange[] {
+    const changes: SceneChange[] = [];
+    const wasConfirmed = track.confirmed;
+    const previousZone = track.zone;
+    track.hits += 1;
+    track.lastSeenAt = now;
+    track.visibility = 'visible';
+    track.confidence = ema(track.confidence, detection.score, 0.35);
+    track.cx = ema(track.cx, detection.cx, 0.55);
+    track.cy = ema(track.cy, detection.cy, 0.55);
+    track.w = ema(track.w, detection.w, 0.5);
+    track.h = ema(track.h, detection.h, 0.5);
+    track.nearScore = ema(track.nearScore, detection.nearScore ?? detection.h, 0.35);
+    track.zone = zoneOf(track.cx);
+    track.inPath = isInPath(track);
+    track.wasInPath = track.wasInPath || track.inPath;
+    track.confirmed = track.hits >= (track.label === 'person' ? 3 : 2);
+
+    if (embedding && track.label === 'person') {
+      track.embedding = track.embedding ? blend(track.embedding, embedding) : embedding;
+      const identity = track.identityId ? this.identities.get(track.identityId) : this.resolveIdentity(embedding);
+      if (identity) {
+        identity.embedding = identity.embedding ? blend(identity.embedding, embedding) : embedding;
+        identity.samples += 1;
+        track.identityId = identity.id;
+        track.alias = identity.alias;
+      }
+    }
+
+    if (!wasConfirmed && track.confirmed) {
+      changes.push({
+        key: `entered:${track.id}:${now}`,
+        kind: 'entered',
+        entityId: track.id,
+        timestamp: now,
+        speak: track.label === 'person' || track.inPath,
+        text: `${displayName(track)} is ${track.zone === 'ahead' ? 'ahead' : `to the ${track.zone}`}${track.inPath ? ', in the center path' : ''}.`,
+      });
+      track.lastAnnouncedCx = track.cx;
+      track.lastAnnouncedZone = track.zone;
+    } else if (track.confirmed) {
+      const movedAcrossZone = previousZone !== track.zone && track.zone !== track.lastAnnouncedZone;
+      const movedFar = Math.abs(track.cx - track.lastAnnouncedCx) >= 0.18;
+      if (movedAcrossZone || movedFar) {
+        changes.push({
+          key: `moved:${track.id}:${track.zone}:${now}`,
+          kind: 'moved',
+          entityId: track.id,
+          timestamp: now,
+          speak: track.label === 'person' || track.inPath,
+          text: `${displayName(track)} moved ${track.zone === 'ahead' ? 'into the area ahead' : `to the ${track.zone}`}.`,
+        });
+        track.lastAnnouncedCx = track.cx;
+        track.lastAnnouncedZone = track.zone;
+      }
+    }
+    return changes;
+  }
+
+  private resolveIdentity(embedding: number[] | undefined): Identity {
+    if (embedding) {
+      let best: Identity | null = null;
+      let bestSimilarity = PERSON_REID_SIMILARITY;
+      for (const identity of this.identities.values()) {
+        if (!identity.embedding) {continue;}
+        const similarity = cosineSimilarity(embedding, identity.embedding);
+        if (similarity > bestSimilarity) {
+          bestSimilarity = similarity;
+          best = identity;
+        }
+      }
+      if (best) {return best;}
+    }
+    const identity: Identity = {
+      id: this.nextIdentityId++,
+      alias: this.nextAlias(),
+      embedding,
+      samples: embedding ? 1 : 0,
+    };
+    this.identities.set(identity.id, identity);
+    return identity;
+  }
+
+  private nextAlias(): string {
+    const base = this.aliases[this.aliasIndex % this.aliases.length];
+    const cycle = Math.floor(this.aliasIndex / this.aliases.length);
+    this.aliasIndex += 1;
+    return cycle === 0 ? base : `${base} ${cycle + 1}`;
+  }
+
+  private visibleConfirmed(): InternalTrack[] {
+    return [...this.tracks.values()].filter(track => track.visibility === 'visible' && track.confirmed);
+  }
+
+  private snapshot(timestamp: number, changes: SceneChange[]): NextSceneSnapshot {
+    const entities = [...this.tracks.values()]
+      .map(toPublicEntity)
+      .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    const visibleEntities = entities.filter(entity => entity.visibility === 'visible' && entity.confirmed);
+    const pathBlocked = visibleEntities.some(entity => entity.inPath && visualNear(entity));
+    return {
+      revision: this.revision,
+      timestamp,
+      entities,
+      visibleEntities,
+      changes,
+      pathBlocked,
+      description: describeEntities(visibleEntities, pathBlocked),
+    };
+  }
+
+  private trimTracks(): void {
+    if (this.tracks.size <= MAX_SESSION_TRACKS) {return;}
+    const removable = [...this.tracks.values()]
+      .filter(track => track.visibility === 'occluded' && track.label !== 'person')
+      .sort((a, b) => a.lastSeenAt - b.lastSeenAt);
+    for (const track of removable) {
+      if (this.tracks.size <= MAX_SESSION_TRACKS) {break;}
+      this.tracks.delete(track.id);
+    }
+  }
+}
+
+function toPublicEntity(track: InternalTrack): NextSceneEntity {
+  return {
+    id: track.id,
+    identityId: track.identityId,
+    label: track.label,
+    alias: track.alias,
+    confidence: track.confidence,
+    zone: track.zone,
+    inPath: track.inPath,
+    nearScore: track.nearScore,
+    firstSeenAt: track.firstSeenAt,
+    lastSeenAt: track.lastSeenAt,
+    visibility: track.visibility,
+    confirmed: track.confirmed,
+    cx: track.cx,
+    cy: track.cy,
+    w: track.w,
+    h: track.h,
+  };
+}
+
+function describeEntities(entities: NextSceneEntity[], pathBlocked: boolean): string {
+  if (entities.length === 0) {
+    return 'I do not have stable object detections yet.';
+  }
+  const ordered = [...entities].sort((a, b) => Number(b.inPath) - Number(a.inPath) || b.nearScore - a.nearScore);
+  const items = ordered.slice(0, 5).map(entity => {
+    const where = entity.zone === 'ahead' ? 'ahead' : `to the ${entity.zone}`;
+    return `${displayName(entity)} ${where}${entity.inPath ? ' in the center path' : ''}`;
+  });
+  return `${items.join(', ')}. The visible center path ${pathBlocked ? 'may be blocked' : 'does not currently look blocked'}.`;
+}
+
+function displayName(entity: Pick<NextSceneEntity, 'label' | 'alias'>): string {
+  if (entity.label === 'person' && entity.alias) {return `${entity.alias}, a person`;}
+  return `${/^[aeiou]/i.test(entity.label) ? 'an' : 'a'} ${entity.label}`;
+}
+
+function zoneOf(cx: number): NextSceneEntity['zone'] {
+  return cx < 0.36 ? 'left' : cx > 0.64 ? 'right' : 'ahead';
+}
+
+function isInPath(box: Pick<Detection, 'cx' | 'w' | 'cy' | 'h'>): boolean {
+  const left = box.cx - box.w / 2;
+  const right = box.cx + box.w / 2;
+  const bottom = box.cy + box.h / 2;
+  return right >= 0.38 && left <= 0.62 && bottom >= 0.55;
+}
+
+function visualNear(entity: Pick<NextSceneEntity, 'nearScore' | 'h'>): boolean {
+  return entity.nearScore >= 0.7 || entity.h >= 0.55;
+}
+
+function iou(a: Pick<Detection, 'cx' | 'cy' | 'w' | 'h'>, b: Pick<NextSceneEntity, 'cx' | 'cy' | 'w' | 'h'>): number {
+  const ax1 = a.cx - a.w / 2;
+  const ay1 = a.cy - a.h / 2;
+  const ax2 = a.cx + a.w / 2;
+  const ay2 = a.cy + a.h / 2;
+  const bx1 = b.cx - b.w / 2;
+  const by1 = b.cy - b.h / 2;
+  const bx2 = b.cx + b.w / 2;
+  const by2 = b.cy + b.h / 2;
+  const intersection = Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1)) *
+    Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1));
+  const union = a.w * a.h + b.w * b.h - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function normalize(values: number[]): number[] {
+  const magnitude = Math.sqrt(values.reduce((sum, value) => sum + value * value, 0));
+  return magnitude > 0 ? values.map(value => value / magnitude) : values;
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length === 0 || a.length !== b.length) {return -1;}
+  return a.reduce((sum, value, index) => sum + value * b[index], 0);
+}
+
+function blend(a: number[], b: number[]): number[] {
+  return normalize(a.map((value, index) => value * 0.75 + (b[index] ?? value) * 0.25));
+}
+
+function ema(previous: number, next: number, alpha: number): number {
+  return previous * (1 - alpha) + next * alpha;
+}
+
+function shuffled(values: string[]): string[] {
+  const result = [...values];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(Math.random() * (index + 1));
+    [result[index], result[swap]] = [result[swap], result[index]];
+  }
+  return result;
+}
+
+function dedupeChanges(changes: SceneChange[]): SceneChange[] {
+  const seen = new Set<string>();
+  return changes.filter(change => {
+    const semantic = `${change.kind}:${change.entityId ?? 'path'}`;
+    if (seen.has(semantic)) {return false;}
+    seen.add(semantic);
+    return true;
+  });
+}

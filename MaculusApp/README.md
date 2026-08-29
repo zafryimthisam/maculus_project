@@ -1,6 +1,26 @@
 # Maculus mobile app
 
-## Scene-grounded conversational guide
+## MaculusNext
+
+`index.js` now launches the clean MaculusNext runtime. The former prototype is
+preserved as the `MaculusAppLegacy` React Native entry during migration.
+
+MaculusNext starts obstacle monitoring before optional AI models, treats stale
+or failed sensor data as unknown rather than clear, keeps scene objects and
+random person aliases for the active session, and routes all application speech
+through one priority coordinator. Scene questions are rendered from tracked
+facts; the optional local LLM is restricted to general conversation and cannot
+issue movement instructions. The primary phone camera is processed locally and
+no preview frame is rendered in React.
+
+See [`src/next/README.md`](src/next/README.md) for module boundaries, the sensor
+contract, and the production BLE/accessory requirement.
+
+The optional local conversation model is loaded only when a previously verified
+model exists in private app storage. MaculusNext does not automatically download
+a model or contact a cloud inference API.
+
+## Legacy prototype notes
 
 Maculus keeps collision and walking decisions inside the deterministic temporal
 vision engine. The optional local LFM2.5 companion receives only stabilized,

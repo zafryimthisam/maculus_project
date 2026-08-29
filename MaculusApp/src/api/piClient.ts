@@ -12,7 +12,7 @@ let PI_BASE_URL = DEFAULT_PI_URL;
 
 export const normalizePiUrl = (url: string): string => {
   const trimmed = url.trim();
-  if (!trimmed) return DEFAULT_PI_URL;
+  if (!trimmed) {return DEFAULT_PI_URL;}
   const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
   return withScheme.replace(/\/$/, '');
 };
@@ -41,9 +41,9 @@ const isMaculusStatus = (status: any): status is PiStatus =>
 const getSubnetCandidates = async (fullScan: boolean): Promise<string[]> => {
   try {
     const ip = await NetworkInfo.getIPV4Address();
-    if (!ip) return [];
+    if (!ip) {return [];}
     const parts = ip.split('.');
-    if (parts.length !== 4) return [];
+    if (parts.length !== 4) {return [];}
     const prefix = parts.slice(0, 3).join('.');
     const ownHost = Number(parts[3]);
     const commonHosts = [2, 3, 4, 5, 10, 20, 50, 80, 100, 101, 150, 200, 254];
@@ -99,8 +99,37 @@ export const fetchStatus = async (signal?: AbortSignal): Promise<PiStatus> => {
 };
 
 export const fetchDistance = async (signal?: AbortSignal): Promise<DistanceReading> => {
-  const res = await axios.get(`${PI_BASE_URL}/distance`, { timeout: 3000, signal });
-  return res.data;
+  const res = await axios.get(`${PI_BASE_URL}/distance`, { timeout: 1200, signal });
+  return normalizeDistanceReading(res.data);
+};
+
+export const normalizeDistanceReading = (value: unknown): DistanceReading => {
+  if (!value || typeof value !== 'object') {
+    throw new Error('SENSOR_PROTOCOL_ERROR: Distance response is not an object');
+  }
+  const raw = value as Record<string, unknown>;
+  const valid = raw.valid === true;
+  const healthy = raw.healthy === true;
+  const distance = Number(raw.distance_cm);
+  const threshold = Number(raw.threshold_cm);
+  const sequence = Number(raw.sequence);
+  const sampledAt = Number(raw.sampled_at);
+  const ageMs = Number(raw.age_ms);
+
+  // A legacy response without explicit health cannot be used as a safety
+  // reading. This prevents a failed sensor from masquerading as a clear path.
+  const usable = valid && healthy && Number.isFinite(distance) && distance > 0;
+  return {
+    distance_cm: usable ? distance : Number.NaN,
+    obstacle: usable && raw.obstacle === true,
+    threshold_cm: Number.isFinite(threshold) && threshold > 0 ? threshold : 100,
+    valid: usable,
+    healthy,
+    sequence: Number.isInteger(sequence) && sequence >= 0 ? sequence : undefined,
+    sampled_at: Number.isFinite(sampledAt) && sampledAt > 0 ? sampledAt : undefined,
+    age_ms: Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : undefined,
+    error: typeof raw.error === 'string' ? raw.error : null,
+  };
 };
 
 export const fetchFrame = async (signal?: AbortSignal): Promise<CapturedFrame> => {

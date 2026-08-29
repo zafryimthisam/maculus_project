@@ -1,5 +1,10 @@
 import { AppRegistry } from 'react-native';
-import App from './App';
+import LegacyApp from './App';
+import MaculusNextApp from './src/next/MaculusNextApp';
 import { name as appName } from './app.json';
 
-AppRegistry.registerComponent(appName, () => App);
+// MaculusNext is the new default runtime. The prototype remains registered as
+// a separate entry so it can be compared during migration without sharing
+// safety state or scene memory with the new application.
+AppRegistry.registerComponent(appName, () => MaculusNextApp);
+AppRegistry.registerComponent(`${appName}Legacy`, () => LegacyApp);

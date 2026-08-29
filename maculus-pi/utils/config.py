@@ -11,5 +11,5 @@ STREAM_FPS = 10
 CAPTURE_RESOLUTION = (640, 480)
 
 # Sensor
-SENSOR_POLL_INTERVAL = 0.5  # seconds
+SENSOR_POLL_INTERVAL = 0.1  # seconds; the phone transport may sample more slowly
 OBSTACLE_THRESHOLD_CM = 100.0  # cm

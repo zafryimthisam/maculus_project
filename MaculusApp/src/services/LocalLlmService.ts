@@ -162,7 +162,7 @@ export class LocalLlmService {
         }
       });
       const start = Date.now();
-      const settled = completionPromise.then(
+      completionPromise.then(
         () => { done = true; wakeMe(); },
         (err) => { done = true; errorToThrow = err; wakeMe(); },
       );
@@ -191,9 +191,6 @@ export class LocalLlmService {
           await new Promise<void>(resolve => { wake = resolve; });
         }
       }
-      // settled is intentionally not awaited here — it stays pending
-      // until the consumer drains the buffer.
-      void settled;
     } finally {
       this.lastCompletionEndedAt = Date.now();
       if (generation === this.generationId && this.context) {this.state = 'ready';}

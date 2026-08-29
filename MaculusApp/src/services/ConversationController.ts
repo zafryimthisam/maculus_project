@@ -272,7 +272,7 @@ function parseDecision(raw: string): any {
 
 function validateToolCall(value: any, context: SceneGroundingContext, snapshot: SceneSnapshot): AssistantToolCall {
   const allowedNames = new Set([
-    'respond', 'describe_scene', 'search_visible_target', 'focus_tracked_entity',
+    'respond', 'describe_scene', 'narrate_scene_change', 'search_visible_target', 'focus_tracked_entity',
     'start_local_approach', 'cancel_active_goal', 'repeat_last_guidance',
     'set_guidance_state', 'set_haptics',
   ]);
