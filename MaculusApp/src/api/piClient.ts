@@ -8,6 +8,10 @@ const DEFAULT_PI_URL = `http://raspberrypi.local:${PI_PORT}`;
 const DIRECT_DISCOVERY_TIMEOUT_MS = 1500;
 const SUBNET_DISCOVERY_TIMEOUT_MS = 700;
 const DISCOVERY_BATCH_SIZE = 32;
+const IOS_HOTSPOT_CANDIDATES = Array.from(
+  { length: 13 },
+  (_, index) => `http://172.20.10.${index + 2}:${PI_PORT}`,
+);
 
 let PI_BASE_URL = DEFAULT_PI_URL;
 
@@ -49,12 +53,17 @@ const requireMaculusStatus = (status: unknown): PiStatus => {
 
 const getSubnetCandidates = async (fullScan: boolean): Promise<string[]> => {
   try {
-    const ip = await NetworkInfo.getIPV4Address();
-    if (!ip || ip === '0.0.0.0') {return [];}
+    // getIPV4Address falls back to the cellular interface on iOS. Scanning
+    // that prefix is both useless and undesirable. getIPAddress is the Wi-Fi
+    // (en0) address; Personal Hotspot clients are covered explicitly below.
+    const ip = await NetworkInfo.getIPAddress();
+    if (!ip || ip === '0.0.0.0') {return IOS_HOTSPOT_CANDIDATES;}
     const parts = ip.split('.');
-    if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part))) {return [];}
+    if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part))) {
+      return IOS_HOTSPOT_CANDIDATES;
+    }
     const octets = parts.map(Number);
-    if (octets.some(part => part < 0 || part > 255)) {return [];}
+    if (octets.some(part => part < 0 || part > 255)) {return IOS_HOTSPOT_CANDIDATES;}
     const prefix = parts.slice(0, 3).join('.');
     const ownHost = Number(parts[3]);
     const commonHosts = [2, 3, 4, 5, 10, 20, 50, 80, 100, 101, 150, 200, 254];
@@ -64,9 +73,12 @@ const getSubnetCandidates = async (fullScan: boolean): Promise<string[]> => {
     const orderedHosts = hosts
       .filter((host, index, arr) => host !== ownHost && arr.indexOf(host) === index);
 
-    return orderedHosts.map((host) => `http://${prefix}.${host}:${PI_PORT}`);
+    return [
+      ...IOS_HOTSPOT_CANDIDATES,
+      ...orderedHosts.map((host) => `http://${prefix}.${host}:${PI_PORT}`),
+    ].filter((url, index, urls) => urls.indexOf(url) === index);
   } catch {
-    return [];
+    return IOS_HOTSPOT_CANDIDATES;
   }
 };
 

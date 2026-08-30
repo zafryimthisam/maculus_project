@@ -36,6 +36,10 @@ manual Pi-address control for unusual network layouts. It reports the verified
 Pi URL, Pi camera availability, and ultrasonic sensor health separately.
 Ordinary Wi-Fi connectivity alone is never shown as a Pi connection.
 
+Discovery includes the `172.20.10.0/28` iPhone Personal Hotspot client range
+even though the hotspot-owning iPhone has no ordinary Wi-Fi interface address.
+Cellular interface prefixes are never subnet-scanned.
+
 A structured `/distance` response proves the Pi transport is reachable even
 when the physical sensor reports `valid: false` or `healthy: false`. That state
 is displayed as **Pi connected, sensor unavailable**, never **Pi not found** and

@@ -12,6 +12,7 @@ jest.mock('react-native-background-timer', () => ({
 // Mock react-native-network-info
 jest.mock('react-native-network-info', () => ({
   NetworkInfo: {
+    getIPAddress: jest.fn().mockResolvedValue('192.168.1.50'),
     getIPV4Address: jest.fn().mockResolvedValue('192.168.1.50'),
   },
 }));
