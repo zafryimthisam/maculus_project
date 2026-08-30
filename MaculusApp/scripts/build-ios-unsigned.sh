@@ -149,7 +149,13 @@ if ! fastvlm_model_is_complete; then
 fi
 
 fastvlm_model_is_complete || fail "FastVLM model preparation did not complete."
-install -m 0644 "$FASTVLM_VENDOR/LICENSE_MODEL" "$FASTVLM_MODEL_DIR/FASTVLM_MODEL_LICENSE.txt"
+# Older generated caches may contain a second copy of this file under model/.
+# Xcode flattens synchronized resources into FastVLM.framework, so retaining
+# both copies produces a "Multiple commands produce" build failure. The exact
+# license remains embedded once from the framework source root above.
+if [[ -f "$FASTVLM_MODEL_DIR/FASTVLM_MODEL_LICENSE.txt" ]]; then
+  rm -f "$FASTVLM_MODEL_DIR/FASTVLM_MODEL_LICENSE.txt"
+fi
 
 export RNLLAMA_SKIP_POSTINSTALL=1
 export RCT_NEW_ARCH_ENABLED=1
@@ -190,7 +196,9 @@ IPA_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/maculus-ios-ipa.XXXXXX")"
 GENERATED_TRACKED_FILES=(
   "MaculusApp/ios/MaculusApp.xcodeproj/project.pbxproj"
 )
-GENERATED_TRACKED_CLEAN_AT_START=()
+# macOS ships Bash 3.2, where expanding an empty array under `set -u` raises an
+# unbound-variable error. Keep one empty sentinel and skip it during cleanup.
+GENERATED_TRACKED_CLEAN_AT_START=("")
 for generated_file in "${GENERATED_TRACKED_FILES[@]}"; do
   if git -C "$REPOSITORY_ROOT" ls-files --error-unmatch "$generated_file" >/dev/null 2>&1 &&
     git -C "$REPOSITORY_ROOT" diff --quiet -- "$generated_file" &&
@@ -203,6 +211,7 @@ cleanup() {
   cleanup_fastvlm_download
   rm -rf "$DERIVED_DATA" "$IPA_TEMP"
   for generated_file in "${GENERATED_TRACKED_CLEAN_AT_START[@]}"; do
+    [[ -n "$generated_file" ]] || continue
     if ! git -C "$REPOSITORY_ROOT" diff --quiet -- "$generated_file"; then
       git -C "$REPOSITORY_ROOT" restore -- "$generated_file" || true
     fi
