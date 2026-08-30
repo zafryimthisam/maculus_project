@@ -46,6 +46,14 @@ appears in the image. Anonymous person names supplied by `SessionSceneStore` are
 merged into the answer if the VLM omits them, so names remain stable for the
 session without claiming a real identity.
 
+Every non-control spoken utterance is sent to the camera-aware VLM, including a
+phrase that the fast parser recognizes as “describe scene.” Detector snapshots
+may be supplied as grounding hints, but detector narration is never substituted
+as the answer to a spoken question. If the VLM, projector, or fresh camera frame
+is unavailable, Maculus says that the vision AI cannot answer and labels the UI
+result as unavailable. Direct voice controls such as pause, resume, repeat, and
+haptic settings remain deterministic so they work without model inference.
+
 Visual inference and ordinary scene narration pause during these requests. A
 valid ultrasonic reading at or below 40 centimeters cancels any in-progress
 model generation, interrupts conversational speech, and immediately submits the

@@ -101,6 +101,47 @@ describe('MaculusNext vision-language descriptions', () => {
     }));
   });
 
+  it('routes even non-visual spoken questions through the camera-aware VLM', async () => {
+    const service = readyService();
+    const textCompletion = jest.spyOn(localLlmService, 'complete');
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(
+      'Paris is the capital of France.',
+    );
+
+    const response = await service.respondWithMetadata(
+      'What is the capital of France?',
+      scene(),
+      healthySensor(),
+      'jpeg-base64',
+      { visionOnly: true },
+    );
+
+    expect(response.vision?.source).toBe('vision-language');
+    expect(response.text).toContain('Paris');
+    expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
+      imageBase64: 'jpeg-base64',
+      prompt: expect.stringContaining('What is the capital of France?'),
+    }));
+    expect(textCompletion).not.toHaveBeenCalled();
+  });
+
+  it('does not substitute object-detector narration when spoken vision has no frame', async () => {
+    const service = readyService();
+
+    const response = await service.respondWithMetadata(
+      'Who is in front of me?',
+      scene(),
+      healthySensor(),
+      null,
+      { visionOnly: true },
+    );
+
+    expect(response.vision).toMatchObject({ source: 'unavailable', fallbackReason: 'no-frame' });
+    expect(response.text).toContain('vision AI cannot answer');
+    expect(response.text).not.toContain('chair to the left');
+    expect(response.text).not.toContain('Alex');
+  });
+
   it('recognizes visual requests without treating general knowledge as camera work', () => {
     expect(isVisualSceneRequest('Find a place to sit')).toBe(true);
     expect(isVisualSceneRequest('Where is my backpack?')).toBe(true);
@@ -118,6 +159,25 @@ describe('MaculusNext vision-language descriptions', () => {
     const result = await service.describeFrame('jpeg-base64', scene(), healthySensor());
 
     expect(result).toMatchObject({ source: 'deterministic', fallbackReason: 'timeout' });
+  });
+
+  it('does not use detector narration after a spoken vision timeout', async () => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'completeVision').mockRejectedValue(
+      new Error('On-device visual description timed out.'),
+    );
+
+    const response = await service.respondWithMetadata(
+      'Find a chair for me',
+      scene(),
+      healthySensor(),
+      'jpeg-base64',
+      { visionOnly: true },
+    );
+
+    expect(response.vision).toMatchObject({ source: 'unavailable', fallbackReason: 'timeout' });
+    expect(response.text).toContain('vision AI did not finish');
+    expect(response.text).not.toContain('chair to the left');
   });
 });
 

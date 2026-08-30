@@ -93,7 +93,7 @@ export interface NextRuntimeState {
   model: NextModelState;
   descriptionInProgress: boolean;
   detailedDescription: string;
-  descriptionSource: 'none' | 'vision-language' | 'deterministic';
+  descriptionSource: 'none' | 'vision-language' | 'deterministic' | 'unavailable';
   fps: number;
   sceneRevision: number;
   sceneDescription: string;

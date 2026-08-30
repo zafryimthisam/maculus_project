@@ -201,6 +201,7 @@ export class VoiceCommandService {
   private conversationQuietUntil = 0;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private alwaysListening = false;
+  private forwardAllTranscripts = false;
   // Timestamp after which the next user turn must be preceded by the wake
   // word. Reset on every successful turn when alwaysListening is on.
   private followupWindowUntil = 0;
@@ -212,7 +213,11 @@ export class VoiceCommandService {
   async start(
     onTurn: (turn: ConversationTurn, fastCommand: VoiceCommand | null) => void | Promise<void>,
     onStatus: (status: VoiceCommandStatus) => void,
-    options: { alwaysListening?: boolean; onTurnComplete?: () => Promise<void> | void } = {},
+    options: {
+      alwaysListening?: boolean;
+      forwardAllTranscripts?: boolean;
+      onTurnComplete?: () => Promise<void> | void;
+    } = {},
   ): Promise<boolean> {
     if (!MaculusVoiceCommand) {
       onStatus('unavailable');
@@ -222,6 +227,7 @@ export class VoiceCommandService {
     this.stopLocal();
     this.enabled = true;
     this.alwaysListening = Boolean(options.alwaysListening);
+    this.forwardAllTranscripts = Boolean(options.forwardAllTranscripts);
     this.onTurn = onTurn;
     this.onTurnComplete = options.onTurnComplete ?? null;
     this.sessionId = `voice:${Date.now()}`;
@@ -337,10 +343,10 @@ export class VoiceCommandService {
       // emergency guidance remains free to interrupt it.
       this.commandBusy = false;
       const llmReady = localLlmService.getState() === 'ready';
-      // If the grammar parser didn't recognize the phrase but the LLM is
-      // available, send the raw transcript so the model gets a chance.
-      // If the LLM isn't ready, give the user honest spoken feedback.
-      if (command === null && !llmReady) {
+      // By default, an unrecognized phrase needs a ready LLM. A runtime can
+      // opt into receiving every transcript so it can own model/frame
+      // availability feedback without substituting another answer source.
+      if (command === null && !llmReady && !this.forwardAllTranscripts) {
         if (!this.safetyInterrupted) {
           Vibration.vibrate([0, 45, 60, 45]);
           tts.speakWithProsody(NO_COMMAND_FEEDBACK, 'conversational', { force: true });
@@ -485,6 +491,7 @@ export class VoiceCommandService {
     this.enabled = false;
     this.commandBusy = false;
     this.alwaysListening = false;
+    this.forwardAllTranscripts = false;
     this.followupWindowUntil = 0;
     if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
     this.followupWindowTimer = null;

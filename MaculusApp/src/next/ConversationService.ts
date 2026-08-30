@@ -6,7 +6,7 @@ type HistoryEntry = { role: 'user' | 'assistant'; content: string };
 
 export interface VisionDescriptionResult {
   text: string;
-  source: 'vision-language' | 'deterministic';
+  source: 'vision-language' | 'deterministic' | 'unavailable';
   fallbackReason?: 'no-frame' | 'not-ready' | 'timeout' | 'unsafe-output' | 'inference-error';
 }
 
@@ -14,6 +14,14 @@ export interface ConversationResponse {
   text: string;
   vision?: VisionDescriptionResult;
 }
+
+type VisionDescriptionOptions = {
+  allowDeterministicFallback?: boolean;
+};
+
+type ConversationResponseOptions = {
+  visionOnly?: boolean;
+};
 
 export class ConversationService {
   private history: HistoryEntry[] = [];
@@ -66,13 +74,15 @@ export class ConversationService {
     scene: NextSceneSnapshot,
     sensor: SafetyState,
     question: string = 'Describe the current scene.',
+    options: VisionDescriptionOptions = {},
   ): Promise<VisionDescriptionResult> {
+    const allowDeterministicFallback = options.allowDeterministicFallback !== false;
     const fallback = `${scene.description}${sensorDescription(sensor)}`;
     if (!imageBase64) {
-      return { text: fallback, source: 'deterministic', fallbackReason: 'no-frame' };
+      return visionFallback('no-frame', fallback, allowDeterministicFallback);
     }
     if (!this.isVisionReady()) {
-      return { text: fallback, source: 'deterministic', fallbackReason: 'not-ready' };
+      return visionFallback('not-ready', fallback, allowDeterministicFallback);
     }
 
     try {
@@ -88,7 +98,7 @@ export class ConversationService {
       });
       const safe = removeMobilitySentences(sanitizeVisionDescription(response));
       if (!safe) {
-        return { text: fallback, source: 'deterministic', fallbackReason: 'unsafe-output' };
+        return visionFallback('unsafe-output', fallback, allowDeterministicFallback);
       }
       return {
         text: `${appendMissingPersonAliases(safe, scene)}${sensorDescription(sensor)}`,
@@ -96,11 +106,8 @@ export class ConversationService {
       };
     } catch (error: any) {
       console.warn('[MaculusNext] On-device visual description failed:', error?.message || error);
-      return {
-        text: fallback,
-        source: 'deterministic',
-        fallbackReason: /timed out/i.test(error?.message || '') ? 'timeout' : 'inference-error',
-      };
+      const reason = /timed out/i.test(error?.message || '') ? 'timeout' : 'inference-error';
+      return visionFallback(reason, fallback, allowDeterministicFallback);
     }
   }
 
@@ -118,14 +125,21 @@ export class ConversationService {
     scene: NextSceneSnapshot,
     sensor: SafetyState,
     imageBase64?: string | null,
+    options: ConversationResponseOptions = {},
   ): Promise<ConversationResponse> {
     const question = transcript.trim();
     if (!question) {return { text: 'I did not hear a question.' };}
-    if (isVisualSceneRequest(question)) {
-      if (/\b(who|person|people)\b/i.test(question) && !imageBase64) {
+    if (options.visionOnly || isVisualSceneRequest(question)) {
+      if (!options.visionOnly && /\b(who|person|people)\b/i.test(question) && !imageBase64) {
         return { text: groundedPeopleReply(scene) };
       }
-      const vision = await this.describeFrame(imageBase64 || null, scene, sensor, question);
+      const vision = await this.describeFrame(
+        imageBase64 || null,
+        scene,
+        sensor,
+        question,
+        { allowDeterministicFallback: !options.visionOnly },
+      );
       return { text: vision.text, vision };
     }
     if (!this.isReady() || localLlmService.getState() !== 'ready') {
@@ -184,8 +198,10 @@ export function buildVisionPrompt(question: string, scene: NextSceneSnapshot): s
   return [
     'You are privately analyzing one live camera frame for a blind user.',
     `User request: ${question}`,
-    'Answer in two or three short, natural sentences.',
-    'Start with the overall setting, then the most important people, objects, actions, spatial relationships, colors, or clearly readable short text.',
+    'Answer the user request directly in one to three short, natural sentences.',
+    'For a broad scene request, start with the overall setting, then the most important people, objects, actions, spatial relationships, colors, or clearly readable short text.',
+    'For a specific question, focus on that question and use the image as the source of visual facts.',
+    'For casual conversation that does not require the image, answer naturally without inventing anything about the surroundings.',
     'Mention an obvious immediate physical hazard, but never tell the user to walk, move, step, turn, cross, or continue.',
     'Never say a route or path is safe or clear, and never estimate exact distance.',
     'Use supplied anonymous session labels consistently, but never claim a real identity.',
@@ -253,6 +269,24 @@ function sensorDescription(sensor: SafetyState): string {
     return ' Separately, the ultrasonic sensor is healthy and does not currently report a close obstacle.';
   }
   return ' The ultrasonic sensor is unavailable, so distance safety is unknown.';
+}
+
+function visionFallback(
+  reason: NonNullable<VisionDescriptionResult['fallbackReason']>,
+  deterministicText: string,
+  allowDeterministicFallback: boolean,
+): VisionDescriptionResult {
+  if (allowDeterministicFallback) {
+    return { text: deterministicText, source: 'deterministic', fallbackReason: reason };
+  }
+  const messages: Record<NonNullable<VisionDescriptionResult['fallbackReason']>, string> = {
+    'no-frame': 'I cannot access a fresh camera frame right now, so the vision AI cannot answer that request.',
+    'not-ready': 'The private vision AI is not ready, so I cannot answer that request from the camera yet.',
+    timeout: 'The on-device vision AI did not finish in time. Please ask me to look again.',
+    'unsafe-output': 'The vision AI did not produce a safe answer. Please ask me to look again.',
+    'inference-error': 'The on-device vision AI could not analyze the camera frame. Please try again.',
+  };
+  return { text: messages[reason], source: 'unavailable', fallbackReason: reason };
 }
 
 function appendMissingPersonAliases(text: string, scene: NextSceneSnapshot): string {

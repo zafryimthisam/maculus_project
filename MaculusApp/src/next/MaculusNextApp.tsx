@@ -99,7 +99,11 @@ export default function MaculusNextApp(): React.JSX.Element {
         {state.detailedDescription.length > 0 && (
           <View style={styles.card} accessibilityLiveRegion="polite">
             <Text style={styles.cardLabel}>
-              {state.descriptionSource === 'vision-language' ? 'ON-DEVICE AI DESCRIPTION' : 'VERIFIED SCENE DESCRIPTION'}
+              {state.descriptionSource === 'vision-language'
+                ? 'ON-DEVICE AI DESCRIPTION'
+                : state.descriptionSource === 'unavailable'
+                ? 'VISION AI UNAVAILABLE'
+                : 'VERIFIED SCENE DESCRIPTION'}
             </Text>
             <Text style={styles.cardBody}>{state.detailedDescription}</Text>
           </View>
@@ -108,7 +112,7 @@ export default function MaculusNextApp(): React.JSX.Element {
         <View style={styles.statusGrid}>
           <StatusItem label="Camera" value={state.cameraReady && state.guidanceActive ? 'Active' : 'Paused'} />
           <StatusItem label="Voice" value={state.voiceStatus.replace(/_/g, ' ')} />
-          <StatusItem label="Local AI" value={state.conversationReady ? 'Vision + chat' : 'Verified scene'} />
+          <StatusItem label="Local AI" value={state.conversationReady ? 'Camera VLM ready' : 'Vision AI not ready'} />
           <StatusItem label="Vision" value={state.fps > 0 ? `${state.fps} FPS` : state.visionBackend} />
         </View>
 

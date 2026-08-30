@@ -8,7 +8,7 @@ import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetServi
 import { reIdService } from '../services/ReIdService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
 import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
-import { ConversationService, isVisualSceneRequest } from './ConversationService';
+import { ConversationService, VisionDescriptionResult } from './ConversationService';
 import {
   INITIAL_NEXT_RUNTIME_STATE,
   NextRuntimeState,
@@ -173,6 +173,10 @@ export class MaculusRuntime {
         voiceStatus => this.update({ voiceStatus }),
         {
           alwaysListening: true,
+          // MaculusNext owns the availability response so every non-control
+          // transcript can be routed to the camera-aware VLM. The voice layer
+          // must not substitute parser or detector feedback.
+          forwardAllTranscripts: true,
           onTurnComplete: () => voiceCommandService.openFollowupWindow(),
         },
       );
@@ -399,7 +403,7 @@ export class MaculusRuntime {
 
   private handleVoiceTurn = async (turn: ConversationTurn, fastCommand: VoiceCommand | null): Promise<void> => {
     if (!this.running) {return;}
-    if (fastCommand && this.handleFastCommand(fastCommand)) {return;}
+    if (fastCommand && fastCommand !== 'describe_scene' && this.handleFastCommand(fastCommand)) {return;}
     if (this.safety.getState().health === 'emergency') {
       this.update({ message: 'Emergency obstacle remains within 40 centimeters — AI conversation is paused' });
       return;
@@ -407,22 +411,20 @@ export class MaculusRuntime {
     const generation = this.generation;
     const assistantGeneration = ++this.assistantGeneration;
     this.assistantBusy = true;
-    const visualRequest = isVisualSceneRequest(turn.transcript);
     const observation = this.currentVisionObservation();
     const snapshot = observation?.snapshot || this.scene.getSnapshot();
-    if (visualRequest) {
-      this.update({
-        descriptionInProgress: true,
-        message: 'Analyzing your visual request privately on this device…',
-      });
-      this.speech.speakSystem('Let me look at the current scene.', 0, `visual-request:${turn.timestamp}`);
-    }
+    this.update({
+      descriptionInProgress: true,
+      message: 'Sending your words only to the private vision AI…',
+    });
+    this.speech.speakSystem('Let me check the current camera view.', 0, `visual-request:${turn.timestamp}`);
     try {
       const response = await this.conversation.respondWithMetadata(
         turn.transcript,
         snapshot,
         this.safety.getState(),
         observation?.frame.base64,
+        { visionOnly: true },
       );
       if (
         !this.running ||
@@ -433,9 +435,7 @@ export class MaculusRuntime {
         this.update({
           detailedDescription: response.vision.text,
           descriptionSource: response.vision.source,
-          message: response.vision.source === 'vision-language'
-            ? 'Visual request answered privately on this device'
-            : fallbackStatusMessage(response.vision.fallbackReason),
+          message: voiceVisionStatusMessage(response.vision),
         });
       }
       this.speech.speakConversation(response.text, `answer:${turn.timestamp}`);
@@ -446,7 +446,7 @@ export class MaculusRuntime {
         assistantGeneration === this.assistantGeneration
       ) {
         this.assistantBusy = false;
-        if (visualRequest) {this.update({ descriptionInProgress: false });}
+        this.update({ descriptionInProgress: false });
       }
     }
   };
@@ -545,6 +545,19 @@ function fallbackStatusMessage(reason?: 'no-frame' | 'not-ready' | 'timeout' | '
     case 'timeout': return 'The private vision model timed out; verified detector guidance was used';
     case 'unsafe-output': return 'Unsafe AI movement wording was removed; verified detector guidance was used';
     default: return 'The private vision model failed; verified detector guidance was used';
+  }
+}
+
+function voiceVisionStatusMessage(result: VisionDescriptionResult): string {
+  if (result.source === 'vision-language') {
+    return 'Spoken request processed by the private vision AI';
+  }
+  switch (result.fallbackReason) {
+    case 'no-frame': return 'Vision AI could not access a fresh camera frame; no detector answer was substituted';
+    case 'not-ready': return 'Vision AI is not ready; no detector answer was substituted';
+    case 'timeout': return 'Vision AI timed out; no detector answer was substituted';
+    case 'unsafe-output': return 'Vision AI response was rejected for safety; no detector answer was substituted';
+    default: return 'Vision AI could not answer; no detector answer was substituted';
   }
 }
 
