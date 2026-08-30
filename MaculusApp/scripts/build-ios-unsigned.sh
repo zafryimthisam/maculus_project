@@ -131,12 +131,17 @@ project = project_path.read_text(encoding="utf-8")
 for version in versions:
     old = f"kind = upToNextMajorVersion;\n\t\t\t\tminimumVersion = {version};"
     new = f"kind = exactVersion;\n\t\t\t\tversion = {version};"
-    count = project.count(old)
-    if count != 1:
+    old_count = project.count(old)
+    new_count = project.count(new)
+    if old_count == 1 and new_count == 0:
+        project = project.replace(old, new)
+    elif old_count == 0 and new_count == 1:
+        continue
+    else:
         raise SystemExit(
-            f"Expected one FastVLM package requirement for {version}, found {count}."
+            "Unexpected FastVLM package requirement for "
+            f"{version}: loose={old_count}, exact={new_count}."
         )
-    project = project.replace(old, new)
 
 project_path.write_text(project, encoding="utf-8")
 PY
