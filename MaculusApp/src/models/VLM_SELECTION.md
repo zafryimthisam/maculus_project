@@ -30,6 +30,18 @@ Official sources:
 - https://github.com/ggml-org/llama.cpp/tree/master/tools/mtmd
 - https://github.com/mybigday/llama.rn
 
+## iOS runtime configuration
+
+The language-model layers remain offloaded to Metal. The multimodal projector
+uses CPU evaluation on iOS because llama.rn has a reported Metal failure where
+image processing aborts with `Failed to evaluate chunks`/`GPU Hang`; CPU
+projector evaluation is the known reliable path. The context uses a 512 logical
+batch with a 128 physical micro-batch and Q8 KV caches to reduce image-chunk
+calls and unified-memory pressure.
+
+- https://github.com/mybigday/llama.rn/issues/176
+- https://github.com/mybigday/llama.rn/blob/v0.12.9/README.md#multimodal-vision--audio
+
 ## Alternatives considered
 
 | Model | Strength | Why it is not the default |

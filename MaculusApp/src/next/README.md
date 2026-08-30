@@ -31,6 +31,11 @@ and is no more than 2.5 seconds old. If the private VLM is installed, the frame
 is passed to llama.cpp/libmtmd entirely on device. Ultrasonic facts are appended
 after generation and are never supplied by the VLM.
 
+On iOS, the text model remains Metal-accelerated while the vision projector runs
+on CPU. This avoids a known llama.rn Metal image-chunk failure. Native inference
+errors are normalized into a short UI diagnostic instead of being hidden behind
+the generic deterministic fallback message.
+
 The optional download contains two checksum-pinned files (about 1.3 GB total):
 
 - LFM2.5-VL-1.6B Q4_K_M language model

@@ -54,7 +54,10 @@ export class LocalLlmService {
 
   async load(modelPath: string, projectorPath?: string | null): Promise<boolean> {
     const requestedProjector = projectorPath || null;
-    if (this.context && this.modelPath === modelPath && this.projectorPath === requestedProjector) {return true;}
+    if (this.context && this.modelPath === modelPath && this.projectorPath === requestedProjector) {
+      this.lastError = null;
+      return true;
+    }
     await this.release();
     this.state = 'loading';
     this.lastError = null;
@@ -65,11 +68,16 @@ export class LocalLlmService {
       this.context = await llama.initLlama({
         model: modelPath.startsWith('file://') ? modelPath : `file://${modelPath}`,
         n_ctx: 2048,
-        n_batch: 128,
+        // A larger logical batch lets libmtmd evaluate image embeddings in
+        // fewer chunks. n_ubatch keeps each physical allocation modest.
+        n_batch: 512,
+        n_ubatch: 128,
         n_parallel: 1,
         n_threads: this.thermalThrottled ? 1 : Platform.OS === 'android' ? 2 : 4,
         n_gpu_layers: Platform.OS === 'ios' ? 99 : 0,
         flash_attn_type: 'auto',
+        cache_type_k: 'q8_0',
+        cache_type_v: 'q8_0',
         use_mmap: true,
         use_mlock: false,
         // Every visual turn is rebuilt from a fresh camera frame, so retaining
@@ -81,7 +89,11 @@ export class LocalLlmService {
       if (requestedProjector) {
         const initialized = await this.context.initMultimodal({
           path: requestedProjector.startsWith('file://') ? requestedProjector : `file://${requestedProjector}`,
-          use_gpu: Platform.OS === 'ios',
+          // Keep the LLM layers on Metal, but evaluate the vision projector on
+          // CPU. llama.rn has a reproducible iOS Metal path where image chunk
+          // evaluation can abort with "Failed to evaluate chunks"/GPU Hang.
+          // Android already used the CPU projector path.
+          use_gpu: false,
           image_min_tokens: 64,
           image_max_tokens: 256,
         });
@@ -117,6 +129,7 @@ export class LocalLlmService {
     }
     const generation = ++this.generationId;
     this.state = 'generating';
+    this.lastError = null;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
       if (this.thermalThrottled) {
@@ -149,6 +162,7 @@ export class LocalLlmService {
       return (result.text || result.content || '').trim();
     } catch (error) {
       if (generation === this.generationId) {
+        this.lastError = completionErrorMessage(error);
         await this.context.stopCompletion().catch(() => {});
       }
       throw error;
@@ -165,6 +179,7 @@ export class LocalLlmService {
     }
     const generation = ++this.generationId;
     this.state = 'generating';
+    this.lastError = null;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
       if (this.thermalThrottled) {
@@ -201,6 +216,7 @@ export class LocalLlmService {
       return (result.text || result.content || '').trim();
     } catch (error) {
       if (generation === this.generationId) {
+        this.lastError = completionErrorMessage(error);
         await this.context.stopCompletion().catch(() => {});
       }
       throw error;
@@ -318,3 +334,9 @@ export class LocalLlmService {
 }
 
 export const localLlmService = new LocalLlmService();
+
+function completionErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {return error.message.trim();}
+  if (typeof error === 'string' && error.trim()) {return error.trim();}
+  return 'The local model failed without an error message.';
+}

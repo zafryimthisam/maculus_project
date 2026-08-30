@@ -8,6 +8,7 @@ export interface VisionDescriptionResult {
   text: string;
   source: 'vision-language' | 'deterministic' | 'unavailable';
   fallbackReason?: 'no-frame' | 'not-ready' | 'timeout' | 'unsafe-output' | 'inference-error';
+  failureDetail?: string;
 }
 
 export interface ConversationResponse {
@@ -82,7 +83,12 @@ export class ConversationService {
       return visionFallback('no-frame', fallback, allowDeterministicFallback);
     }
     if (!this.isVisionReady()) {
-      return visionFallback('not-ready', fallback, allowDeterministicFallback);
+      return visionFallback(
+        'not-ready',
+        fallback,
+        allowDeterministicFallback,
+        formatVisionFailureDetail(localLlmService.getLastError()),
+      );
     }
 
     try {
@@ -107,7 +113,12 @@ export class ConversationService {
     } catch (error: any) {
       console.warn('[MaculusNext] On-device visual description failed:', error?.message || error);
       const reason = /timed out/i.test(error?.message || '') ? 'timeout' : 'inference-error';
-      return visionFallback(reason, fallback, allowDeterministicFallback);
+      return visionFallback(
+        reason,
+        fallback,
+        allowDeterministicFallback,
+        formatVisionFailureDetail(localLlmService.getLastError() || error?.message),
+      );
     }
   }
 
@@ -275,9 +286,10 @@ function visionFallback(
   reason: NonNullable<VisionDescriptionResult['fallbackReason']>,
   deterministicText: string,
   allowDeterministicFallback: boolean,
+  failureDetail?: string,
 ): VisionDescriptionResult {
   if (allowDeterministicFallback) {
-    return { text: deterministicText, source: 'deterministic', fallbackReason: reason };
+    return { text: deterministicText, source: 'deterministic', fallbackReason: reason, failureDetail };
   }
   const messages: Record<NonNullable<VisionDescriptionResult['fallbackReason']>, string> = {
     'no-frame': 'I cannot access a fresh camera frame right now, so the vision AI cannot answer that request.',
@@ -286,7 +298,22 @@ function visionFallback(
     'unsafe-output': 'The vision AI did not produce a safe answer. Please ask me to look again.',
     'inference-error': 'The on-device vision AI could not analyze the camera frame. Please try again.',
   };
-  return { text: messages[reason], source: 'unavailable', fallbackReason: reason };
+  return { text: messages[reason], source: 'unavailable', fallbackReason: reason, failureDetail };
+}
+
+export function formatVisionFailureDetail(detail: unknown): string | undefined {
+  if (typeof detail !== 'string' || !detail.trim()) {return undefined;}
+  const normalized = detail.replace(/\s+/g, ' ').trim();
+  if (/failed to evaluate chunks|gpu hang|command buffer was aborted/i.test(normalized)) {
+    return 'The iOS vision encoder could not evaluate the camera image.';
+  }
+  if (/out of memory|cannot allocate|memory pressure|allocation failed/i.test(normalized)) {
+    return 'The device did not have enough available memory for vision inference.';
+  }
+  if (/media|image/i.test(normalized) && /decode|invalid|unsupported|load/i.test(normalized)) {
+    return 'The vision encoder could not decode the captured camera image.';
+  }
+  return normalized.length <= 160 ? normalized : `${normalized.slice(0, 157)}…`;
 }
 
 function appendMissingPersonAliases(text: string, scene: NextSceneSnapshot): string {

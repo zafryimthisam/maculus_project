@@ -3,6 +3,7 @@ import { localLlmService } from '../src/services/LocalLlmService';
 import {
   buildVisionPrompt,
   ConversationService,
+  formatVisionFailureDetail,
   isVisualSceneRequest,
   sanitizeVisionDescription,
 } from '../src/next/ConversationService';
@@ -79,6 +80,11 @@ describe('MaculusNext vision-language descriptions', () => {
   it('cleans model control tokens and labels before speech', () => {
     expect(sanitizeVisionDescription('<|im_start|> assistant:  A kitchen   with a table. <|im_end|>'))
       .toBe('A kitchen with a table.');
+  });
+
+  it('turns the native iOS image-chunk failure into an actionable diagnostic', () => {
+    expect(formatVisionFailureDetail('Error processing image: Failed to evaluate chunks'))
+      .toBe('The iOS vision encoder could not evaluate the camera image.');
   });
 
   it('routes natural find requests through the current camera frame', async () => {

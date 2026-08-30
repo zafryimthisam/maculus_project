@@ -250,7 +250,7 @@ export class MaculusRuntime {
         descriptionSource: result.source,
         message: result.source === 'vision-language'
           ? 'Scene analyzed privately on this device'
-          : fallbackStatusMessage(result.fallbackReason),
+          : fallbackStatusMessage(result.fallbackReason, result.failureDetail),
       });
       this.speech.speakConversation(result.text, `describe:${snapshot.revision}:${Date.now()}`);
     } finally {
@@ -538,13 +538,20 @@ function nextModelState(status: ModelAssetStatus): NextRuntimeState['model'] {
   };
 }
 
-function fallbackStatusMessage(reason?: 'no-frame' | 'not-ready' | 'timeout' | 'unsafe-output' | 'inference-error'): string {
+function fallbackStatusMessage(
+  reason?: 'no-frame' | 'not-ready' | 'timeout' | 'unsafe-output' | 'inference-error',
+  failureDetail?: string,
+): string {
   switch (reason) {
     case 'no-frame': return 'No fresh camera frame was available; verified detector guidance was used';
-    case 'not-ready': return 'The private vision model was not ready; verified detector guidance was used';
+    case 'not-ready': return failureDetail
+      ? `${failureDetail} Verified detector guidance was used.`
+      : 'The private vision model was not ready; verified detector guidance was used';
     case 'timeout': return 'The private vision model timed out; verified detector guidance was used';
     case 'unsafe-output': return 'Unsafe AI movement wording was removed; verified detector guidance was used';
-    default: return 'The private vision model failed; verified detector guidance was used';
+    default: return failureDetail
+      ? `${failureDetail} Verified detector guidance was used.`
+      : 'The private vision model failed; verified detector guidance was used';
   }
 }
 
@@ -554,10 +561,14 @@ function voiceVisionStatusMessage(result: VisionDescriptionResult): string {
   }
   switch (result.fallbackReason) {
     case 'no-frame': return 'Vision AI could not access a fresh camera frame; no detector answer was substituted';
-    case 'not-ready': return 'Vision AI is not ready; no detector answer was substituted';
+    case 'not-ready': return result.failureDetail
+      ? `${result.failureDetail} No detector answer was substituted.`
+      : 'Vision AI is not ready; no detector answer was substituted';
     case 'timeout': return 'Vision AI timed out; no detector answer was substituted';
     case 'unsafe-output': return 'Vision AI response was rejected for safety; no detector answer was substituted';
-    default: return 'Vision AI could not answer; no detector answer was substituted';
+    default: return result.failureDetail
+      ? `${result.failureDetail} No detector answer was substituted.`
+      : 'Vision AI could not answer; no detector answer was substituted';
   }
 }
 
