@@ -49,7 +49,7 @@ describe('MaculusNext camera routing and diagnostics', () => {
     });
     const runtime = runningRuntime();
 
-    await (runtime as any).discoverPi(1);
+    await (runtime as any).probeForPi(1, false, true);
 
     expect(runtime.getState()).toMatchObject({
       piConnection: 'connected',

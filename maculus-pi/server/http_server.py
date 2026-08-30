@@ -1,5 +1,6 @@
 """Flask-based HTTP server for Maculus Pi"""
 import logging
+import socket
 from flask import Flask, Response, jsonify
 
 logger = logging.getLogger(__name__)
@@ -7,6 +8,13 @@ app = Flask(__name__)
 
 _camera = None
 _sensor = None
+
+
+@app.after_request
+def disable_caching(response):
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['X-Maculus-API-Version'] = '2'
+    return response
 
 PAGE = """\
 <html>
@@ -75,14 +83,20 @@ def distance():
             "valid": False,
             "healthy": False,
             "error": "Sensor not initialized",
-        }), 503
+        }), 200
     reading = _sensor.get_reading()
-    return jsonify(reading), 200 if reading["valid"] else 503
+    # A failed physical sample is still a successful response from a reachable
+    # Pi. Sensor health belongs in the JSON contract; HTTP errors are reserved
+    # for transport/server failures so clients do not misreport the whole Pi as
+    # disconnected.
+    return jsonify(reading), 200
 
 @app.route('/status')
 def status():
     return jsonify({
         "system": "Maculus Pi",
+        "api_version": 2,
+        "hostname": socket.gethostname(),
         "camera": _camera is not None and getattr(_camera, 'is_available', lambda: False)(),
         "sensor": _sensor is not None and getattr(_sensor, '_running', False),
         "sensor_healthy": _sensor is not None and getattr(_sensor, 'is_healthy', lambda: False)(),

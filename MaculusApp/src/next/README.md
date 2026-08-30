@@ -27,11 +27,21 @@ MaculusNext is the clean runtime and the default application entry registered by
 
 ## Pi connection and camera preview
 
-Starting a session searches the current local network for a `/status` response
-whose `system` field is exactly `Maculus Pi`. The interface reports the verified
-Pi URL, Pi camera availability, and ultrasonic sensor health separately. A
-successful sensor response also refreshes the connected state; ordinary Wi-Fi
-connectivity alone is never shown as a Pi connection.
+Starting a session repeatedly searches the current local network for a `/status`
+response whose `system` field is exactly `Maculus Pi`. Discovery first tries the
+saved/default hostnames and common addresses, then scans the complete local
+`/24`; it continues after the iOS Local Network permission prompt instead of
+permanently failing its first attempt. The interface also restores the legacy
+manual Pi-address control for unusual network layouts. It reports the verified
+Pi URL, Pi camera availability, and ultrasonic sensor health separately.
+Ordinary Wi-Fi connectivity alone is never shown as a Pi connection.
+
+A structured `/distance` response proves the Pi transport is reachable even
+when the physical sensor reports `valid: false` or `healthy: false`. That state
+is displayed as **Pi connected, sensor unavailable**, never **Pi not found** and
+never a clear path. Current Pi firmware returns this health payload with HTTP
+200; the client also understands the short-lived API version that returned the
+same payload with HTTP 503.
 
 The visual pipeline tries the Raspberry Pi `/capture` endpoint first. A missing,
 slow, or unavailable Pi camera falls back to the already-running iPhone camera

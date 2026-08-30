@@ -3,6 +3,8 @@ export interface PiStatus {
   camera: boolean;
   sensor: boolean;
   sensor_healthy?: boolean;
+  api_version?: number;
+  hostname?: string;
 }
 
 export interface DistanceReading {

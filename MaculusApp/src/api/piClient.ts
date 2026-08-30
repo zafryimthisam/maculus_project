@@ -5,8 +5,9 @@ import { CapturedFrame, DistanceReading, PiStatus } from '../types';
 
 const PI_PORT = 8000;
 const DEFAULT_PI_URL = `http://raspberrypi.local:${PI_PORT}`;
-const DISCOVERY_TIMEOUT_MS = 350;
-const DISCOVERY_BATCH_SIZE = 24;
+const DIRECT_DISCOVERY_TIMEOUT_MS = 1500;
+const SUBNET_DISCOVERY_TIMEOUT_MS = 700;
+const DISCOVERY_BATCH_SIZE = 32;
 
 let PI_BASE_URL = DEFAULT_PI_URL;
 
@@ -25,25 +26,35 @@ export const getPiUrl = () => PI_BASE_URL;
 
 const fetchStatusFromUrl = async (
   url: string,
-  timeout: number = DISCOVERY_TIMEOUT_MS,
+  timeout: number,
+  signal?: AbortSignal,
 ): Promise<PiStatus> => {
-  const res = await axios.get(`${normalizePiUrl(url)}/status`, { timeout });
-  return res.data;
+  const res = await axios.get(`${normalizePiUrl(url)}/status`, { timeout, signal });
+  return requireMaculusStatus(res.data);
 };
 
-const isMaculusStatus = (status: any): status is PiStatus =>
+export const isMaculusStatus = (status: any): status is PiStatus =>
   status &&
   typeof status === 'object' &&
   status.system === 'Maculus Pi' &&
   typeof status.camera === 'boolean' &&
   typeof status.sensor === 'boolean';
 
+const requireMaculusStatus = (status: unknown): PiStatus => {
+  if (!isMaculusStatus(status)) {
+    throw new Error('PI_PROTOCOL_ERROR: Server did not identify itself as Maculus Pi');
+  }
+  return status;
+};
+
 const getSubnetCandidates = async (fullScan: boolean): Promise<string[]> => {
   try {
     const ip = await NetworkInfo.getIPV4Address();
-    if (!ip) {return [];}
+    if (!ip || ip === '0.0.0.0') {return [];}
     const parts = ip.split('.');
-    if (parts.length !== 4) {return [];}
+    if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part))) {return [];}
+    const octets = parts.map(Number);
+    if (octets.some(part => part < 0 || part > 255)) {return [];}
     const prefix = parts.slice(0, 3).join('.');
     const ownHost = Number(parts[3]);
     const commonHosts = [2, 3, 4, 5, 10, 20, 50, 80, 100, 101, 150, 200, 254];
@@ -59,26 +70,50 @@ const getSubnetCandidates = async (fullScan: boolean): Promise<string[]> => {
   }
 };
 
-export const discoverPiUrl = async (preferredUrl?: string, fullScan: boolean = true): Promise<string | null> => {
+export const discoverPiUrl = async (
+  preferredUrl?: string,
+  fullScan: boolean = true,
+  signal?: AbortSignal,
+): Promise<string | null> => {
   const directCandidates = [
     preferredUrl,
     DEFAULT_PI_URL,
     `http://raspberrypi:${PI_PORT}`,
   ].filter(Boolean) as string[];
 
-  const candidates = [
-    ...directCandidates,
-    ...(await getSubnetCandidates(fullScan)),
-  ].filter((url, index, arr) => arr.indexOf(url) === index);
+  const normalizedDirectCandidates = directCandidates
+    .map(normalizePiUrl)
+    .filter((url, index, arr) => arr.indexOf(url) === index);
+
+  const directResults = await Promise.all(
+    normalizedDirectCandidates.map(async candidate => {
+      try {
+        await fetchStatusFromUrl(candidate, DIRECT_DISCOVERY_TIMEOUT_MS, signal);
+        return candidate;
+      } catch (error: any) {
+        if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {throw error;}
+        return null;
+      }
+    }),
+  );
+  const directMatch = directResults.find(Boolean);
+  if (directMatch) {
+    setPiUrl(directMatch);
+    return directMatch;
+  }
+
+  const candidates = (await getSubnetCandidates(fullScan))
+    .filter(url => !normalizedDirectCandidates.includes(url));
 
   for (let i = 0; i < candidates.length; i += DISCOVERY_BATCH_SIZE) {
     const batch = candidates.slice(i, i + DISCOVERY_BATCH_SIZE);
     const results = await Promise.all(
       batch.map(async (candidate) => {
         try {
-          const status = await fetchStatusFromUrl(candidate);
-          return isMaculusStatus(status) ? normalizePiUrl(candidate) : null;
-        } catch {
+          await fetchStatusFromUrl(candidate, SUBNET_DISCOVERY_TIMEOUT_MS, signal);
+          return normalizePiUrl(candidate);
+        } catch (error: any) {
+          if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {throw error;}
           return null;
         }
       }),
@@ -95,16 +130,32 @@ export const discoverPiUrl = async (preferredUrl?: string, fullScan: boolean = t
 
 export const fetchStatus = async (signal?: AbortSignal): Promise<PiStatus> => {
   const res = await axios.get(`${PI_BASE_URL}/status`, { timeout: 3000, signal });
-  return res.data;
+  return requireMaculusStatus(res.data);
 };
 
 export const fetchDistance = async (signal?: AbortSignal): Promise<DistanceReading> => {
-  const res = await axios.get(`${PI_BASE_URL}/distance`, { timeout: 1200, signal });
-  return normalizeDistanceReading(res.data);
+  try {
+    const res = await axios.get(`${PI_BASE_URL}/distance`, { timeout: 1200, signal });
+    return normalizeDistanceReading(res.data);
+  } catch (error: any) {
+    // API v2 used HTTP 503 for a reachable Pi with an unhealthy sensor. That is
+    // hardware health, not a lost network connection. Preserve the structured
+    // reading so the runtime can show "Pi connected, sensor unavailable".
+    if (error?.response?.data && isDistancePayload(error.response.data)) {
+      return normalizeDistanceReading(error.response.data);
+    }
+    throw error;
+  }
+};
+
+const isDistancePayload = (value: unknown): value is Record<string, unknown> => {
+  if (!value || typeof value !== 'object') {return false;}
+  const raw = value as Record<string, unknown>;
+  return 'distance_cm' in raw && 'obstacle' in raw && 'threshold_cm' in raw;
 };
 
 export const normalizeDistanceReading = (value: unknown): DistanceReading => {
-  if (!value || typeof value !== 'object') {
+  if (!isDistancePayload(value)) {
     throw new Error('SENSOR_PROTOCOL_ERROR: Distance response is not an object');
   }
   const raw = value as Record<string, unknown>;
@@ -128,7 +179,11 @@ export const normalizeDistanceReading = (value: unknown): DistanceReading => {
     sequence: Number.isInteger(sequence) && sequence >= 0 ? sequence : undefined,
     sampled_at: Number.isFinite(sampledAt) && sampledAt > 0 ? sampledAt : undefined,
     age_ms: Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : undefined,
-    error: typeof raw.error === 'string' ? raw.error : null,
+    error: typeof raw.error === 'string'
+      ? raw.error
+      : raw.valid === undefined || raw.healthy === undefined
+      ? 'Pi sensor service must be updated to report valid and healthy fields'
+      : null,
   };
 };
 

@@ -6,6 +6,7 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -21,15 +22,33 @@ export default function MaculusNextApp(): React.JSX.Element {
     repeatLast,
     setGuidanceActive,
     setPreviewEnabled,
+    findPi,
     installPrivateVisionModel,
     cancelPrivateVisionModelDownload,
     deletePrivateVisionModel,
   } = useMaculusRuntime();
+  const [piAddress, setPiAddress] = React.useState('');
+  const [piConnecting, setPiConnecting] = React.useState(false);
   const active = state.phase !== 'idle' && state.phase !== 'error';
   const busy = state.phase === 'starting' || state.phase === 'stopping';
   const modelPercent = state.model.totalBytes > 0
     ? Math.min(100, Math.round(state.model.downloadedBytes * 100 / state.model.totalBytes))
     : 0;
+
+  React.useEffect(() => {
+    if (state.piConnection === 'connected' && state.piUrl) {
+      setPiAddress(state.piUrl);
+    }
+  }, [state.piConnection, state.piUrl]);
+
+  const reconnectPi = async () => {
+    setPiConnecting(true);
+    try {
+      await findPi(piAddress.trim() || undefined);
+    } finally {
+      setPiConnecting(false);
+    }
+  };
 
   const installModel = async (allowCellular: boolean = false) => {
     try {
@@ -60,13 +79,46 @@ export default function MaculusNextApp(): React.JSX.Element {
 
         <View
           style={[styles.connectionCard, piConnectionStyle(state.piConnection)]}
-          accessibilityLiveRegion="polite"
         >
           <Text style={styles.cardLabel}>MACULUS PI</Text>
-          <Text style={styles.connectionValue}>{piConnectionTitle(state.piConnection)}</Text>
+          <Text style={styles.connectionValue} accessibilityLiveRegion="polite">
+            {piConnectionTitle(state.piConnection)}
+          </Text>
           <Text style={styles.connectionBody}>{piConnectionDescription(state)}</Text>
           {state.piConnection === 'connected' && state.piUrl && (
             <Text style={styles.connectionUrl}>{state.piUrl}</Text>
+          )}
+          {active && (
+            <>
+              <View style={styles.piInputRow}>
+                <TextInput
+                  value={piAddress}
+                  onChangeText={setPiAddress}
+                  placeholder="Pi IP or raspberrypi.local"
+                  placeholderTextColor="#8292a7"
+                  accessibilityLabel="Maculus Pi address"
+                  accessibilityHint="Leave blank to scan the local network, or enter the Pi address shown by the Pi service"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                  editable={!piConnecting}
+                  style={styles.piInput}
+                />
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel={piConnecting ? 'Finding Maculus Pi' : 'Find Maculus Pi'}
+                  accessibilityState={{ disabled: piConnecting }}
+                  disabled={piConnecting}
+                  onPress={reconnectPi}
+                  style={[styles.piFindButton, piConnecting && styles.disabledButton]}
+                >
+                  <Text style={styles.piFindButtonText}>{piConnecting ? 'Finding…' : 'Find Pi'}</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.piHelp}>
+                Leave blank for a full Wi-Fi scan, or enter an address such as 192.168.1.42:8000.
+              </Text>
+            </>
           )}
         </View>
 
@@ -305,6 +357,11 @@ const styles = StyleSheet.create({
   connectionValue: { color: '#ffffff', fontSize: 22, fontWeight: '900', marginTop: 5 },
   connectionBody: { color: '#e5ecf5', fontSize: 16, lineHeight: 23, marginTop: 7 },
   connectionUrl: { color: '#8fe4d7', fontSize: 13, lineHeight: 18, marginTop: 8 },
+  piInputRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  piInput: { flex: 1, minHeight: 50, borderRadius: 12, borderWidth: 1, borderColor: '#52647a', backgroundColor: '#07111f', color: '#ffffff', fontSize: 15, paddingHorizontal: 12 },
+  piFindButton: { minHeight: 50, borderRadius: 12, backgroundColor: '#2ed3b7', justifyContent: 'center', paddingHorizontal: 14 },
+  piFindButtonText: { color: '#06131d', fontSize: 15, fontWeight: '900' },
+  piHelp: { color: '#b9c7d8', fontSize: 12, lineHeight: 18, marginTop: 8 },
   safetyCard: { borderRadius: 20, padding: 20, borderWidth: 2, marginBottom: 18 },
   safetyHealthy: { backgroundColor: '#0c302d', borderColor: '#2ed3b7' },
   safetyWarning: { backgroundColor: '#3b2c05', borderColor: '#ffbf47' },
