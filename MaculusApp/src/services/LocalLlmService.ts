@@ -18,7 +18,7 @@ export interface LocalVisionCompletionRequest {
 
 type LlamaContextLike = {
   completion(params: Record<string, unknown>, callback?: (token: { token?: string }) => void): Promise<{ text?: string; content?: string }>;
-  stopCompletion(): Promise<void>;
+  stopCompletion(): Promise<void> | void;
   clearCache(clearData?: boolean): Promise<void>;
   initMultimodal(params: {
     path: string;
@@ -27,8 +27,8 @@ type LlamaContextLike = {
     image_max_tokens?: number;
   }): Promise<boolean>;
   getMultimodalSupport(): Promise<{ vision: boolean; audio: boolean }>;
-  releaseMultimodal(): Promise<void>;
-  release(): Promise<void>;
+  releaseMultimodal(): Promise<void> | void;
+  release(): Promise<void> | void;
 };
 
 export interface LocalLlmStreamChunk {
@@ -114,8 +114,8 @@ export class LocalLlmService {
       this.projectorPath = null;
       this.visionReady = false;
       if (failedContext) {
-        await failedContext.releaseMultimodal().catch(() => {});
-        await failedContext.release().catch(() => {});
+        await ignoreNativeFailure(() => failedContext.releaseMultimodal());
+        await ignoreNativeFailure(() => failedContext.release());
       }
       this.state = 'error';
       this.lastError = error?.message || 'The local language model could not be loaded.';
@@ -163,7 +163,8 @@ export class LocalLlmService {
     } catch (error) {
       if (generation === this.generationId) {
         this.lastError = completionErrorMessage(error);
-        await this.context.stopCompletion().catch(() => {});
+        const context = this.context;
+        if (context) {await ignoreNativeFailure(() => context.stopCompletion());}
       }
       throw error;
     } finally {
@@ -217,7 +218,8 @@ export class LocalLlmService {
     } catch (error) {
       if (generation === this.generationId) {
         this.lastError = completionErrorMessage(error);
-        await this.context.stopCompletion().catch(() => {});
+        const context = this.context;
+        if (context) {await ignoreNativeFailure(() => context.stopCompletion());}
       }
       throw error;
     } finally {
@@ -293,7 +295,8 @@ export class LocalLlmService {
           yield { token, done: false };
         }
         if (Date.now() - start > request.timeoutMs) {
-          await this.context.stopCompletion().catch(() => {});
+          const context = this.context;
+          if (context) {await ignoreNativeFailure(() => context.stopCompletion());}
           throw new Error('Local response timed out.');
         }
         // Wait for the next callback or completion.
@@ -314,7 +317,8 @@ export class LocalLlmService {
 
   async cancel(): Promise<void> {
     this.generationId += 1;
-    if (this.context) {await this.context.stopCompletion().catch(() => {});}
+    const context = this.context;
+    if (context) {await ignoreNativeFailure(() => context.stopCompletion());}
     if (this.context) {this.state = 'ready';}
   }
 
@@ -326,8 +330,8 @@ export class LocalLlmService {
     this.projectorPath = null;
     this.visionReady = false;
     if (context) {
-      await context.releaseMultimodal().catch(() => {});
-      await context.release().catch(() => {});
+      await ignoreNativeFailure(() => context.releaseMultimodal());
+      await ignoreNativeFailure(() => context.release());
     }
     this.state = 'unloaded';
   }
@@ -339,4 +343,13 @@ function completionErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) {return error.message.trim();}
   if (typeof error === 'string' && error.trim()) {return error.trim();}
   return 'The local model failed without an error message.';
+}
+
+async function ignoreNativeFailure(action: () => Promise<void> | void): Promise<void> {
+  try {
+    await action();
+  } catch {
+    // Some llama.rn JSI builds throw synchronously while others reject a
+    // Promise. Cleanup must never replace the original model result/error.
+  }
 }

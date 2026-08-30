@@ -36,6 +36,9 @@ describe('MaculusNext local multimodal runtime', () => {
   it('retains the native multimodal error for an actionable UI diagnostic', async () => {
     const context = mockContext();
     context.completion.mockRejectedValue(new Error('Failed to evaluate chunks'));
+    // Some iOS llama.rn JSI builds return void from cleanup methods even
+    // though the TypeScript package declares Promise<void>.
+    context.stopCompletion.mockImplementation(() => undefined as any);
     initLlama.mockResolvedValue(context);
     const service = new LocalLlmService();
     await service.load('/models/lfm.gguf', '/models/mmproj.gguf');
@@ -48,6 +51,23 @@ describe('MaculusNext local multimodal runtime', () => {
     })).rejects.toThrow('Failed to evaluate chunks');
 
     expect(service.getLastError()).toBe('Failed to evaluate chunks');
+  });
+
+  it('accepts void-returning iOS JSI cleanup methods', async () => {
+    const context = mockContext();
+    context.stopCompletion.mockImplementation(() => undefined as any);
+    context.releaseMultimodal.mockImplementation(() => undefined as any);
+    context.release.mockImplementation(() => undefined as any);
+    initLlama.mockResolvedValue(context);
+    const service = new LocalLlmService();
+
+    await service.load('/models/lfm.gguf', '/models/mmproj.gguf');
+
+    await expect(service.cancel()).resolves.toBeUndefined();
+    await expect(service.release()).resolves.toBeUndefined();
+    expect(context.stopCompletion).toHaveBeenCalledTimes(1);
+    expect(context.releaseMultimodal).toHaveBeenCalledTimes(1);
+    expect(context.release).toHaveBeenCalledTimes(1);
   });
 });
 
