@@ -5,10 +5,14 @@ export type ModelAssetState = 'missing' | 'downloading' | 'paused' | 'ready' | '
 export interface ModelAssetStatus {
   state: ModelAssetState;
   path: string | null;
+  projectorPath: string | null;
   downloadedBytes: number;
   totalBytes: number;
   metered: boolean;
+  modelName?: string;
+  currentAsset?: string;
   conversationalSupported?: boolean;
+  visionSupported?: boolean;
   capabilityReason?: string;
   thermalThrottled?: boolean;
   thermalState?: string;
@@ -26,7 +30,8 @@ const nativeManager = NativeModules.MaculusModelManager as NativeModelManager | 
 
 export class ModelAssetService {
   private status: ModelAssetStatus = {
-    state: 'missing', path: null, downloadedBytes: 0, totalBytes: 695755488, metered: true,
+    state: 'missing', path: null, projectorPath: null,
+    downloadedBytes: 0, totalBytes: 1314006144, metered: true,
   };
   private listeners = new Set<(status: ModelAssetStatus) => void>();
   private subscription: { remove(): void } | null = null;
@@ -45,7 +50,7 @@ export class ModelAssetService {
     try {
       this.setStatus(normalize(await nativeManager.getStatus()));
     } catch (error: any) {
-      this.setStatus({ ...this.status, state: 'error', message: error?.message || 'Could not inspect conversational model.' });
+      this.setStatus({ ...this.status, state: 'error', message: error?.message || 'Could not inspect the private vision model.' });
     }
     return this.status;
   }
@@ -103,10 +108,17 @@ function normalize(status: ModelAssetStatus): ModelAssetStatus {
   return {
     state: status.state,
     path: status.path || null,
+    projectorPath: status.projectorPath || null,
     downloadedBytes: Number(status.downloadedBytes) || 0,
-    totalBytes: Number(status.totalBytes) || 695755488,
+    totalBytes: Number(status.totalBytes) || 1314006144,
     metered: Boolean(status.metered),
+    modelName: status.modelName || 'LFM2.5-VL-1.6B',
+    currentAsset: status.currentAsset,
     conversationalSupported: status.conversationalSupported !== false,
+    // Multimodal readiness must be explicitly reported by the native manager.
+    // Older Android builds only expose the text model and must not be presented
+    // as vision-capable merely because the field is absent.
+    visionSupported: status.visionSupported === true,
     capabilityReason: status.capabilityReason,
     thermalThrottled: Boolean(status.thermalThrottled),
     thermalState: status.thermalState || 'unknown',

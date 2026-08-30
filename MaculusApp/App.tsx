@@ -101,7 +101,7 @@ export default function App() {
     }
     Alert.alert(
       'Download over cellular?',
-      'The conversational model is approximately 696 MB. Safety guidance works without it.',
+      'The private vision model is approximately 1.3 GB. Safety guidance works without it.',
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Download', onPress: () => downloadConversationalModel(true) },
@@ -122,7 +122,7 @@ export default function App() {
     ? `Conversational model download paused at ${modelPercent}%`
     : modelStatus.state === 'error'
     ? `Conversational model error: ${modelStatus.message || 'unknown error'}`
-    : 'Conversational model not downloaded';
+    : 'Private vision and conversation model not downloaded';
 
   return (
     <SafeAreaView style={styles.container}>
@@ -214,14 +214,14 @@ export default function App() {
             {modelStatusText}
           </Text>
           <Text style={styles.modelLicense}>
-            Optional offline model · LFM Open License v1.0
+            Optional offline vision model · LFM Open License v1.0
           </Text>
 
           {modelStatus.state !== 'ready' && modelStatus.state !== 'downloading' && (
             <AccessibleButton
-              title="Download Conversational Guide (696 MB)"
+              title="Download Private Vision Guide (1.3 GB)"
               onPress={handleModelDownload}
-              accessibilityHint="Downloads the optional offline language model. Safety guidance works without it."
+              accessibilityHint="Downloads the optional offline vision and language model. Safety guidance works without it."
               color="#4F46E5"
               style={styles.modelButton}
             />
@@ -236,10 +236,10 @@ export default function App() {
           )}
           {modelStatus.state === 'ready' && (
             <AccessibleButton
-              title="Remove Conversational Model"
+              title="Remove Private Vision Model"
               onPress={() => Alert.alert(
-                'Remove conversational model?',
-                'Open conversation will be unavailable until it is downloaded again. Safety guidance is unaffected.',
+                'Remove private vision model?',
+                'Detailed vision and open conversation will be unavailable until it is downloaded again. Safety guidance is unaffected.',
                 [
                   { text: 'Cancel', style: 'cancel' },
                   { text: 'Remove', style: 'destructive', onPress: deleteConversationalModel },

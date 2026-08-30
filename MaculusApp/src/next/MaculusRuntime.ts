@@ -4,6 +4,7 @@ import { depthService } from '../services/DepthService';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
 import { keepAwakeService } from '../services/KeepAwakeService';
+import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { reIdService } from '../services/ReIdService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
 import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
@@ -37,6 +38,9 @@ export class MaculusRuntime {
   private lastDepthAt = 0;
   private lastReIdAt = 0;
   private lastFrameKey = '';
+  private latestVisionObservation: { frame: CapturedFrame; snapshot: NextSceneSnapshot; receivedAt: number } | null = null;
+  private modelUnsubscribe: (() => void) | null = null;
+  private modelPreparePromise: Promise<void> | null = null;
 
   getState(): NextRuntimeState {return this.state;}
 
@@ -44,6 +48,64 @@ export class MaculusRuntime {
     this.listeners.add(listener);
     listener(this.state);
     return () => this.listeners.delete(listener);
+  }
+
+  async prepareModelAssets(): Promise<void> {
+    if (!this.modelUnsubscribe) {
+      this.modelUnsubscribe = modelAssetService.subscribe(status => {
+        this.conversation.setDeviceCapability(
+          status.visionSupported !== false,
+          Boolean(status.thermalThrottled),
+        );
+        this.update({ model: nextModelState(status) });
+        if (
+          this.running &&
+          status.state === 'ready' &&
+          status.visionSupported === true &&
+          !this.conversation.isReady()
+        ) {
+          const generation = this.generation;
+          this.conversation.initialize().then(conversationReady => {
+            if (this.running && generation === this.generation) {this.update({ conversationReady });}
+          }).catch(error => console.warn('[MaculusNext] Vision model reload failed:', error));
+        }
+      });
+    }
+    if (this.modelPreparePromise) {return this.modelPreparePromise;}
+    this.modelPreparePromise = modelAssetService.initialize()
+      .then(status => {
+        this.update({ model: nextModelState(status) });
+      })
+      .finally(() => {
+        this.modelPreparePromise = null;
+      });
+    return this.modelPreparePromise;
+  }
+
+  async installPrivateVisionModel(allowCellular: boolean = false): Promise<void> {
+    await this.prepareModelAssets();
+    const current = modelAssetService.getStatus();
+    if (current.visionSupported === false) {
+      throw new Error(current.capabilityReason || 'This device cannot load the private vision model.');
+    }
+    const status = await modelAssetService.ensureDownloaded(allowCellular);
+    this.update({ model: nextModelState(status) });
+    if (this.running && status.state === 'ready') {
+      const generation = this.generation;
+      const conversationReady = await this.conversation.initialize();
+      if (this.running && generation === this.generation) {this.update({ conversationReady });}
+    }
+  }
+
+  async cancelPrivateVisionModelDownload(): Promise<void> {
+    const status = await modelAssetService.cancelDownload();
+    this.update({ model: nextModelState(status) });
+  }
+
+  async deletePrivateVisionModel(): Promise<void> {
+    await this.conversation.destroy();
+    const status = await modelAssetService.deleteModel();
+    this.update({ conversationReady: false, model: nextModelState(status) });
   }
 
   async start(): Promise<void> {
@@ -56,8 +118,11 @@ export class MaculusRuntime {
     this.lastDepthAt = 0;
     this.lastReIdAt = 0;
     this.lastFrameKey = '';
+    this.latestVisionObservation = null;
+    const preservedModel = this.state.model;
     this.update({
       ...cloneInitialState(),
+      model: preservedModel,
       phase: 'starting',
       sessionStartedAt: Date.now(),
       guidanceActive: true,
@@ -70,11 +135,12 @@ export class MaculusRuntime {
       // Safety starts before camera, depth, ReID, or conversational model
       // initialization. Optional AI must never delay obstacle monitoring.
       this.sensorLoop(generation).catch(error => console.warn('[MaculusNext] Sensor loop failed:', error));
+      this.prepareModelAssets().catch(error => console.warn('[MaculusNext] Model status failed:', error));
       let cameraReady = false;
       let visionBackend = 'unavailable';
       try {
-        const model = await detectionService.loadModels();
-        visionBackend = model.backend || 'native';
+        const detectorInfo = await detectionService.loadModels();
+        visionBackend = detectorInfo.backend || 'native';
         await deviceCameraService.start();
         cameraReady = true;
       } catch (error: any) {
@@ -133,18 +199,35 @@ export class MaculusRuntime {
     await this.cleanupServices();
     this.safety.reset();
     this.scene.reset();
-    this.update(cloneInitialState());
+    this.latestVisionObservation = null;
+    this.update({ ...cloneInitialState(), model: this.state.model });
   }
 
-  describeScene(): void {
-    const snapshot = this.scene.getSnapshot();
-    const sensor = this.safety.getState();
-    const sensorText = sensor.health === 'healthy'
-      ? ' The obstacle sensor is healthy.'
-      : sensor.distanceCm !== null
-      ? ` The obstacle sensor reports ${Math.round(sensor.distanceCm)} centimeters.`
-      : ' The obstacle sensor is unavailable, so distance safety is unknown.';
-    this.speech.speakConversation(snapshot.description + sensorText, `describe:${snapshot.revision}:${Date.now()}`);
+  async describeScene(): Promise<void> {
+    if (!this.running || this.state.descriptionInProgress) {return;}
+    const generation = this.generation;
+    const observation = this.currentVisionObservation();
+    const snapshot = observation?.snapshot || this.scene.getSnapshot();
+    const canUseVlm = Boolean(observation && this.conversation.isVisionReady());
+    this.update({ descriptionInProgress: canUseVlm });
+    if (canUseVlm) {
+      this.speech.speakSystem('Analyzing the current camera frame on this device.', 0, 'vlm-analyzing');
+    }
+    try {
+      const result = await this.conversation.describeFrame(
+        observation?.frame.base64 || null,
+        snapshot,
+        this.safety.getState(),
+      );
+      if (!this.running || generation !== this.generation) {return;}
+      this.update({
+        detailedDescription: result.text,
+        descriptionSource: result.source,
+      });
+      this.speech.speakConversation(result.text, `describe:${snapshot.revision}:${Date.now()}`);
+    } finally {
+      if (this.running && generation === this.generation) {this.update({ descriptionInProgress: false });}
+    }
   }
 
   repeatLast(): void {
@@ -190,7 +273,7 @@ export class MaculusRuntime {
     let previousFrameAt = Date.now();
     let smoothedFps = 0;
     while (this.running && generation === this.generation) {
-      if (!this.state.guidanceActive) {
+      if (!this.state.guidanceActive || this.state.descriptionInProgress) {
         await delay(150);
         previousFrameAt = Date.now();
         continue;
@@ -220,6 +303,7 @@ export class MaculusRuntime {
           detections,
           personEmbeddings: embeddings,
         });
+        this.latestVisionObservation = { frame, snapshot, receivedAt: now };
         const elapsed = Math.max(1, now - previousFrameAt);
         const currentFps = 1000 / elapsed;
         smoothedFps = smoothedFps === 0 ? currentFps : smoothedFps * 0.8 + currentFps * 0.2;
@@ -282,13 +366,19 @@ export class MaculusRuntime {
   private handleVoiceTurn = async (turn: ConversationTurn, fastCommand: VoiceCommand | null): Promise<void> => {
     if (!this.running) {return;}
     if (fastCommand && this.handleFastCommand(fastCommand)) {return;}
-    const answer = await this.conversation.respond(turn.transcript, this.scene.getSnapshot(), this.safety.getState());
+    const observation = this.currentVisionObservation();
+    const answer = await this.conversation.respond(
+      turn.transcript,
+      observation?.snapshot || this.scene.getSnapshot(),
+      this.safety.getState(),
+      observation?.frame.base64,
+    );
     if (this.running) {this.speech.speakConversation(answer, `answer:${turn.timestamp}`);}
   };
 
   private handleFastCommand(command: VoiceCommand): boolean {
     switch (command) {
-      case 'describe_scene': this.describeScene(); return true;
+      case 'describe_scene': this.describeScene().catch(error => console.warn('[MaculusNext] Description failed:', error)); return true;
       case 'repeat_guidance': this.repeatLast(); return true;
       case 'start_guidance': this.setGuidanceActive(true); return true;
       case 'stop_guidance': this.setGuidanceActive(false); return true;
@@ -308,6 +398,14 @@ export class MaculusRuntime {
       this.conversation.destroy(),
     ]);
     this.speech.stop();
+  }
+
+  private currentVisionObservation(): { frame: CapturedFrame; snapshot: NextSceneSnapshot; receivedAt: number } | null {
+    const observation = this.latestVisionObservation;
+    if (!observation || Date.now() - observation.receivedAt > 2500 || !this.state.cameraReady || !this.state.guidanceActive) {
+      return null;
+    }
+    return observation;
   }
 
   private update(patch: Partial<NextRuntimeState> | NextRuntimeState): void {
@@ -333,7 +431,22 @@ function cloneInitialState(): NextRuntimeState {
   return {
     ...INITIAL_NEXT_RUNTIME_STATE,
     sensor: { ...INITIAL_NEXT_RUNTIME_STATE.sensor },
+    model: { ...INITIAL_NEXT_RUNTIME_STATE.model },
     people: [],
+  };
+}
+
+function nextModelState(status: ModelAssetStatus): NextRuntimeState['model'] {
+  return {
+    state: status.state,
+    downloadedBytes: status.downloadedBytes,
+    totalBytes: status.totalBytes,
+    metered: status.metered,
+    modelName: status.modelName || 'LFM2.5-VL-1.6B',
+    currentAsset: status.currentAsset || null,
+    supported: status.visionSupported !== false,
+    capabilityReason: status.capabilityReason || null,
+    message: status.message || null,
   };
 }
 

@@ -1,0 +1,19 @@
+{
+  "model": "LiquidAI/LFM2.5-VL-1.6B-GGUF",
+  "revision": "36fc16bc95133424921bcc3da009e83b2f23ffb5",
+  "license": "LFM Open License v1.0",
+  "runtime": "llama.cpp libmtmd through llama.rn 0.12.9",
+  "assets": [
+    {
+      "filename": "LFM2.5-VL-1.6B-Q4_K_M.gguf",
+      "bytes": 730896256,
+      "sha256": "aefc3c97c9eb30d9c0dd6af4c38250f5f5106b57c8cf92de7914c7d0a9c94da2"
+    },
+    {
+      "filename": "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf",
+      "bytes": 583109888,
+      "sha256": "2ce89e610c56f3198ece2b86cf61743a08b9307279c89125eb2412ebb908689d"
+    }
+  ],
+  "purpose": "Optional, private on-device scene description and conversation. Safety inference remains deterministic."
+}

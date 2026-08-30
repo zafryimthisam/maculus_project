@@ -130,17 +130,17 @@ NativeModules.MaculusKeepAwake = {
 
 NativeModules.MaculusModelManager = {
   getStatus: jest.fn().mockResolvedValue({
-    state: 'missing', path: null, downloadedBytes: 0, totalBytes: 695755488,
-    metered: false, conversationalSupported: true,
+    state: 'missing', path: null, projectorPath: null, downloadedBytes: 0, totalBytes: 1314006144,
+    metered: false, conversationalSupported: true, visionSupported: true, modelName: 'LFM2.5-VL-1.6B',
   }),
   startDownload: jest.fn().mockRejectedValue(Object.assign(new Error('Download disabled in tests'), { code: 'TEST' })),
   cancelDownload: jest.fn().mockResolvedValue({
-    state: 'paused', path: null, downloadedBytes: 0, totalBytes: 695755488,
-    metered: false, conversationalSupported: true,
+    state: 'paused', path: null, projectorPath: null, downloadedBytes: 0, totalBytes: 1314006144,
+    metered: false, conversationalSupported: true, visionSupported: true, modelName: 'LFM2.5-VL-1.6B',
   }),
   deleteModel: jest.fn().mockResolvedValue({
-    state: 'missing', path: null, downloadedBytes: 0, totalBytes: 695755488,
-    metered: false, conversationalSupported: true,
+    state: 'missing', path: null, projectorPath: null, downloadedBytes: 0, totalBytes: 1314006144,
+    metered: false, conversationalSupported: true, visionSupported: true, modelName: 'LFM2.5-VL-1.6B',
   }),
   addListener: jest.fn(),
   removeListeners: jest.fn(),

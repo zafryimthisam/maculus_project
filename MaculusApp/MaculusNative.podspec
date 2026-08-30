@@ -21,7 +21,7 @@ Pod::Spec.new do |spec|
     'android/app/src/main/assets/person_reid_osnet_x0_25.onnx.sha256',
     'android/app/src/main/assets/wakeword/*.onnx',
     'src/models/LFM_OPEN_LICENSE.txt',
-    'src/models/lfm2.5-1.2b-qad-q4_0.provenance.json'
+    'src/models/lfm2.5-vl-1.6b-q4_k_m.provenance.json'
   ]
 
   spec.frameworks = 'AVFoundation', 'Accelerate', 'CryptoKit', 'ImageIO', 'Network', 'Speech', 'UIKit'

@@ -9,10 +9,25 @@ export interface LocalLlmCompletionRequest {
   timeoutMs: number;
 }
 
+export interface LocalVisionCompletionRequest {
+  imageBase64: string;
+  prompt: string;
+  maxTokens: number;
+  timeoutMs: number;
+}
+
 type LlamaContextLike = {
   completion(params: Record<string, unknown>, callback?: (token: { token?: string }) => void): Promise<{ text?: string; content?: string }>;
   stopCompletion(): Promise<void>;
   clearCache(clearData?: boolean): Promise<void>;
+  initMultimodal(params: {
+    path: string;
+    use_gpu?: boolean;
+    image_min_tokens?: number;
+    image_max_tokens?: number;
+  }): Promise<boolean>;
+  getMultimodalSupport(): Promise<{ vision: boolean; audio: boolean }>;
+  releaseMultimodal(): Promise<void>;
   release(): Promise<void>;
 };
 
@@ -26,16 +41,20 @@ export class LocalLlmService {
   private state: LocalLlmState = 'unloaded';
   private generationId = 0;
   private modelPath: string | null = null;
+  private projectorPath: string | null = null;
+  private visionReady = false;
   private lastError: string | null = null;
   private thermalThrottled = false;
   private lastCompletionEndedAt = 0;
 
   getState(): LocalLlmState {return this.state;}
   getLastError(): string | null {return this.lastError;}
+  isVisionReady(): boolean {return this.state === 'ready' && this.visionReady;}
   setThermalThrottled(throttled: boolean): void {this.thermalThrottled = throttled;}
 
-  async load(modelPath: string): Promise<boolean> {
-    if (this.context && this.modelPath === modelPath) {return true;}
+  async load(modelPath: string, projectorPath?: string | null): Promise<boolean> {
+    const requestedProjector = projectorPath || null;
+    if (this.context && this.modelPath === modelPath && this.projectorPath === requestedProjector) {return true;}
     await this.release();
     this.state = 'loading';
     this.lastError = null;
@@ -47,17 +66,45 @@ export class LocalLlmService {
         model: modelPath.startsWith('file://') ? modelPath : `file://${modelPath}`,
         n_ctx: 2048,
         n_batch: 128,
+        n_parallel: 1,
         n_threads: this.thermalThrottled ? 1 : Platform.OS === 'android' ? 2 : 4,
         n_gpu_layers: Platform.OS === 'ios' ? 99 : 0,
+        flash_attn_type: 'auto',
         use_mmap: true,
         use_mlock: false,
+        // Every visual turn is rebuilt from a fresh camera frame, so retaining
+        // hybrid-model prefix snapshots only wastes the default memory budget.
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 0,
+        ctx_shift: requestedProjector ? false : true,
       });
+      if (requestedProjector) {
+        const initialized = await this.context.initMultimodal({
+          path: requestedProjector.startsWith('file://') ? requestedProjector : `file://${requestedProjector}`,
+          use_gpu: Platform.OS === 'ios',
+          image_min_tokens: 64,
+          image_max_tokens: 256,
+        });
+        const support = initialized ? await this.context.getMultimodalSupport() : { vision: false };
+        if (!initialized || !support.vision) {
+          throw new Error('The installed model did not initialize vision support.');
+        }
+        this.visionReady = true;
+      }
       this.modelPath = modelPath;
+      this.projectorPath = requestedProjector;
       this.state = 'ready';
       return true;
     } catch (error: any) {
+      const failedContext = this.context;
       this.context = null;
       this.modelPath = null;
+      this.projectorPath = null;
+      this.visionReady = false;
+      if (failedContext) {
+        await failedContext.releaseMultimodal().catch(() => {});
+        await failedContext.release().catch(() => {});
+      }
       this.state = 'error';
       this.lastError = error?.message || 'The local language model could not be loaded.';
       return false;
@@ -65,7 +112,7 @@ export class LocalLlmService {
   }
 
   async complete(request: LocalLlmCompletionRequest): Promise<string> {
-    if (!this.context || (this.state !== 'ready' && this.state !== 'generating')) {
+    if (!this.context || this.state !== 'ready') {
       throw new Error('Conversational model is not ready.');
     }
     const generation = ++this.generationId;
@@ -99,6 +146,58 @@ export class LocalLlmService {
       });
       const result = await Promise.race([completionPromise, timeoutPromise]);
       if (generation !== this.generationId) {throw new Error('Local response was cancelled.');}
+      return (result.text || result.content || '').trim();
+    } catch (error) {
+      if (generation === this.generationId) {
+        await this.context.stopCompletion().catch(() => {});
+      }
+      throw error;
+    } finally {
+      if (timeout) {clearTimeout(timeout);}
+      this.lastCompletionEndedAt = Date.now();
+      if (generation === this.generationId && this.context) {this.state = 'ready';}
+    }
+  }
+
+  async completeVision(request: LocalVisionCompletionRequest): Promise<string> {
+    if (!this.context || !this.visionReady || this.state !== 'ready') {
+      throw new Error('On-device vision model is not ready.');
+    }
+    const generation = ++this.generationId;
+    this.state = 'generating';
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      if (this.thermalThrottled) {
+        const remainingCooldown = 1500 - (Date.now() - this.lastCompletionEndedAt);
+        if (remainingCooldown > 0) {
+          await new Promise<void>(resolve => setTimeout(resolve, remainingCooldown));
+        }
+        if (generation !== this.generationId) {throw new Error('Visual description was cancelled.');}
+      }
+      await this.context.clearCache(true);
+      const imageUrl = request.imageBase64.startsWith('data:')
+        ? request.imageBase64
+        : `data:image/jpeg;base64,${request.imageBase64}`;
+      const completionPromise = this.context.completion({
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: request.prompt },
+            { type: 'image_url', image_url: { url: imageUrl } },
+          ],
+        }],
+        jinja: true,
+        temperature: 0.1,
+        min_p: 0.15,
+        repeat_penalty: 1.05,
+        n_predict: this.thermalThrottled ? Math.min(request.maxTokens, 72) : request.maxTokens,
+        stop: ['<|endoftext|>', '<|im_end|>', '<|end_of_turn|>'],
+      });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('On-device visual description timed out.')), request.timeoutMs);
+      });
+      const result = await Promise.race([completionPromise, timeoutPromise]);
+      if (generation !== this.generationId) {throw new Error('Visual description was cancelled.');}
       return (result.text || result.content || '').trim();
     } catch (error) {
       if (generation === this.generationId) {
@@ -208,7 +307,12 @@ export class LocalLlmService {
     const context = this.context;
     this.context = null;
     this.modelPath = null;
-    if (context) {await context.release().catch(() => {});}
+    this.projectorPath = null;
+    this.visionReady = false;
+    if (context) {
+      await context.releaseMultimodal().catch(() => {});
+      await context.release().catch(() => {});
+    }
     this.state = 'unloaded';
   }
 }

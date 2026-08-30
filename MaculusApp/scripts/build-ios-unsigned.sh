@@ -72,11 +72,14 @@ fi
 
 cd "$APP_ROOT"
 
+export RNLLAMA_BUILD_FROM_SOURCE=1
+export RNLLAMA_SKIP_POSTINSTALL=1
+export RCT_NEW_ARCH_ENABLED=1
+
 log "Installing JavaScript dependencies"
 npm ci --no-audit --no-fund
 
 log "Installing CocoaPods dependencies and the local iOS vision modules"
-export RNLLAMA_BUILD_FROM_SOURCE=1
 bundle config set --local path vendor/bundle
 bundle install --jobs 4 --retry 2
 (
@@ -142,6 +145,7 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   DEVELOPMENT_TEAM="" \
+  RCT_NEW_ARCH_ENABLED=1 \
   COMPILER_INDEX_STORE_ENABLE=NO \
   build 2>&1 | tee "$BUILD_LOG"
 XCODE_STATUS=${PIPESTATUS[0]}
@@ -165,7 +169,7 @@ for model_name in \
   depth_anything_v2_small_uint8_256.onnx \
   person_reid_osnet_x0_25.onnx \
   LFM_OPEN_LICENSE.txt \
-  lfm2.5-1.2b-qad-q4_0.provenance.json \
+  lfm2.5-vl-1.6b-q4_k_m.provenance.json \
   melspectrogram.onnx \
   embedding_model.onnx \
   hey_livekit.onnx; do

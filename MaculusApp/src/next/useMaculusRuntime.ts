@@ -8,6 +8,11 @@ export function useMaculusRuntime() {
   useEffect(() => maculusRuntime.subscribe(setState), []);
 
   useEffect(() => {
+    maculusRuntime.prepareModelAssets()
+      .catch(error => console.warn('[MaculusNext] Could not inspect private model:', error));
+  }, []);
+
+  useEffect(() => {
     const subscription = AppState.addEventListener('change', nextState => {
       // Camera guidance cannot run in the iOS background. The accessory must
       // provide its own physical alert when the app is suspended.
@@ -25,5 +30,8 @@ export function useMaculusRuntime() {
     describeScene: () => maculusRuntime.describeScene(),
     repeatLast: () => maculusRuntime.repeatLast(),
     setGuidanceActive: (active: boolean) => maculusRuntime.setGuidanceActive(active),
+    installPrivateVisionModel: (allowCellular: boolean = false) => maculusRuntime.installPrivateVisionModel(allowCellular),
+    cancelPrivateVisionModelDownload: () => maculusRuntime.cancelPrivateVisionModelDownload(),
+    deletePrivateVisionModel: () => maculusRuntime.deletePrivateVisionModel(),
   };
 }

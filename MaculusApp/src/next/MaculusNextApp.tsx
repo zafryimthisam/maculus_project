@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  Alert,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -11,9 +12,41 @@ import {
 import { useMaculusRuntime } from './useMaculusRuntime';
 
 export default function MaculusNextApp(): React.JSX.Element {
-  const { state, start, stop, describeScene, repeatLast, setGuidanceActive } = useMaculusRuntime();
+  const {
+    state,
+    start,
+    stop,
+    describeScene,
+    repeatLast,
+    setGuidanceActive,
+    installPrivateVisionModel,
+    cancelPrivateVisionModelDownload,
+    deletePrivateVisionModel,
+  } = useMaculusRuntime();
   const active = state.phase !== 'idle' && state.phase !== 'error';
   const busy = state.phase === 'starting' || state.phase === 'stopping';
+  const modelPercent = state.model.totalBytes > 0
+    ? Math.min(100, Math.round(state.model.downloadedBytes * 100 / state.model.totalBytes))
+    : 0;
+
+  const installModel = async (allowCellular: boolean = false) => {
+    try {
+      await installPrivateVisionModel(allowCellular);
+    } catch (error: any) {
+      if (error?.code === 'MODEL_CELLULAR_CONFIRMATION_REQUIRED') {
+        Alert.alert(
+          'Use cellular data?',
+          'The private vision model is approximately 1.3 GB. Camera images will still stay on this device.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Download', onPress: () => installModel(true) },
+          ],
+        );
+        return;
+      }
+      Alert.alert('Vision model unavailable', error?.message || 'The model could not be installed.');
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -42,7 +75,11 @@ export default function MaculusNextApp(): React.JSX.Element {
 
         {active && (
           <View style={styles.actions}>
-            <ActionButton label="Describe scene" onPress={describeScene} />
+            <ActionButton
+              label={state.descriptionInProgress ? 'Analyzing scene…' : state.conversationReady ? 'Describe scene with AI' : 'Describe scene'}
+              onPress={describeScene}
+              disabled={state.descriptionInProgress}
+            />
             <ActionButton label="Repeat guidance" onPress={repeatLast} />
             <ActionButton
               label={state.guidanceActive ? 'Pause camera' : 'Resume camera'}
@@ -59,11 +96,47 @@ export default function MaculusNextApp(): React.JSX.Element {
           )}
         </View>
 
+        {state.detailedDescription.length > 0 && (
+          <View style={styles.card} accessibilityLiveRegion="polite">
+            <Text style={styles.cardLabel}>
+              {state.descriptionSource === 'vision-language' ? 'ON-DEVICE AI DESCRIPTION' : 'VERIFIED SCENE DESCRIPTION'}
+            </Text>
+            <Text style={styles.cardBody}>{state.detailedDescription}</Text>
+          </View>
+        )}
+
         <View style={styles.statusGrid}>
           <StatusItem label="Camera" value={state.cameraReady && state.guidanceActive ? 'Active' : 'Paused'} />
           <StatusItem label="Voice" value={state.voiceStatus.replace(/_/g, ' ')} />
-          <StatusItem label="Local AI" value={state.conversationReady ? 'Ready' : 'Scene only'} />
+          <StatusItem label="Local AI" value={state.conversationReady ? 'Vision + chat' : 'Verified scene'} />
           <StatusItem label="Vision" value={state.fps > 0 ? `${state.fps} FPS` : state.visionBackend} />
+        </View>
+
+
+        <View style={styles.modelCard}>
+          <Text style={styles.cardLabel}>OPTIONAL PRIVATE VISION AI</Text>
+          <Text style={styles.modelTitle}>{state.model.modelName}</Text>
+          <Text style={styles.modelBody}>{modelStatusText(state.model, modelPercent, state.conversationReady)}</Text>
+          <Text style={styles.modelFootnote}>
+            About 1.3 GB · runs locally · camera frames are never uploaded
+          </Text>
+          {!state.model.supported ? null : state.model.state === 'downloading' ? (
+            <ActionButton label={`Pause download at ${modelPercent}%`} onPress={cancelPrivateVisionModelDownload} />
+          ) : state.model.state === 'ready' ? (
+            <ActionButton
+              label="Remove private vision model"
+              onPress={() => Alert.alert(
+                'Remove private vision model?',
+                'Detailed AI descriptions and general conversation will stop. Verified object and obstacle guidance will continue.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Remove', style: 'destructive', onPress: deletePrivateVisionModel },
+                ],
+              )}
+            />
+          ) : (
+            <ActionButton label={state.model.state === 'paused' ? 'Resume vision model download' : 'Install private vision AI'} onPress={() => installModel(false)} />
+          )}
         </View>
 
         <Text style={styles.privacy}>{state.privacyMessage}</Text>
@@ -75,12 +148,32 @@ export default function MaculusNextApp(): React.JSX.Element {
   );
 }
 
-function ActionButton({ label, onPress }: { label: string; onPress(): void }): React.JSX.Element {
+function ActionButton({ label, onPress, disabled = false }: { label: string; onPress(): void; disabled?: boolean }): React.JSX.Element {
   return (
-    <TouchableOpacity accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={styles.actionButton}>
+    <TouchableOpacity
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={[styles.actionButton, disabled && styles.disabledButton]}
+    >
       <Text style={styles.actionButtonText}>{label}</Text>
     </TouchableOpacity>
   );
+}
+
+function modelStatusText(
+  model: { state: string; supported: boolean; capabilityReason: string | null; currentAsset: string | null; message: string | null },
+  percent: number,
+  loaded: boolean,
+): string {
+  if (!model.supported) {return model.capabilityReason || 'This device cannot load the high-accuracy vision model.';}
+  if (model.state === 'ready') {return loaded ? 'Installed and ready for detailed scene descriptions.' : 'Installed. It loads when a guidance session starts.';}
+  if (model.state === 'downloading') {return `Downloading ${model.currentAsset || 'model'}, ${percent} percent complete.`;}
+  if (model.state === 'paused') {return `Download paused at ${percent} percent.`;}
+  if (model.state === 'error') {return model.message || 'The model download encountered an error.';}
+  return 'Not installed. Verified YOLO scene and obstacle guidance work without it.';
 }
 
 function StatusItem({ label, value }: { label: string; value: string }): React.JSX.Element {
@@ -133,6 +226,10 @@ const styles = StyleSheet.create({
   statusItem: { width: '48%', backgroundColor: '#0d1a2a', borderRadius: 14, padding: 14 },
   statusLabel: { color: '#8fa2ba', fontSize: 13, fontWeight: '700' },
   statusValue: { color: '#ffffff', fontSize: 16, fontWeight: '800', marginTop: 4, textTransform: 'capitalize' },
+  modelCard: { backgroundColor: '#13243a', borderRadius: 18, borderWidth: 1, borderColor: '#36506d', padding: 19, marginTop: 18, gap: 8 },
+  modelTitle: { color: '#ffffff', fontSize: 20, fontWeight: '800' },
+  modelBody: { color: '#e4ebf5', fontSize: 16, lineHeight: 23 },
+  modelFootnote: { color: '#8fe4d7', fontSize: 13, lineHeight: 19, marginBottom: 4 },
   privacy: { color: '#8fe4d7', fontSize: 15, lineHeight: 22, marginTop: 22 },
   disclaimer: { color: '#8292a7', fontSize: 13, lineHeight: 19, marginTop: 12 },
 });

@@ -13,12 +13,31 @@ MaculusNext is the clean runtime and the default application entry registered by
 - `SessionSceneStore` owns temporal scene state, duplicate-frame rejection,
   object occlusion and random person aliases. Its memory is erased on session
   stop.
-- `ConversationService` answers scene questions deterministically. The local
-  language model handles general conversation but is blocked from producing
-  movement instructions.
+- `ConversationService` uses the optional LFM2.5-VL-1.6B model for detailed
+  on-demand descriptions of a recent frame. It grounds the prompt with tracked
+  objects, rejects generated mobility instructions, and falls back to the
+  deterministic scene snapshot on any error. The same local backbone handles
+  general conversation.
 - `MaculusRuntime` owns lifecycle, camera inference, sensor polling and voice
   command coordination. React renders compact state; it never receives a camera
   preview.
+
+## Detailed scene description
+
+The default runtime continuously performs YOLO, depth and anonymous ReID. A
+"Describe scene" request uses the newest frame that has completed that pipeline
+and is no more than 2.5 seconds old. If the private VLM is installed, the frame
+is passed to llama.cpp/libmtmd entirely on device. Ultrasonic facts are appended
+after generation and are never supplied by the VLM.
+
+The optional download contains two checksum-pinned files (about 1.3 GB total):
+
+- LFM2.5-VL-1.6B Q4_K_M language model
+- Q8 SigLIP2 multimodal projector
+
+The VLM is informational only. It cannot publish safety events, update tracked
+objects, identify people, or issue movement guidance. See
+`src/models/VLM_SELECTION.md` for the selection rationale and benchmark caveats.
 
 ## Sensor response contract
 
@@ -47,6 +66,6 @@ only safety mechanism.
 ## Known migration boundary
 
 The existing native camera detector still passes JPEG base64 through the React
-Native bridge. MaculusNext isolates that cost behind `DeviceCameraService`; the
-next native milestone is a Swift `CVPixelBuffer -> Core ML/Vision -> scene
-observation` module that returns only compact observations.
+Native bridge. MaculusNext isolates that cost behind `DeviceCameraService`; a
+future native frame broker should feed YOLO and libmtmd from one encoded frame
+without another JavaScript copy.

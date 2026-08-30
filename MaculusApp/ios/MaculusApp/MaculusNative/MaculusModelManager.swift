@@ -6,13 +6,37 @@ import UIKit
 
 @objc(MaculusModelManager)
 final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
-  private static let filename = "LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf"
-  private static let expectedSize: Int64 = 695_755_488
-  private static let expectedSHA256 = "bb741ebb106d543e9de114b843a3d3d73d51c74b5801e69da2abde821a0cb3e1"
-  private static let minimumFreeSpace: Int64 = 1_100_000_000
-  private static let modelURL = URL(string:
-    "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/afbd8eaeab5dd94ba0b079ebfb02517d19641e38/LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf?download=true"
-  )!
+  private struct DownloadAsset {
+    let label: String
+    let filename: String
+    let expectedSize: Int64
+    let expectedSHA256: String
+    let sourceURL: URL
+  }
+
+  private static let assets = [
+    DownloadAsset(
+      label: "vision language model",
+      filename: "LFM2.5-VL-1.6B-Q4_K_M.gguf",
+      expectedSize: 730_896_256,
+      expectedSHA256: "aefc3c97c9eb30d9c0dd6af4c38250f5f5106b57c8cf92de7914c7d0a9c94da2",
+      sourceURL: URL(string:
+        "https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/36fc16bc95133424921bcc3da009e83b2f23ffb5/LFM2.5-VL-1.6B-Q4_K_M.gguf?download=true"
+      )!
+    ),
+    DownloadAsset(
+      label: "vision encoder",
+      filename: "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf",
+      expectedSize: 583_109_888,
+      expectedSHA256: "2ce89e610c56f3198ece2b86cf61743a08b9307279c89125eb2412ebb908689d",
+      sourceURL: URL(string:
+        "https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/36fc16bc95133424921bcc3da009e83b2f23ffb5/mmproj-LFM2.5-VL-1.6b-Q8_0.gguf?download=true"
+      )!
+    ),
+  ]
+  private static let minimumFreeSpaceAfterDownload: Int64 = 550_000_000
+  private static let legacyFilenames = ["LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf"]
+  private static var totalSize: Int64 { assets.reduce(0) { $0 + $1.expectedSize } }
 
   private let queue = DispatchQueue(label: "com.maculus.model-download", qos: .utility)
   private let pathMonitor = NWPathMonitor()
@@ -20,11 +44,12 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
   private var hasListeners = false
   private var task: URLSessionDataTask?
   private var fileHandle: FileHandle?
-  private var downloadedBytes: Int64 = 0
+  private var activeAssetIndex: Int?
+  private var activeDownloadedBytes: Int64 = 0
   private var completion: (resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock)?
   private var cancelled = false
   private var memoryPressureUntil: Date?
-  private var verifiedInstalledFingerprint: String?
+  private var verifiedInstalledFingerprints: [String: String] = [:]
   private lazy var session = URLSession(
     configuration: .default,
     delegate: self,
@@ -103,16 +128,20 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
         if !allowCellular && self.metered {
           reject(
             "MODEL_CELLULAR_CONFIRMATION_REQUIRED",
-            "Connect to Wi-Fi or confirm cellular download.",
+            "Connect to Wi-Fi or confirm the 1.3 GB private vision model download.",
             nil
           )
           return
         }
         try self.modelDirectory().createDirectoryIfNeeded()
-        guard try self.availableCapacity() >= Self.minimumFreeSpace else {
+        try self.removeLegacyAssets()
+        try self.removeInvalidInstalledAssets()
+        let required = try self.remainingDownloadBytes() + Self.minimumFreeSpaceAfterDownload
+        guard try self.availableCapacity() >= required else {
+          let gigabytes = Double(required) / 1_000_000_000
           reject(
             "MODEL_INSUFFICIENT_STORAGE",
-            "At least 1.1 GB of free app storage is required.",
+            String(format: "At least %.1f GB of free app storage is required.", gigabytes),
             nil
           )
           return
@@ -123,25 +152,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
         }
         self.cancelled = false
         self.completion = (resolve, reject)
-        let partial = try self.partURL()
-        if !FileManager.default.fileExists(atPath: partial.path) {
-          FileManager.default.createFile(atPath: partial.path, contents: nil)
-        }
-        self.downloadedBytes = (try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-        if self.downloadedBytes >= Self.expectedSize {
-          try FileManager.default.removeItem(at: partial)
-          FileManager.default.createFile(atPath: partial.path, contents: nil)
-          self.downloadedBytes = 0
-        }
-        var request = URLRequest(url: Self.modelURL)
-        request.timeoutInterval = 30
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        if self.downloadedBytes > 0 {
-          request.setValue("bytes=\(self.downloadedBytes)-", forHTTPHeaderField: "Range")
-        }
-        self.task = self.session.dataTask(with: request)
-        self.task?.resume()
-        self.emit(state: "downloading")
+        try self.startNextMissingAsset()
       } catch {
         self.completion = nil
         reject("MODEL_DOWNLOAD_FAILED", error.localizedDescription, error)
@@ -159,6 +170,8 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
       self.task = nil
       self.fileHandle?.closeFile()
       self.fileHandle = nil
+      self.activeAssetIndex = nil
+      self.activeDownloadedBytes = 0
       self.completion?.reject("MODEL_DOWNLOAD_CANCELLED", "Model download cancelled.", nil)
       self.completion = nil
       self.emit(state: "paused")
@@ -177,11 +190,19 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
       self.task = nil
       self.fileHandle?.closeFile()
       self.fileHandle = nil
-      self.verifiedInstalledFingerprint = nil
+      self.activeAssetIndex = nil
+      self.activeDownloadedBytes = 0
+      self.verifiedInstalledFingerprints.removeAll()
+      self.completion?.reject("MODEL_DOWNLOAD_CANCELLED", "Model download cancelled because the model was removed.", nil)
+      self.completion = nil
       do {
-        for url in [try self.modelURL(), try self.partURL()] where FileManager.default.fileExists(atPath: url.path) {
-          try FileManager.default.removeItem(at: url)
+        for asset in Self.assets {
+          for url in [try self.installedURL(asset), try self.partialURL(asset)]
+          where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+          }
         }
+        try self.removeLegacyAssets()
         resolve(try self.status(forcedState: "missing"))
       } catch {
         reject("MODEL_DELETE_FAILED", error.localizedDescription, error)
@@ -197,13 +218,16 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
   ) {
     queue.async {
       do {
+        guard let asset = self.activeAsset else {
+          throw ModelDownloadError.noActiveAsset
+        }
         guard let http = response as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
           throw ModelDownloadError.http((response as? HTTPURLResponse)?.statusCode ?? -1)
         }
-        let partial = try self.partURL()
-        if self.downloadedBytes > 0 && http.statusCode != 206 {
+        let partial = try self.partialURL(asset)
+        if self.activeDownloadedBytes > 0 && http.statusCode != 206 {
           try Data().write(to: partial, options: .atomic)
-          self.downloadedBytes = 0
+          self.activeDownloadedBytes = 0
         }
         self.fileHandle = try FileHandle(forWritingTo: partial)
         self.fileHandle?.seekToEndOfFile()
@@ -219,8 +243,8 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     queue.async {
       guard !self.cancelled else { return }
       self.fileHandle?.write(data)
-      self.downloadedBytes += Int64(data.count)
-      if self.downloadedBytes % (2 * 1024 * 1024) < Int64(data.count) {
+      self.activeDownloadedBytes += Int64(data.count)
+      if self.activeDownloadedBytes % (2 * 1024 * 1024) < Int64(data.count) {
         self.emit(state: "downloading")
       }
     }
@@ -235,27 +259,69 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
       if self.cancelled { return }
       if let error { self.finish(error: error); return }
       do {
-        let partial = try self.partURL()
-        guard self.downloadedBytes == Self.expectedSize else {
-          throw ModelDownloadError.size(self.downloadedBytes)
+        guard let asset = self.activeAsset else { throw ModelDownloadError.noActiveAsset }
+        let partial = try self.partialURL(asset)
+        guard self.activeDownloadedBytes == asset.expectedSize else {
+          throw ModelDownloadError.size(asset.label, self.activeDownloadedBytes)
         }
-        guard try self.sha256(partial) == Self.expectedSHA256 else {
+        guard try self.sha256(partial) == asset.expectedSHA256 else {
           try? FileManager.default.removeItem(at: partial)
-          throw ModelDownloadError.checksum
+          throw ModelDownloadError.checksum(asset.label)
         }
-        let installed = try self.modelURL()
+        let installed = try self.installedURL(asset)
         if FileManager.default.fileExists(atPath: installed.path) {
           try FileManager.default.removeItem(at: installed)
         }
         try FileManager.default.moveItem(at: partial, to: installed)
-        self.verifiedInstalledFingerprint = self.fileFingerprint(installed)
-        self.emit(state: "ready")
-        self.completion?.resolve(try self.status(forcedState: "ready"))
-        self.completion = nil
+        try FileManager.default.setAttributes(
+          [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+          ofItemAtPath: installed.path
+        )
+        self.verifiedInstalledFingerprints[asset.filename] = self.fileFingerprint(installed)
+        self.activeAssetIndex = nil
+        self.activeDownloadedBytes = 0
+        try self.startNextMissingAsset()
       } catch {
         self.finish(error: error)
       }
     }
+  }
+
+  private var activeAsset: DownloadAsset? {
+    guard let index = activeAssetIndex, Self.assets.indices.contains(index) else { return nil }
+    return Self.assets[index]
+  }
+
+  private func startNextMissingAsset() throws {
+    guard let index = Self.assets.indices.first(where: { !isAssetInstalled(Self.assets[$0]) }) else {
+      activeAssetIndex = nil
+      activeDownloadedBytes = 0
+      emit(state: "ready")
+      completion?.resolve(try status(forcedState: "ready"))
+      completion = nil
+      return
+    }
+    let asset = Self.assets[index]
+    activeAssetIndex = index
+    let partial = try partialURL(asset)
+    if !FileManager.default.fileExists(atPath: partial.path) {
+      FileManager.default.createFile(atPath: partial.path, contents: nil)
+    }
+    activeDownloadedBytes = fileSize(partial)
+    if activeDownloadedBytes >= asset.expectedSize {
+      try FileManager.default.removeItem(at: partial)
+      FileManager.default.createFile(atPath: partial.path, contents: nil)
+      activeDownloadedBytes = 0
+    }
+    var request = URLRequest(url: asset.sourceURL)
+    request.timeoutInterval = 30
+    request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+    if activeDownloadedBytes > 0 {
+      request.setValue("bytes=\(activeDownloadedBytes)-", forHTTPHeaderField: "Range")
+    }
+    task = session.dataTask(with: request)
+    task?.resume()
+    emit(state: "downloading")
   }
 
   private func finish(error: Error) {
@@ -263,6 +329,8 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     task = nil
     fileHandle?.closeFile()
     fileHandle = nil
+    activeAssetIndex = nil
+    activeDownloadedBytes = 0
     emit(state: "error", message: error.localizedDescription)
     completion?.reject("MODEL_DOWNLOAD_FAILED", error.localizedDescription, error)
     completion = nil
@@ -270,18 +338,22 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
 
   private func status(forcedState: String? = nil) throws -> [String: Any] {
     let installed = isInstalled()
-    let partial = try partURL()
-    let partialBytes = (try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-    let state = forcedState ?? (installed ? "ready" : partialBytes > 0 ? "paused" : "missing")
-    let capability = conversationalCapability()
+    let progress = try progressBytes()
+    let hasPartial = progress > installedBytes()
+    let state = forcedState ?? (installed ? "ready" : task != nil ? "downloading" : hasPartial ? "paused" : "missing")
+    let capability = assistantCapability()
     let thermal = thermalStatus()
     return [
       "state": state,
-      "path": installed ? try modelURL().path : NSNull(),
-      "downloadedBytes": installed ? Self.expectedSize : partialBytes,
-      "totalBytes": Self.expectedSize,
+      "path": installed ? try installedURL(Self.assets[0]).path : NSNull(),
+      "projectorPath": installed ? try installedURL(Self.assets[1]).path : NSNull(),
+      "downloadedBytes": installed ? Self.totalSize : progress,
+      "totalBytes": Self.totalSize,
       "metered": metered,
+      "modelName": "LFM2.5-VL-1.6B",
+      "currentAsset": activeAsset.map { $0.label as Any } ?? NSNull(),
       "conversationalSupported": capability.supported,
+      "visionSupported": capability.supported,
       "capabilityReason": capability.reason.map { $0 as Any } ?? NSNull(),
       "thermalThrottled": thermal.throttled,
       "thermalState": thermal.name,
@@ -290,21 +362,25 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
 
   private func emit(state: String, message: String? = nil) {
     guard hasListeners else { return }
-    var body: [String: Any] = [
-      "state": state,
-      "downloadedBytes": downloadedBytes,
-      "totalBytes": Self.expectedSize,
-    ]
-    if let message { body["message"] = message }
-    sendEvent(withName: "MaculusModelDownloadProgress", body: body)
+    do {
+      var body = try status(forcedState: state)
+      if let message { body["message"] = message }
+      sendEvent(withName: "MaculusModelDownloadProgress", body: body)
+    } catch {
+      sendEvent(withName: "MaculusModelDownloadProgress", body: [
+        "state": "error",
+        "message": error.localizedDescription,
+      ])
+    }
   }
 
   private func emitCapability() {
     guard hasListeners else { return }
-    let capability = conversationalCapability()
+    let capability = assistantCapability()
     let thermal = thermalStatus()
     sendEvent(withName: "MaculusModelDownloadProgress", body: [
       "conversationalSupported": capability.supported,
+      "visionSupported": capability.supported,
       "capabilityReason": capability.reason.map { $0 as Any } ?? NSNull(),
       "thermalThrottled": thermal.throttled,
       "thermalState": thermal.name,
@@ -312,32 +388,85 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
   }
 
   private func modelDirectory() throws -> URL {
-    let root = try FileManager.default.url(
+    var root = try FileManager.default.url(
       for: .applicationSupportDirectory,
       in: .userDomainMask,
       appropriateFor: nil,
       create: true
-    )
-    return root.appendingPathComponent("MaculusModels", isDirectory: true)
+    ).appendingPathComponent("MaculusModels", isDirectory: true)
+    try root.createDirectoryIfNeeded()
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try? root.setResourceValues(values)
+    return root
   }
 
-  private func modelURL() throws -> URL { try modelDirectory().appendingPathComponent(Self.filename) }
-  private func partURL() throws -> URL { try modelDirectory().appendingPathComponent("\(Self.filename).part") }
+  private func installedURL(_ asset: DownloadAsset) throws -> URL {
+    try modelDirectory().appendingPathComponent(asset.filename)
+  }
+
+  private func partialURL(_ asset: DownloadAsset) throws -> URL {
+    try modelDirectory().appendingPathComponent("\(asset.filename).part")
+  }
 
   private func isInstalled() -> Bool {
-    guard let url = try? modelURL(), FileManager.default.fileExists(atPath: url.path) else { return false }
-    guard ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0) == Self.expectedSize else {
-      verifiedInstalledFingerprint = nil
+    Self.assets.allSatisfy(isAssetInstalled)
+  }
+
+  private func isAssetInstalled(_ asset: DownloadAsset) -> Bool {
+    guard let url = try? installedURL(asset), FileManager.default.fileExists(atPath: url.path) else { return false }
+    guard fileSize(url) == asset.expectedSize else {
+      verifiedInstalledFingerprints[asset.filename] = nil
       return false
     }
     let fingerprint = fileFingerprint(url)
-    if fingerprint != nil && fingerprint == verifiedInstalledFingerprint { return true }
-    guard (try? sha256(url)) == Self.expectedSHA256 else {
-      verifiedInstalledFingerprint = nil
+    if fingerprint != nil && fingerprint == verifiedInstalledFingerprints[asset.filename] { return true }
+    guard (try? sha256(url)) == asset.expectedSHA256 else {
+      verifiedInstalledFingerprints[asset.filename] = nil
       return false
     }
-    verifiedInstalledFingerprint = fingerprint
+    verifiedInstalledFingerprints[asset.filename] = fingerprint
     return true
+  }
+
+  private func removeInvalidInstalledAssets() throws {
+    for asset in Self.assets {
+      let url = try installedURL(asset)
+      if FileManager.default.fileExists(atPath: url.path), !isAssetInstalled(asset) {
+        try FileManager.default.removeItem(at: url)
+      }
+    }
+  }
+
+  private func removeLegacyAssets() throws {
+    let directory = try modelDirectory()
+    for filename in Self.legacyFilenames {
+      for candidate in [filename, "\(filename).part"] {
+        let url = directory.appendingPathComponent(candidate)
+        if FileManager.default.fileExists(atPath: url.path) {
+          try FileManager.default.removeItem(at: url)
+        }
+      }
+    }
+  }
+
+  private func progressBytes() throws -> Int64 {
+    try Self.assets.reduce(0) { total, asset in
+      if isAssetInstalled(asset) { return total + asset.expectedSize }
+      return total + min(fileSize(try partialURL(asset)), asset.expectedSize)
+    }
+  }
+
+  private func installedBytes() -> Int64 {
+    Self.assets.reduce(0) { $0 + (isAssetInstalled($1) ? $1.expectedSize : 0) }
+  }
+
+  private func remainingDownloadBytes() throws -> Int64 {
+    Self.totalSize - (try progressBytes())
+  }
+
+  private func fileSize(_ url: URL) -> Int64 {
+    (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
   }
 
   private func fileFingerprint(_ url: URL) -> String? {
@@ -352,15 +481,15 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     return values.volumeAvailableCapacityForImportantUsage ?? 0
   }
 
-  private func conversationalCapability() -> (supported: Bool, reason: String?) {
+  private func assistantCapability() -> (supported: Bool, reason: String?) {
     if let until = memoryPressureUntil, until > Date() {
-      return (false, "Memory pressure paused the conversational model.")
+      return (false, "Memory pressure paused detailed vision and conversation.")
     }
-    if ProcessInfo.processInfo.physicalMemory < 3_000_000_000 {
-      return (false, "Not enough memory is available for the conversational model.")
+    if ProcessInfo.processInfo.physicalMemory < 4_000_000_000 {
+      return (false, "This device has too little memory for the high-accuracy vision model.")
     }
     if ProcessInfo.processInfo.thermalState == .critical {
-      return (false, "The device reached the critical thermal safety limit. Conversational guidance will resume after it cools.")
+      return (false, "The device reached its thermal safety limit. Detailed vision will resume after it cools.")
     }
     return (true, nil)
   }
@@ -391,14 +520,16 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
 
 private enum ModelDownloadError: LocalizedError {
   case http(Int)
-  case size(Int64)
-  case checksum
+  case size(String, Int64)
+  case checksum(String)
+  case noActiveAsset
 
   var errorDescription: String? {
     switch self {
     case let .http(code): return "Download server returned HTTP \(code)."
-    case let .size(size): return "Downloaded model has unexpected size \(size)."
-    case .checksum: return "Downloaded model checksum did not match provenance."
+    case let .size(asset, size): return "Downloaded \(asset) has unexpected size \(size)."
+    case let .checksum(asset): return "Downloaded \(asset) checksum did not match provenance."
+    case .noActiveAsset: return "The model downloader lost its active asset."
     }
   }
 }

@@ -4,6 +4,19 @@ import type { VoiceCommandStatus } from '../services/VoiceCommandService';
 export type NextRuntimePhase = 'idle' | 'starting' | 'running' | 'degraded' | 'stopping' | 'error';
 export type SensorHealth = 'unknown' | 'healthy' | 'warning' | 'emergency' | 'stale' | 'fault';
 export type EntityVisibility = 'visible' | 'occluded';
+export type NextModelAssetState = 'missing' | 'downloading' | 'paused' | 'ready' | 'error';
+
+export interface NextModelState {
+  state: NextModelAssetState;
+  downloadedBytes: number;
+  totalBytes: number;
+  metered: boolean;
+  modelName: string;
+  currentAsset: string | null;
+  supported: boolean;
+  capabilityReason: string | null;
+  message: string | null;
+}
 
 export interface SafetyAlert {
   key: string;
@@ -77,6 +90,10 @@ export interface NextRuntimeState {
   sensor: SafetyState;
   voiceStatus: VoiceCommandStatus;
   conversationReady: boolean;
+  model: NextModelState;
+  descriptionInProgress: boolean;
+  detailedDescription: string;
+  descriptionSource: 'none' | 'vision-language' | 'deterministic';
   fps: number;
   sceneRevision: number;
   sceneDescription: string;
@@ -100,6 +117,18 @@ export const EMPTY_SAFETY_STATE: SafetyState = {
   message: 'Obstacle sensor not connected',
 };
 
+export const EMPTY_MODEL_STATE: NextModelState = {
+  state: 'missing',
+  downloadedBytes: 0,
+  totalBytes: 1314006144,
+  metered: true,
+  modelName: 'LFM2.5-VL-1.6B',
+  currentAsset: null,
+  supported: true,
+  capabilityReason: null,
+  message: null,
+};
+
 export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   phase: 'idle',
   sessionStartedAt: null,
@@ -109,6 +138,10 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   sensor: EMPTY_SAFETY_STATE,
   voiceStatus: 'off',
   conversationReady: false,
+  model: EMPTY_MODEL_STATE,
+  descriptionInProgress: false,
+  detailedDescription: '',
+  descriptionSource: 'none',
   fps: 0,
   sceneRevision: 0,
   sceneDescription: 'No active scene session.',
