@@ -81,9 +81,13 @@ cd "$APP_ROOT"
 
 FASTVLM_REPOSITORY="https://github.com/apple/ml-fastvlm.git"
 FASTVLM_COMMIT="592b4add3c1c8a518e77d95dc6248e76c1dd591f"
+FASTVLM_MLX_EXAMPLES_VERSION="2.21.2"
+FASTVLM_MLX_SWIFT_VERSION="0.21.2"
+FASTVLM_TRANSFORMERS_VERSION="0.1.18"
 FASTVLM_MODEL="llava-fastvithd_1.5b_stage3_llm.int8"
 FASTVLM_ARCHIVE_SIZE=2053787552
 FASTVLM_VENDOR="$APP_ROOT/ios/FastVLMVendor"
+FASTVLM_XCODE_PROJECT="$FASTVLM_VENDOR/app/FastVLM.xcodeproj/project.pbxproj"
 FASTVLM_MODEL_DIR="$FASTVLM_VENDOR/app/FastVLM/model"
 FASTVLM_ENGINE_SOURCE="$APP_ROOT/ios/FastVLMIntegration/MaculusFastVLMEngine.swift"
 FASTVLM_ATTRIBUTION_SOURCE="$APP_ROOT/src/models/FASTVLM_ATTRIBUTION.txt"
@@ -108,6 +112,37 @@ fi
 git -C "$FASTVLM_VENDOR" checkout --detach "$FASTVLM_COMMIT"
 [[ "$(git -C "$FASTVLM_VENDOR" rev-parse HEAD)" == "$FASTVLM_COMMIT" ]] ||
   fail "FastVLM source did not resolve to the audited commit."
+
+# Apple's audited FastVLM project used these API versions, but its Xcode
+# requirements allow later source-incompatible releases. Convert the three root
+# requirements to exact versions so clean builds remain reproducible.
+python3 - \
+  "$FASTVLM_XCODE_PROJECT" \
+  "$FASTVLM_MLX_EXAMPLES_VERSION" \
+  "$FASTVLM_MLX_SWIFT_VERSION" \
+  "$FASTVLM_TRANSFORMERS_VERSION" <<'PY'
+from pathlib import Path
+import sys
+
+project_path = Path(sys.argv[1])
+versions = sys.argv[2:]
+project = project_path.read_text(encoding="utf-8")
+
+for version in versions:
+    old = f"kind = upToNextMajorVersion;\n\t\t\t\tminimumVersion = {version};"
+    new = f"kind = exactVersion;\n\t\t\t\tversion = {version};"
+    count = project.count(old)
+    if count != 1:
+        raise SystemExit(
+            f"Expected one FastVLM package requirement for {version}, found {count}."
+        )
+    project = project.replace(old, new)
+
+project_path.write_text(project, encoding="utf-8")
+PY
+
+grep -q "kind = exactVersion;" "$FASTVLM_XCODE_PROJECT" ||
+  fail "FastVLM dependency pinning did not complete."
 [[ -f "$FASTVLM_ENGINE_SOURCE" ]] || fail "Maculus FastVLM engine source is missing."
 [[ -f "$FASTVLM_ATTRIBUTION_SOURCE" ]] || fail "FastVLM attribution notice is missing."
 install -m 0644 "$FASTVLM_ENGINE_SOURCE" "$FASTVLM_VENDOR/app/FastVLM/MaculusFastVLMEngine.swift"
@@ -176,6 +211,13 @@ printf 'export NODE_BINARY="%s"\n' "$(command -v node)" > ios/.xcode.env.local
 
 WORKSPACE="$(find "$APP_ROOT/ios" -maxdepth 1 -name "*.xcworkspace" -print -quit)"
 [[ -n "$WORKSPACE" ]] || fail "CocoaPods did not generate an iOS workspace."
+
+# Package.resolved is generated inside these workspaces and may still point at
+# incompatible versions selected by an earlier build. Regenerate it from the
+# exact project requirements above.
+rm -f \
+  "$FASTVLM_VENDOR/app/FastVLM.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved" \
+  "$WORKSPACE/xcshareddata/swiftpm/Package.resolved"
 
 SCHEME_JSON="$(xcodebuild -workspace "$WORKSPACE" -list -json)"
 SCHEME="$(printf '%s' "$SCHEME_JSON" | python3 -c '

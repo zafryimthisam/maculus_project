@@ -47,8 +47,9 @@ The default run safely fast-forwards `main` from `origin`, refuses to overwrite
 tracked local changes, fetches pinned Apple FastVLM source and official 1.5B
 INT8 weights, installs npm/CocoaPods dependencies, builds without code signing,
 validates the embedded models and license notices, and writes the IPA to
-`~/Downloads`. The first build needs substantially more download time and disk
-space; later builds reuse `ios/FastVLMVendor`.
+`~/Downloads`. Compatible MLX Swift dependencies are pinned exactly so Xcode
+cannot select newer source-breaking releases. The first build needs substantially
+more download time and disk space; later builds reuse `ios/FastVLMVendor`.
 
 To build the current checkout without fetching GitHub:
 
