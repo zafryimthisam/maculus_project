@@ -17,7 +17,7 @@ describe('MaculusNext vision-language descriptions', () => {
 
     expect(prompt).toContain('chair to the left');
     expect(prompt).toContain('Alex (anonymous session label for a person) ahead');
-    expect(prompt).toContain('never tell the user to walk');
+    expect(prompt).toContain('never give movement directions');
     expect(prompt).not.toContain('path does not currently look blocked');
   });
 
@@ -34,7 +34,7 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(result.text).toContain('Alex is the anonymous session name');
     expect(result.text).toContain('Separately, the ultrasonic sensor is healthy');
     expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
-      maxTokens: 96,
+      maxTokens: 72,
       timeoutMs: 30000,
     }));
   });

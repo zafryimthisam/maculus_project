@@ -535,7 +535,6 @@ function nextModelState(status: ModelAssetStatus): NextRuntimeState['model'] {
     supported: status.visionSupported !== false,
     capabilityReason: status.capabilityReason || null,
     message: status.message || null,
-    bundled: Boolean(status.bundled),
   };
 }
 

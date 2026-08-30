@@ -96,12 +96,10 @@ export class ConversationService {
       const response = await localLlmService.completeVision({
         imageBase64,
         prompt: buildVisionPrompt(question, scene),
-        // FastVLM is most useful as a concise guide. Bounding the answer keeps
-        // total latency low without reducing the vision encoder's accuracy.
-        maxTokens: 96,
-        // The first multimodal turn also initializes image processing and Metal
-        // resources. Nine seconds was too short on real iPhones and silently
-        // converted genuine camera requests into deterministic fallbacks.
+        // Liquid's own example uses 64 output tokens. A small allowance above
+        // that keeps two natural spoken sentences possible without making the
+        // user wait for a long visual monologue.
+        maxTokens: 72,
         timeoutMs: 30000,
       });
       const safe = removeMobilitySentences(sanitizeVisionDescription(response));
@@ -156,7 +154,7 @@ export class ConversationService {
       return { text: vision.text, vision };
     }
     if (!this.isReady() || localLlmService.getState() !== 'ready') {
-      return { text: 'The private vision model is not ready. Live detector and obstacle monitoring are still active.' };
+      return { text: 'I can describe verified live objects and the obstacle sensor now. Install the optional private vision model for detailed descriptions and conversation.' };
     }
 
     try {
@@ -201,7 +199,7 @@ export class ConversationService {
 export function buildVisionPrompt(question: string, scene: NextSceneSnapshot): string {
   const verifiedObjects = scene.visibleEntities.length === 0
     ? 'No stable object detections are available.'
-    : scene.visibleEntities.slice(0, 8).map(entity => {
+    : scene.visibleEntities.slice(0, 6).map(entity => {
       const position = entity.zone === 'ahead' ? 'ahead' : `to the ${entity.zone}`;
       const label = entity.label === 'person' && entity.alias
         ? `${entity.alias} (anonymous session label for a person)`
@@ -209,15 +207,12 @@ export function buildVisionPrompt(question: string, scene: NextSceneSnapshot): s
       return `${label} ${position}${entity.inPath ? ' overlapping the center view' : ''}`;
     }).join('; ');
   return [
-    'You are privately analyzing one live camera frame for a blind user.',
-    `User request: ${question}`,
-    'Answer the user request directly in one to three short, natural sentences.',
-    'Use the image as truth. For a broad request, report the setting, important people, objects, actions, positions, colors, and clearly readable short text.',
-    'For a find request, say whether a likely match is visible and where it is in the image.',
-    'Mention an obvious physical hazard, but never tell the user to walk, move, step, turn, cross, or continue; never call a route safe or clear or estimate exact distance.',
-    'Reuse supplied anonymous session labels without claiming real identity. Do not infer sensitive traits.',
-    'Say when an important detail is unclear and never invent facts outside the image.',
-    `Verified object-detector hints, which may be incomplete: ${verifiedObjects}`,
+    'Privately analyze this live camera frame for a blind user.',
+    `Request: ${question.trim().slice(0, 240)}`,
+    'Reply directly in one or two short natural sentences using only visible facts.',
+    'For a broad request, give the setting and the most useful people, objects, actions, positions, colors, or readable text. For a find request, say whether it is visible and where it appears in the image.',
+    'Use supplied anonymous session names consistently. Mention an obvious hazard, but never give movement directions, call a path safe, estimate exact distance, claim a real identity, or infer sensitive traits. State uncertainty instead of guessing.',
+    `Detector hints, which may be incomplete: ${verifiedObjects}`,
   ].join(' ');
 }
 

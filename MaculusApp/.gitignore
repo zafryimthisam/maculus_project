@@ -19,7 +19,6 @@ DerivedData
 *.ipa
 *.xcuserstate
 ios/.xcode.env.local
-/ios/FastVLMVendor/
 *.onnx
 !android/app/src/main/assets/wakeword/
 !android/app/src/main/assets/wakeword/*.onnx

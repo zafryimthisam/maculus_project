@@ -14,11 +14,11 @@ MaculusNext is the clean runtime and the default application entry registered by
 - `SessionSceneStore` owns temporal scene state, duplicate-frame rejection,
   object occlusion and random person aliases. Its memory is erased on session
   stop.
-- `ConversationService` uses Apple FastVLM-1.5B INT8 on iOS and the existing
-  LFM2.5-VL path on Android for detailed on-demand analysis of a recent frame.
-  It grounds the prompt with tracked objects, rejects generated mobility
-  instructions, and falls back to the deterministic scene snapshot on button
-  requests. Spoken requests never receive a detector-generated substitute.
+- `ConversationService` uses the optional LFM2.5-VL-1.6B model for detailed
+  on-demand descriptions of a recent frame. It grounds the prompt with tracked
+  objects, rejects generated mobility instructions, and falls back to the
+  deterministic scene snapshot on any error. The same local backbone handles
+  general conversation.
 - `MaculusRuntime` owns lifecycle, camera inference, sensor polling and voice
   command coordination. React renders compact state; it never receives a camera
   preview.
@@ -27,16 +27,19 @@ MaculusNext is the clean runtime and the default application entry registered by
 
 The default runtime continuously performs YOLO, depth and anonymous ReID. A
 "Describe scene" request uses the newest frame that has completed that pipeline
-and is no more than 2.5 seconds old. On iOS, the frame is passed to Apple's Core
-ML vision encoder and MLX language model entirely on device. The model remains
-loaded for the active session, uses deterministic generation, and caps concise
-guide answers at 96 tokens. Android continues to use llama.cpp/libmtmd.
-Ultrasonic facts are appended after generation and are never supplied by the
-VLM.
+and is no more than 2.5 seconds old. If the private VLM is installed, the frame
+is passed to llama.cpp/libmtmd entirely on device. Ultrasonic facts are appended
+after generation and are never supplied by the VLM.
 
-FastVLM is embedded in the iOS research IPA at build time. Its weights are
-licensed only for non-commercial scientific research and academic development;
-see `src/models/FASTVLM_RESEARCH_NOTICE.md`.
+On iOS, the text model remains Metal-accelerated while the vision projector runs
+on CPU. This avoids a known llama.rn Metal image-chunk failure. Native inference
+errors are normalized into a short UI diagnostic instead of being hidden behind
+the generic deterministic fallback message.
+
+The optional download contains two checksum-pinned files (about 1.3 GB total):
+
+- LFM2.5-VL-1.6B Q4_K_M language model
+- Q8 SigLIP2 multimodal projector
 
 The VLM is informational only. It cannot publish safety events, update tracked
 objects, identify people, or issue movement guidance. See
@@ -86,9 +89,9 @@ must provide its own buzzer or haptic emergency alert. iOS cannot keep camera
 guidance running in the background, and no phone process can be the accessory's
 only safety mechanism.
 
-## Known performance boundary
+## Known migration boundary
 
 The existing native camera detector still passes JPEG base64 through the React
 Native bridge. MaculusNext isolates that cost behind `DeviceCameraService`; a
-future native frame broker should feed YOLO and FastVLM from one pixel buffer
-without another JavaScript/base64 copy.
+future native frame broker should feed YOLO and libmtmd from one encoded frame
+without another JavaScript copy.

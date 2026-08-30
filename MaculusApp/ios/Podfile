@@ -1,12 +1,14 @@
 require_relative '../node_modules/react-native/scripts/react_native_pods'
 require_relative '../node_modules/@react-native-community/cli-platform-ios/native_modules'
 
-# React Native's New Architecture remains enabled for the native camera and
-# sensor modules. iOS VLM inference is provided by the Apple FastVLM framework;
-# react-native.config.js disables llama.rn autolinking on iOS only.
+# Multimodal llama.rn uses JSI/TurboModules. React Native 0.75 supports the New
+# Architecture, and the flag must be identical during pod installation and the
+# Xcode build. Compile the audited llama.cpp source so LFM2.5-VL and Metal are
+# available without relying on a separately downloaded framework.
 ENV['RCT_NEW_ARCH_ENABLED'] = '1'
+ENV['RNLLAMA_BUILD_FROM_SOURCE'] = '1'
 
-platform :ios, '18.2'
+platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
 linkage = ENV['USE_FRAMEWORKS']

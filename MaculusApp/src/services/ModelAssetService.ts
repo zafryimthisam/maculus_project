@@ -1,4 +1,4 @@
-import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
+import { NativeEventEmitter, NativeModules } from 'react-native';
 
 export type ModelAssetState = 'missing' | 'downloading' | 'paused' | 'ready' | 'error';
 
@@ -17,7 +17,6 @@ export interface ModelAssetStatus {
   thermalThrottled?: boolean;
   thermalState?: string;
   message?: string;
-  bundled?: boolean;
 }
 
 type NativeModelManager = {
@@ -27,10 +26,7 @@ type NativeModelManager = {
   deleteModel(): Promise<ModelAssetStatus>;
 };
 
-const nativeManager = (
-  Platform.OS === 'ios' ? NativeModules.MaculusFastVLM : NativeModules.MaculusModelManager
-) as NativeModelManager | undefined;
-const usesBundledFastVlm = Platform.OS === 'ios';
+const nativeManager = NativeModules.MaculusModelManager as NativeModelManager | undefined;
 
 export class ModelAssetService {
   private status: ModelAssetStatus = {
@@ -45,7 +41,7 @@ export class ModelAssetService {
       this.setStatus({ ...this.status, state: 'error', message: 'Model manager unavailable on this device.' });
       return this.status;
     }
-    if (!usesBundledFastVlm && !this.subscription) {
+    if (!this.subscription) {
       const emitter = new NativeEventEmitter(nativeManager as any);
       this.subscription = emitter.addListener('MaculusModelDownloadProgress', (update: Partial<ModelAssetStatus>) => {
         this.setStatus({ ...this.status, ...update, path: update.path === undefined ? this.status.path : update.path });
@@ -61,10 +57,6 @@ export class ModelAssetService {
 
   async ensureDownloaded(allowCellular: boolean = false): Promise<ModelAssetStatus> {
     if (!nativeManager) {return this.initialize();}
-    if (usesBundledFastVlm) {
-      this.setStatus(normalize(await nativeManager.getStatus()));
-      return this.status;
-    }
     try {
       this.setStatus({ ...this.status, state: 'downloading', message: undefined });
       const status = normalize(await nativeManager.startDownload(allowCellular));
@@ -80,7 +72,6 @@ export class ModelAssetService {
 
   async cancelDownload(): Promise<ModelAssetStatus> {
     if (!nativeManager) {return this.status;}
-    if (usesBundledFastVlm) {return this.initialize();}
     const status = normalize(await nativeManager.cancelDownload());
     this.setStatus(status);
     return status;
@@ -88,7 +79,6 @@ export class ModelAssetService {
 
   async deleteModel(): Promise<ModelAssetStatus> {
     if (!nativeManager) {return this.status;}
-    if (usesBundledFastVlm) {return this.initialize();}
     const status = normalize(await nativeManager.deleteModel());
     this.setStatus(status);
     return status;
@@ -120,9 +110,9 @@ function normalize(status: ModelAssetStatus): ModelAssetStatus {
     path: status.path || null,
     projectorPath: status.projectorPath || null,
     downloadedBytes: Number(status.downloadedBytes) || 0,
-    totalBytes: status.bundled ? 0 : Number(status.totalBytes) || 1314006144,
+    totalBytes: Number(status.totalBytes) || 1314006144,
     metered: Boolean(status.metered),
-    modelName: status.modelName || (usesBundledFastVlm ? 'Apple FastVLM-1.5B INT8' : 'LFM2.5-VL-1.6B'),
+    modelName: status.modelName || 'LFM2.5-VL-1.6B',
     currentAsset: status.currentAsset,
     conversationalSupported: status.conversationalSupported !== false,
     // Multimodal readiness must be explicitly reported by the native manager.
@@ -133,7 +123,6 @@ function normalize(status: ModelAssetStatus): ModelAssetStatus {
     thermalThrottled: Boolean(status.thermalThrottled),
     thermalState: status.thermalState || 'unknown',
     message: status.message,
-    bundled: Boolean(status.bundled),
   };
 }
 

@@ -145,21 +145,3 @@ NativeModules.MaculusModelManager = {
   addListener: jest.fn(),
   removeListeners: jest.fn(),
 };
-
-NativeModules.MaculusFastVLM = {
-  getStatus: jest.fn().mockResolvedValue({
-    state: 'ready', path: 'fastvlm://bundled', projectorPath: 'fastvlm://coreml',
-    downloadedBytes: 0, totalBytes: 0, metered: false, bundled: true,
-    conversationalSupported: true, visionSupported: true, modelName: 'Apple FastVLM-1.5B INT8',
-  }),
-  load: jest.fn().mockResolvedValue({
-    ready: true, modelName: 'Apple FastVLM-1.5B INT8', backend: 'Core ML + MLX',
-  }),
-  generate: jest.fn().mockResolvedValue({
-    text: 'A room with a chair.', timeToFirstTokenMs: 120, totalTimeMs: 420,
-  }),
-  cancel: jest.fn().mockResolvedValue(true),
-  release: jest.fn().mockResolvedValue(true),
-  addListener: jest.fn(),
-  removeListeners: jest.fn(),
-};

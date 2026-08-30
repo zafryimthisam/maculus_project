@@ -12,13 +12,7 @@ Native iOS coverage includes:
 - anonymous OSNet person appearance embeddings through ONNX Runtime;
 - the Hey LiveKit wake word plus on-device Apple command transcription;
 - a lifecycle-safe rear iPhone camera fallback when the Pi camera is missing;
-- Apple FastVLM-1.5B INT8 through Core ML + MLX for private scene analysis;
 - camera, microphone, speech, Bonjour, and local-network permission strings.
-
-The minimum supported version is iOS 18.2. FastVLM-1.5B is enabled only on
-devices with at least 6 GB of physical memory; the current research target is an
-iPhone 14 Pro Max. FastVLM's model license permits non-commercial research and
-academic development only.
 
 ## Development build
 
@@ -30,9 +24,7 @@ cd ios && bundle exec pod install && cd ..
 npm run ios
 ```
 
-Before opening the workspace directly, run the unsigned build script once so it
-can fetch the pinned Apple source and model. Use a physical iPhone for camera,
-wake-word, FastVLM, and on-device speech testing.
+Use a physical iPhone for camera, wake-word, and on-device speech testing.
 The simulator does not provide production-equivalent behavior for those APIs.
 
 ## Unsigned device IPA
@@ -44,12 +36,8 @@ bash MaculusApp/scripts/build-ios-unsigned.sh
 ```
 
 The default run safely fast-forwards `main` from `origin`, refuses to overwrite
-tracked local changes, fetches pinned Apple FastVLM source and official 1.5B
-INT8 weights, installs npm/CocoaPods dependencies, builds without code signing,
-validates the embedded models and license notices, and writes the IPA to
-`~/Downloads`. Compatible MLX Swift dependencies are pinned exactly so Xcode
-cannot select newer source-breaking releases. The first build needs substantially
-more download time and disk space; later builds reuse `ios/FastVLMVendor`.
+tracked local changes, installs npm/CocoaPods dependencies, builds without code
+signing, validates all six model assets, and writes the IPA to `~/Downloads`.
 
 To build the current checkout without fetching GitHub:
 
