@@ -11,6 +11,7 @@ import {
 import { depthService } from '../services/DepthService';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
+import { deviceMotionService } from '../services/DeviceMotionService';
 import { keepAwakeService } from '../services/KeepAwakeService';
 import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { reIdService } from '../services/ReIdService';
@@ -182,6 +183,7 @@ export class MaculusRuntime {
       try {
         await deviceCameraService.start();
         deviceCameraReady = true;
+        await deviceMotionService.start();
       } catch (error: any) {
         console.warn('[MaculusNext] Phone fallback camera startup failed:', error?.message || error);
       }
@@ -522,14 +524,24 @@ export class MaculusRuntime {
           }
         }
         const embeddings = await this.personEmbeddings(frame, detections, now);
+        const cameraMoving = frame.source === 'device'
+          ? (await deviceMotionService.sample()).moving
+          : false;
         const snapshot = this.scene.update({
           frameKey,
           timestamp: now,
           detections,
           personEmbeddings: embeddings,
+          cameraMoving,
         });
-        this.latestVisionObservation = { frame, snapshot, detections, receivedAt: now };
-        this.publishPreview(frame, detections, now);
+        const stabilizedDetections = previewDetections(snapshot);
+        this.latestVisionObservation = {
+          frame,
+          snapshot,
+          detections: stabilizedDetections,
+          receivedAt: now,
+        };
+        this.publishPreview(frame, stabilizedDetections, now);
         const elapsed = Math.max(1, now - previousFrameAt);
         const currentFps = 1000 / elapsed;
         smoothedFps = smoothedFps === 0 ? currentFps : smoothedFps * 0.8 + currentFps * 0.2;
@@ -723,6 +735,7 @@ export class MaculusRuntime {
     await Promise.all([
       voiceCommandService.stop(),
       deviceCameraService.stop(),
+      deviceMotionService.stop(),
       keepAwakeService.setEnabled(false),
       this.conversation.destroy(),
     ]);
@@ -764,6 +777,26 @@ function cloneInitialState(): NextRuntimeState {
     people: [],
     previewDetections: [],
   };
+}
+
+function previewDetections(snapshot: NextSceneSnapshot): Detection[] {
+  return snapshot.visibleEntities.map(entity => ({
+    label: entity.label === 'person' && entity.alias ? entity.alias : entity.label,
+    score: entity.confidence,
+    cx: entity.cx,
+    cy: entity.cy,
+    w: entity.w,
+    h: entity.h,
+    x1: clamp01(entity.cx - entity.w / 2),
+    y1: clamp01(entity.cy - entity.h / 2),
+    x2: clamp01(entity.cx + entity.w / 2),
+    y2: clamp01(entity.cy + entity.h / 2),
+    nearScore: entity.nearScore,
+  }));
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
 function nextModelState(status: ModelAssetStatus): NextRuntimeState['model'] {

@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMotion
 import CoreImage
 import Foundation
 import React
@@ -260,5 +261,108 @@ final class MaculusDeviceCamera: NSObject, AVCaptureVideoDataOutputSampleBufferD
         self.session.startRunning()
       }
     }
+  }
+}
+
+@objc(MaculusDeviceMotion)
+final class MaculusDeviceMotion: NSObject {
+  private let manager = CMMotionManager()
+  private let queue: OperationQueue = {
+    let queue = OperationQueue()
+    queue.name = "com.maculus.device-motion"
+    queue.qualityOfService = .userInteractive
+    queue.maxConcurrentOperationCount = 1
+    return queue
+  }()
+  private let lock = NSLock()
+  private var monitoring = false
+  private var peakRotationRate = 0.0
+  private var peakAcceleration = 0.0
+  private var lastSampleAt = 0.0
+
+  @objc static func requiresMainQueueSetup() -> Bool { false }
+
+  deinit {
+    manager.stopDeviceMotionUpdates()
+  }
+
+  @objc func startMonitoring(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    guard manager.isDeviceMotionAvailable else {
+      resolve(["available": false, "started": false])
+      return
+    }
+    if monitoring {
+      resolve(["available": true, "started": true, "alreadyStarted": true])
+      return
+    }
+    manager.deviceMotionUpdateInterval = 1.0 / 50.0
+    monitoring = true
+    manager.startDeviceMotionUpdates(to: queue) { [weak self] motion, error in
+      guard let self else { return }
+      if let error {
+        self.lock.lock()
+        self.monitoring = false
+        self.lock.unlock()
+        self.manager.stopDeviceMotionUpdates()
+        NSLog("[MaculusMotion] Device motion stopped: %@", error.localizedDescription)
+        return
+      }
+      guard let motion else { return }
+      let rotation = motion.rotationRate
+      let acceleration = motion.userAcceleration
+      let rotationMagnitude = sqrt(
+        rotation.x * rotation.x + rotation.y * rotation.y + rotation.z * rotation.z
+      )
+      let accelerationMagnitude = sqrt(
+        acceleration.x * acceleration.x +
+        acceleration.y * acceleration.y +
+        acceleration.z * acceleration.z
+      )
+      self.lock.lock()
+      self.peakRotationRate = max(self.peakRotationRate, rotationMagnitude)
+      self.peakAcceleration = max(self.peakAcceleration, accelerationMagnitude)
+      self.lastSampleAt = Date().timeIntervalSince1970 * 1000
+      self.lock.unlock()
+    }
+    resolve(["available": true, "started": true, "alreadyStarted": false])
+  }
+
+  @objc func consumeMotionState(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter _: @escaping RCTPromiseRejectBlock
+  ) {
+    lock.lock()
+    let rotationRate = peakRotationRate
+    let acceleration = peakAcceleration
+    let sampledAt = lastSampleAt
+    let active = monitoring
+    peakRotationRate = 0
+    peakAcceleration = 0
+    lock.unlock()
+    resolve([
+      "available": manager.isDeviceMotionAvailable,
+      "monitoring": active,
+      "moving": active && (rotationRate >= 0.12 || acceleration >= 0.08),
+      "rotationRate": rotationRate,
+      "acceleration": acceleration,
+      "sampledAt": sampledAt,
+    ])
+  }
+
+  @objc func stopMonitoring(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter _: @escaping RCTPromiseRejectBlock
+  ) {
+    manager.stopDeviceMotionUpdates()
+    lock.lock()
+    monitoring = false
+    peakRotationRate = 0
+    peakAcceleration = 0
+    lastSampleAt = 0
+    lock.unlock()
+    resolve(nil)
   }
 }

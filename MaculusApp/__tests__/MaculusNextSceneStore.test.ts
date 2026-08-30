@@ -2,18 +2,26 @@ import { describe, expect, it } from '@jest/globals';
 import { SessionSceneStore } from '../src/next/SessionSceneStore';
 import { Detection } from '../src/types';
 
-function detection(label: string, cx: number, score: number = 0.9): Detection {
+function detection(
+  label: string,
+  cx: number,
+  score: number = 0.9,
+  overrides: Partial<Detection> = {},
+): Detection {
+  const w = label === 'person' ? 0.25 : 0.2;
+  const h = label === 'person' ? 0.7 : 0.4;
   return {
     label,
     score,
     cx,
     cy: 0.52,
-    w: label === 'person' ? 0.25 : 0.2,
-    h: label === 'person' ? 0.7 : 0.4,
-    x1: cx - 0.1,
-    y1: 0.2,
-    x2: cx + 0.1,
-    y2: 0.9,
+    w,
+    h,
+    x1: cx - w / 2,
+    y1: 0.52 - h / 2,
+    x2: cx + w / 2,
+    y2: 0.52 + h / 2,
+    ...overrides,
   };
 }
 
@@ -79,5 +87,190 @@ describe('MaculusNext SessionSceneStore', () => {
     const hidden = store.update({ frameKey: 'empty', timestamp: 2500, detections: [] });
     expect(hidden.visibleEntities).toHaveLength(0);
     expect(hidden.entities[0]).toMatchObject({ label: 'chair', visibility: 'occluded', confirmed: true });
+  });
+
+  it('keeps a confirmed box through brief detector dropouts without track churn', () => {
+    const store = new SessionSceneStore(['Alex']);
+    store.update({ frameKey: 'chair-1', timestamp: 100, detections: [detection('chair', 0.25)] });
+    const confirmed = store.update({
+      frameKey: 'chair-2',
+      timestamp: 200,
+      detections: [detection('chair', 0.25)],
+    });
+    const trackId = confirmed.visibleEntities[0].id;
+
+    const firstMiss = store.update({ frameKey: 'miss-1', timestamp: 300, detections: [] });
+    const secondMiss = store.update({ frameKey: 'miss-2', timestamp: 400, detections: [] });
+    const reacquired = store.update({
+      frameKey: 'chair-3',
+      timestamp: 500,
+      detections: [detection('chair', 0.26, 0.35)],
+    });
+
+    expect(firstMiss.visibleEntities).toHaveLength(1);
+    expect(secondMiss.visibleEntities).toHaveLength(1);
+    expect(reacquired.visibleEntities[0].id).toBe(trackId);
+    const changes = [...firstMiss.changes, ...secondMiss.changes, ...reacquired.changes];
+    expect(changes.some(change => change.kind === 'left')).toBe(false);
+    expect(changes.some(change => change.kind === 'entered')).toBe(false);
+  });
+
+  it('smooths bounding-box jitter before publishing confirmed entities', () => {
+    const store = new SessionSceneStore(['Alex']);
+    const rawCenters = [0.5, 0.5, 0.57, 0.44, 0.56, 0.45, 0.54];
+    const publishedCenters: number[] = [];
+
+    rawCenters.forEach((cx, index) => {
+      const snapshot = store.update({
+        frameKey: `jitter-${index}`,
+        timestamp: (index + 1) * 100,
+        detections: [detection('chair', cx)],
+      });
+      if (snapshot.visibleEntities[0]) {
+        publishedCenters.push(snapshot.visibleEntities[0].cx);
+      }
+    });
+
+    const rawRange = Math.max(...rawCenters) - Math.min(...rawCenters);
+    const publishedRange = Math.max(...publishedCenters) - Math.min(...publishedCenters);
+    expect(publishedRange).toBeLessThan(rawRange * 0.5);
+  });
+
+  it('does not report tracked objects moving during a coherent Pi camera pan', () => {
+    const store = new SessionSceneStore(['Alex']);
+    const changes = [];
+    for (let frame = 1; frame <= 3; frame += 1) {
+      const snapshot = store.update({
+        frameKey: `pan-baseline-${frame}`,
+        timestamp: frame * 100,
+        detections: [
+          detection('chair', 0.2),
+          detection('table', 0.48),
+          detection('person', 0.7),
+        ],
+      });
+      changes.push(...snapshot.changes);
+    }
+
+    for (let step = 1; step <= 5; step += 1) {
+      const shift = step * 0.04;
+      const snapshot = store.update({
+        frameKey: `pan-${step}`,
+        timestamp: (step + 3) * 100,
+        detections: [
+          detection('chair', 0.2 + shift),
+          detection('table', 0.48 + shift),
+          detection('person', 0.7 + shift),
+        ],
+      });
+      changes.push(...snapshot.changes);
+    }
+
+    for (let frame = 9; frame <= 24; frame += 1) {
+      const snapshot = store.update({
+        frameKey: `pan-settled-${frame}`,
+        timestamp: frame * 100,
+        detections: [
+          detection('chair', 0.4),
+          detection('table', 0.68),
+          detection('person', 0.9),
+        ],
+      });
+      changes.push(...snapshot.changes);
+    }
+
+    expect(changes.filter(change => change.kind === 'moved')).toHaveLength(0);
+    expect(store.getSnapshot(2400).visibleEntities).toHaveLength(3);
+  });
+
+  it('uses device-motion input to suppress movement alerts in a sparse phone scene', () => {
+    const store = new SessionSceneStore(['Alex']);
+    const changes = [];
+    for (let frame = 1; frame <= 3; frame += 1) {
+      changes.push(...store.update({
+        frameKey: `gyro-baseline-${frame}`,
+        timestamp: frame * 100,
+        detections: [detection('person', 0.3)],
+      }).changes);
+    }
+    for (let step = 1; step <= 5; step += 1) {
+      changes.push(...store.update({
+        frameKey: `gyro-pan-${step}`,
+        timestamp: (step + 3) * 100,
+        detections: [detection('person', 0.3 + step * 0.06)],
+        cameraMoving: true,
+      }).changes);
+    }
+    for (let frame = 9; frame <= 24; frame += 1) {
+      changes.push(...store.update({
+        frameKey: `gyro-settled-${frame}`,
+        timestamp: frame * 100,
+        detections: [detection('person', 0.6)],
+      }).changes);
+    }
+
+    expect(changes.filter(change => change.kind === 'moved')).toHaveLength(0);
+  });
+
+  it('still reports sustained independent object movement while the camera is stable', () => {
+    const store = new SessionSceneStore(['Alex']);
+    const changes = [];
+    for (let frame = 1; frame <= 3; frame += 1) {
+      changes.push(...store.update({
+        frameKey: `move-baseline-${frame}`,
+        timestamp: frame * 100,
+        detections: [
+          detection('chair', 0.18),
+          detection('table', 0.72),
+          detection('person', 0.3),
+        ],
+      }).changes);
+    }
+    const personCenters = [0.34, 0.38, 0.42, 0.46, 0.5, 0.54, 0.58, 0.6, 0.6, 0.6];
+    personCenters.forEach((cx, index) => {
+      changes.push(...store.update({
+        frameKey: `person-moves-${index}`,
+        timestamp: (index + 4) * 100,
+        detections: [
+          detection('chair', 0.18),
+          detection('table', 0.72),
+          detection('person', cx),
+        ],
+      }).changes);
+    });
+
+    expect(changes.filter(change => change.kind === 'moved')).toHaveLength(1);
+  });
+
+  it('requires a stable path transition instead of reacting to boundary flicker', () => {
+    const store = new SessionSceneStore(['Alex']);
+    const nearChair = (cx: number) => detection('chair', cx, 0.9, { nearScore: 0.85 });
+    store.update({ frameKey: 'path-1', timestamp: 100, detections: [nearChair(0.24)] });
+    store.update({ frameKey: 'path-2', timestamp: 200, detections: [nearChair(0.24)] });
+
+    const boundaryFrames = [0.34, 0.24, 0.34, 0.24];
+    const boundaryChanges = boundaryFrames.flatMap((cx, index) => store.update({
+      frameKey: `path-jitter-${index}`,
+      timestamp: (index + 3) * 100,
+      detections: [nearChair(cx)],
+    }).changes);
+    expect(boundaryChanges.some(change => change.kind === 'path-blocked')).toBe(false);
+
+    const stableChanges = [];
+    for (let frame = 7; frame <= 14; frame += 1) {
+      stableChanges.push(...store.update({
+        frameKey: `path-stable-${frame}`,
+        timestamp: frame * 100,
+        detections: [nearChair(0.4)],
+      }).changes);
+    }
+    expect(stableChanges.filter(change => change.kind === 'path-blocked')).toHaveLength(1);
+
+    const clearJitter = [0.24, 0.4, 0.24].flatMap((cx, index) => store.update({
+      frameKey: `path-clear-jitter-${index}`,
+      timestamp: (index + 15) * 100,
+      detections: [nearChair(cx)],
+    }).changes);
+    expect(clearJitter.some(change => change.kind === 'path-cleared')).toBe(false);
   });
 });

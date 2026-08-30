@@ -42,6 +42,8 @@ export interface SceneObservation {
   timestamp: number;
   detections: Detection[];
   personEmbeddings?: PersonEmbedding[];
+  /** True when phone sensors report camera/device movement during this frame. */
+  cameraMoving?: boolean;
 }
 
 export interface NextSceneEntity {

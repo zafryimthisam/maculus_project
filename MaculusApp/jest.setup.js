@@ -125,6 +125,19 @@ NativeModules.MaculusDeviceCamera = {
   stopCamera: jest.fn().mockResolvedValue(undefined),
 };
 
+NativeModules.MaculusDeviceMotion = {
+  startMonitoring: jest.fn().mockResolvedValue({ available: true, started: true }),
+  consumeMotionState: jest.fn().mockResolvedValue({
+    available: true,
+    monitoring: true,
+    moving: false,
+    rotationRate: 0.01,
+    acceleration: 0.01,
+    sampledAt: 123456789,
+  }),
+  stopMonitoring: jest.fn().mockResolvedValue(undefined),
+};
+
 NativeModules.MaculusKeepAwake = {
   setEnabled: jest.fn().mockResolvedValue(undefined),
 };

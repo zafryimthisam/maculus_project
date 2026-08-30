@@ -9,15 +9,39 @@ import {
 type Identity = { id: number; alias: string; embedding?: number[]; samples: number };
 type InternalTrack = NextSceneEntity & {
   hits: number;
-  lastAnnouncedCx: number;
+  misses: number;
+  lastAnnouncedCorrectedCx: number;
   lastAnnouncedZone: NextSceneEntity['zone'];
+  motionCandidateDirection: -1 | 0 | 1;
+  motionCandidateHits: number;
+  zoneCandidate: NextSceneEntity['zone'];
+  zoneCandidateHits: number;
+  pathCandidate: boolean;
+  pathCandidateHits: number;
+  lastDetectionCx: number;
+  lastDetectionCy: number;
   embedding?: number[];
   wasInPath: boolean;
 };
 
-const MIN_SCORE = 0.45;
-const OCCLUSION_AFTER_MS = 1800;
+type DetectionMatch = {
+  detection: Detection;
+  originalIndex: number;
+  embedding?: number[];
+  track: InternalTrack | null;
+};
+
+const TRACK_SCORE = 0.3;
+const NEW_TRACK_SCORE = 0.5;
+const OCCLUSION_AFTER_MS = 1200;
+const OCCLUSION_AFTER_MISSES = 3;
 const ACTIVE_MATCH_MS = 5000;
+const CAMERA_MOTION_MIN_DELTA = 0.025;
+const CAMERA_MOTION_MAX_RESIDUAL = 0.03;
+const CAMERA_MOTION_SUPPRESS_MS = 1200;
+const MOVEMENT_THRESHOLD = 0.18;
+const MOVEMENT_CONFIRM_FRAMES = 3;
+const PATH_CONFIRM_FRAMES = 3;
 const PERSON_REID_SIMILARITY = 0.82;
 const MAX_SESSION_TRACKS = 256;
 const DEFAULT_ALIASES = [
@@ -34,6 +58,10 @@ export class SessionSceneStore {
   private revision = 0;
   private lastFrameKey = '';
   private lastPathBlocked = false;
+  private pendingPathBlocked: boolean | null = null;
+  private pendingPathFrames = 0;
+  private cameraOffsetX = 0;
+  private cameraMotionSuppressUntil = 0;
   private aliases: string[];
 
   constructor(aliases: string[] = shuffled(DEFAULT_ALIASES)) {
@@ -49,6 +77,10 @@ export class SessionSceneStore {
     this.revision = 0;
     this.lastFrameKey = '';
     this.lastPathBlocked = false;
+    this.pendingPathBlocked = null;
+    this.pendingPathFrames = 0;
+    this.cameraOffsetX = 0;
+    this.cameraMotionSuppressUntil = 0;
   }
 
   update(observation: SceneObservation): NextSceneSnapshot {
@@ -58,30 +90,56 @@ export class SessionSceneStore {
     this.lastFrameKey = observation.frameKey;
     const indexed = observation.detections
       .map((detection, originalIndex) => ({ detection, originalIndex }))
-      .filter(item => item.detection.score >= MIN_SCORE);
+      .filter(item => item.detection.score >= TRACK_SCORE);
     const embeddingByOriginalIndex = new Map(
       (observation.personEmbeddings || []).map(item => [item.detectionIndex, normalize(item.embedding)]),
     );
     const unmatchedTrackIds = new Set(this.tracks.keys());
     const changes: SceneChange[] = [];
+    const matches: DetectionMatch[] = [];
 
     for (const item of indexed) {
       const embedding = embeddingByOriginalIndex.get(item.originalIndex);
       const track = this.findTrack(item.detection, embedding, unmatchedTrackIds, observation.timestamp);
       if (track) {
         unmatchedTrackIds.delete(track.id);
-        changes.push(...this.updateTrack(track, item.detection, embedding, observation.timestamp));
-      } else {
-        const created = this.createTrack(item.detection, embedding, observation.timestamp);
-        unmatchedTrackIds.delete(created.id);
+      }
+      matches.push({ ...item, embedding, track });
+    }
+
+    const cameraMotion = this.estimateCameraMotion(matches);
+    if (cameraMotion.reliable) {
+      this.cameraOffsetX += cameraMotion.dx;
+    }
+    const cameraMoving = observation.cameraMoving === true || cameraMotion.moving;
+    if (cameraMoving) {
+      this.cameraMotionSuppressUntil = observation.timestamp + CAMERA_MOTION_SUPPRESS_MS;
+    }
+
+    for (const match of matches) {
+      if (match.track) {
+        changes.push(...this.updateTrack(
+          match.track,
+          match.detection,
+          match.embedding,
+          observation.timestamp,
+          cameraMoving,
+        ));
+      } else if (match.detection.score >= NEW_TRACK_SCORE) {
+        this.createTrack(match.detection, match.embedding, observation.timestamp);
       }
     }
 
     for (const trackId of unmatchedTrackIds) {
       const track = this.tracks.get(trackId);
-      if (!track || track.visibility === 'occluded' || observation.timestamp - track.lastSeenAt < OCCLUSION_AFTER_MS) {
+      if (!track || track.visibility === 'occluded') {
         continue;
       }
+      track.misses += 1;
+      if (
+        track.misses < OCCLUSION_AFTER_MISSES &&
+        observation.timestamp - track.lastSeenAt < OCCLUSION_AFTER_MS
+      ) {continue;}
       track.visibility = 'occluded';
       if (track.confirmed) {
         changes.push({
@@ -97,18 +155,38 @@ export class SessionSceneStore {
       }
     }
 
-    const pathBlocked = this.visibleConfirmed().some(entity => entity.inPath && visualNear(entity));
-    if (pathBlocked !== this.lastPathBlocked) {
+    const pathCandidate = this.visibleConfirmed().some(entity => entity.inPath && visualNear(entity));
+    if (observation.timestamp < this.cameraMotionSuppressUntil) {
+      this.pendingPathBlocked = null;
+      this.pendingPathFrames = 0;
+    } else if (pathCandidate !== this.lastPathBlocked) {
+      if (this.pendingPathBlocked === pathCandidate) {
+        this.pendingPathFrames += 1;
+      } else {
+        this.pendingPathBlocked = pathCandidate;
+        this.pendingPathFrames = 1;
+      }
+    } else {
+      this.pendingPathBlocked = null;
+      this.pendingPathFrames = 0;
+    }
+    if (
+      this.pendingPathBlocked !== null &&
+      this.pendingPathFrames >= PATH_CONFIRM_FRAMES
+    ) {
+      const pathBlocked = this.pendingPathBlocked;
       changes.push({
         key: `path:${pathBlocked ? 'blocked' : 'clear'}:${observation.timestamp}`,
         kind: pathBlocked ? 'path-blocked' : 'path-cleared',
         timestamp: observation.timestamp,
         speak: true,
         text: pathBlocked
-          ? 'Something has moved into the visible center path. Pause while I keep checking.'
+          ? 'The visible center path may now be blocked. Pause while I keep checking.'
           : 'The visible center path appears open again. Confirm with the obstacle sensor before moving.',
       });
       this.lastPathBlocked = pathBlocked;
+      this.pendingPathBlocked = null;
+      this.pendingPathFrames = 0;
     }
     if (changes.length > 0) {this.revision += 1;}
     this.trimTracks();
@@ -170,8 +248,17 @@ export class SessionSceneStore {
       w: detection.w,
       h: detection.h,
       hits: 1,
-      lastAnnouncedCx: detection.cx,
+      misses: 0,
+      lastAnnouncedCorrectedCx: detection.cx - this.cameraOffsetX,
       lastAnnouncedZone: zone,
+      motionCandidateDirection: 0,
+      motionCandidateHits: 0,
+      zoneCandidate: zone,
+      zoneCandidateHits: 0,
+      pathCandidate: inPath,
+      pathCandidateHits: 0,
+      lastDetectionCx: detection.cx,
+      lastDetectionCy: detection.cy,
       embedding,
       wasInPath: inPath,
     };
@@ -184,21 +271,52 @@ export class SessionSceneStore {
     detection: Detection,
     embedding: number[] | undefined,
     now: number,
+    cameraMoving: boolean,
   ): SceneChange[] {
     const changes: SceneChange[] = [];
     const wasConfirmed = track.confirmed;
-    const previousZone = track.zone;
     track.hits += 1;
+    track.misses = 0;
     track.lastSeenAt = now;
     track.visibility = 'visible';
     track.confidence = ema(track.confidence, detection.score, 0.35);
-    track.cx = ema(track.cx, detection.cx, 0.55);
-    track.cy = ema(track.cy, detection.cy, 0.55);
-    track.w = ema(track.w, detection.w, 0.5);
-    track.h = ema(track.h, detection.h, 0.5);
+    track.cx = ema(track.cx, detection.cx, 0.3);
+    track.cy = ema(track.cy, detection.cy, 0.3);
+    track.w = ema(track.w, detection.w, 0.25);
+    track.h = ema(track.h, detection.h, 0.25);
     track.nearScore = ema(track.nearScore, detection.nearScore ?? detection.h, 0.35);
-    track.zone = zoneOf(track.cx);
-    track.inPath = isInPath(track);
+    track.lastDetectionCx = detection.cx;
+    track.lastDetectionCy = detection.cy;
+    const detectedZone = zoneOf(track.cx);
+    if (detectedZone !== track.zone) {
+      if (track.zoneCandidate === detectedZone) {track.zoneCandidateHits += 1;}
+      else {
+        track.zoneCandidate = detectedZone;
+        track.zoneCandidateHits = 1;
+      }
+      if (track.zoneCandidateHits >= 3) {
+        track.zone = detectedZone;
+        track.zoneCandidateHits = 0;
+      }
+    } else {
+      track.zoneCandidate = detectedZone;
+      track.zoneCandidateHits = 0;
+    }
+    const detectedInPath = isInPath(track);
+    if (detectedInPath !== track.inPath) {
+      if (track.pathCandidate === detectedInPath) {track.pathCandidateHits += 1;}
+      else {
+        track.pathCandidate = detectedInPath;
+        track.pathCandidateHits = 1;
+      }
+      if (track.pathCandidateHits >= 2) {
+        track.inPath = detectedInPath;
+        track.pathCandidateHits = 0;
+      }
+    } else {
+      track.pathCandidate = detectedInPath;
+      track.pathCandidateHits = 0;
+    }
     track.wasInPath = track.wasInPath || track.inPath;
     track.confirmed = track.hits >= (track.label === 'person' ? 3 : 2);
 
@@ -222,12 +340,33 @@ export class SessionSceneStore {
         speak: track.label === 'person' || track.inPath,
         text: `${displayName(track)} is ${track.zone === 'ahead' ? 'ahead' : `to the ${track.zone}`}${track.inPath ? ', in the center path' : ''}.`,
       });
-      track.lastAnnouncedCx = track.cx;
+      track.lastAnnouncedCorrectedCx = track.cx - this.cameraOffsetX;
       track.lastAnnouncedZone = track.zone;
     } else if (track.confirmed) {
-      const movedAcrossZone = previousZone !== track.zone && track.zone !== track.lastAnnouncedZone;
-      const movedFar = Math.abs(track.cx - track.lastAnnouncedCx) >= 0.18;
-      if (movedAcrossZone || movedFar) {
+      const correctedCx = track.cx - this.cameraOffsetX;
+      const displacement = correctedCx - track.lastAnnouncedCorrectedCx;
+      const direction: -1 | 0 | 1 = Math.abs(displacement) >= MOVEMENT_THRESHOLD
+        ? displacement < 0 ? -1 : 1
+        : 0;
+      if (cameraMoving || now < this.cameraMotionSuppressUntil) {
+        // Gyro suppression may not have enough visual references to calculate
+        // an offset. Rebase here so the completed camera pan cannot become a
+        // delayed false object-movement alert.
+        track.lastAnnouncedCorrectedCx = correctedCx;
+        track.lastAnnouncedZone = track.zone;
+        track.motionCandidateDirection = 0;
+        track.motionCandidateHits = 0;
+      } else if (direction !== 0) {
+        if (track.motionCandidateDirection === direction) {track.motionCandidateHits += 1;}
+        else {
+          track.motionCandidateDirection = direction;
+          track.motionCandidateHits = 1;
+        }
+      } else {
+        track.motionCandidateDirection = 0;
+        track.motionCandidateHits = 0;
+      }
+      if (track.motionCandidateHits >= MOVEMENT_CONFIRM_FRAMES) {
         changes.push({
           key: `moved:${track.id}:${track.zone}:${now}`,
           kind: 'moved',
@@ -236,8 +375,10 @@ export class SessionSceneStore {
           speak: track.label === 'person' || track.inPath,
           text: `${displayName(track)} moved ${track.zone === 'ahead' ? 'into the area ahead' : `to the ${track.zone}`}.`,
         });
-        track.lastAnnouncedCx = track.cx;
+        track.lastAnnouncedCorrectedCx = correctedCx;
         track.lastAnnouncedZone = track.zone;
+        track.motionCandidateDirection = 0;
+        track.motionCandidateHits = 0;
       }
     }
     return changes;
@@ -278,12 +419,39 @@ export class SessionSceneStore {
     return [...this.tracks.values()].filter(track => track.visibility === 'visible' && track.confirmed);
   }
 
+  private estimateCameraMotion(matches: DetectionMatch[]): {
+    dx: number;
+    dy: number;
+    moving: boolean;
+    reliable: boolean;
+  } {
+    const deltas = matches
+      .filter(match => match.track?.confirmed && match.track.label !== 'person')
+      .map(match => ({
+        dx: match.detection.cx - match.track!.lastDetectionCx,
+        dy: match.detection.cy - match.track!.lastDetectionCy,
+      }));
+    if (deltas.length < 2) {return { dx: 0, dy: 0, moving: false, reliable: false };}
+    const dx = median(deltas.map(delta => delta.dx));
+    const dy = median(deltas.map(delta => delta.dy));
+    const coherent = deltas.filter(delta =>
+      Math.hypot(delta.dx - dx, delta.dy - dy) <= CAMERA_MOTION_MAX_RESIDUAL,
+    ).length;
+    const reliable = coherent >= Math.max(2, Math.ceil(deltas.length * 0.67));
+    return {
+      dx: reliable ? dx : 0,
+      dy: reliable ? dy : 0,
+      moving: reliable && Math.hypot(dx, dy) >= CAMERA_MOTION_MIN_DELTA,
+      reliable,
+    };
+  }
+
   private snapshot(timestamp: number, changes: SceneChange[]): NextSceneSnapshot {
     const entities = [...this.tracks.values()]
       .map(toPublicEntity)
       .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
     const visibleEntities = entities.filter(entity => entity.visibility === 'visible' && entity.confirmed);
-    const pathBlocked = visibleEntities.some(entity => entity.inPath && visualNear(entity));
+    const pathBlocked = this.lastPathBlocked;
     return {
       revision: this.revision,
       timestamp,
@@ -391,6 +559,15 @@ function blend(a: number[], b: number[]): number[] {
 
 function ema(previous: number, next: number, alpha: number): number {
   return previous * (1 - alpha) + next * alpha;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) {return 0;}
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 function shuffled(values: string[]): string[] {

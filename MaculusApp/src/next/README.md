@@ -50,10 +50,23 @@ same payload with HTTP 503.
 The visual pipeline tries the Raspberry Pi `/capture` endpoint first. A missing,
 slow, or unavailable Pi camera falls back to the already-running iPhone camera
 without stopping object detection. The **Show camera preview** control displays
-the latest processed frame, its true source, and YOLO detection boxes. Preview
-updates are throttled to reduce React Native bridge and rendering work, while
-the underlying guidance loop continues at its normal rate. Frames remain local
-and the preview is disabled by default.
+the latest processed frame, its true source, and confirmed temporally smoothed
+detection boxes. A confirmed box survives two short detector misses so a single
+low-confidence YOLO frame does not make the overlay flash or create a false
+leave/re-enter event. New tracks use a stricter confidence threshold than
+existing tracks. Preview updates are throttled to reduce React Native bridge and
+rendering work, while the underlying guidance loop continues at its normal rate.
+Frames remain local and the preview is disabled by default.
+
+Object movement is evaluated only after three consistent frames and against a
+camera-motion-corrected horizontal position. For Pi frames, the tracker estimates
+global camera motion from the median frame-to-frame displacement of multiple
+confirmed non-person objects. For iPhone fallback frames, Core Motion also marks
+periods of device rotation or acceleration; movement and visual path transitions
+are suppressed and rebased during that period. The iPhone gyro cannot describe
+movement of an independently mounted Pi camera, so Pi compensation remains
+visual. Ultrasonic polling and emergency alerts are independent of all temporal
+visual filtering and remain immediate.
 
 ## Detailed scene description
 
