@@ -96,11 +96,13 @@ export class ConversationService {
       const response = await localLlmService.completeVision({
         imageBase64,
         prompt: buildVisionPrompt(question, scene),
-        maxTokens: 144,
+        // FastVLM is most useful as a concise guide. Bounding the answer keeps
+        // total latency low without reducing the vision encoder's accuracy.
+        maxTokens: 96,
         // The first multimodal turn also initializes image processing and Metal
         // resources. Nine seconds was too short on real iPhones and silently
         // converted genuine camera requests into deterministic fallbacks.
-        timeoutMs: 45000,
+        timeoutMs: 30000,
       });
       const safe = removeMobilitySentences(sanitizeVisionDescription(response));
       if (!safe) {
@@ -154,7 +156,7 @@ export class ConversationService {
       return { text: vision.text, vision };
     }
     if (!this.isReady() || localLlmService.getState() !== 'ready') {
-      return { text: 'I can describe verified live objects and the obstacle sensor now. Install the optional private vision model for detailed descriptions and conversation.' };
+      return { text: 'The private vision model is not ready. Live detector and obstacle monitoring are still active.' };
     }
 
     try {
@@ -210,15 +212,11 @@ export function buildVisionPrompt(question: string, scene: NextSceneSnapshot): s
     'You are privately analyzing one live camera frame for a blind user.',
     `User request: ${question}`,
     'Answer the user request directly in one to three short, natural sentences.',
-    'For a broad scene request, start with the overall setting, then the most important people, objects, actions, spatial relationships, colors, or clearly readable short text.',
-    'For a specific question, focus on that question and use the image as the source of visual facts.',
-    'For casual conversation that does not require the image, answer naturally without inventing anything about the surroundings.',
-    'Mention an obvious immediate physical hazard, but never tell the user to walk, move, step, turn, cross, or continue.',
-    'Never say a route or path is safe or clear, and never estimate exact distance.',
-    'Use supplied anonymous session labels consistently, but never claim a real identity.',
-    'For a find or locate request, say whether a likely match is visible and where it appears in the image, without giving walking directions.',
-    'Do not infer age, ethnicity, disability, emotion, intent, or other sensitive traits.',
-    'If an important detail is unclear, say that it is uncertain. Do not invent details outside the image.',
+    'Use the image as truth. For a broad request, report the setting, important people, objects, actions, positions, colors, and clearly readable short text.',
+    'For a find request, say whether a likely match is visible and where it is in the image.',
+    'Mention an obvious physical hazard, but never tell the user to walk, move, step, turn, cross, or continue; never call a route safe or clear or estimate exact distance.',
+    'Reuse supplied anonymous session labels without claiming real identity. Do not infer sensitive traits.',
+    'Say when an important detail is unclear and never invent facts outside the image.',
     `Verified object-detector hints, which may be incomplete: ${verifiedObjects}`,
   ].join(' ');
 }

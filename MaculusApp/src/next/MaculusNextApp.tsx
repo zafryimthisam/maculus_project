@@ -118,15 +118,17 @@ export default function MaculusNextApp(): React.JSX.Element {
 
 
         <View style={styles.modelCard}>
-          <Text style={styles.cardLabel}>OPTIONAL PRIVATE VISION AI</Text>
+          <Text style={styles.cardLabel}>{state.model.bundled ? 'PRIVATE RESEARCH VISION AI' : 'OPTIONAL PRIVATE VISION AI'}</Text>
           <Text style={styles.modelTitle}>{state.model.modelName}</Text>
           <Text style={styles.modelBody}>{modelStatusText(state.model, modelPercent, state.conversationReady)}</Text>
           <Text style={styles.modelFootnote}>
-            About 1.3 GB · runs locally · camera frames are never uploaded
+            {state.model.bundled
+              ? 'Bundled research model · runs locally · camera frames are never uploaded'
+              : 'About 1.3 GB · runs locally · camera frames are never uploaded'}
           </Text>
           {!state.model.supported ? null : state.model.state === 'downloading' ? (
             <ActionButton label={`Pause download at ${modelPercent}%`} onPress={cancelPrivateVisionModelDownload} />
-          ) : state.model.state === 'ready' ? (
+          ) : state.model.state === 'ready' && !state.model.bundled ? (
             <ActionButton
               label="Remove private vision model"
               onPress={() => Alert.alert(
@@ -138,9 +140,9 @@ export default function MaculusNextApp(): React.JSX.Element {
                 ],
               )}
             />
-          ) : (
+          ) : state.model.state !== 'ready' ? (
             <ActionButton label={state.model.state === 'paused' ? 'Resume vision model download' : 'Install private vision AI'} onPress={() => installModel(false)} />
-          )}
+          ) : null}
         </View>
 
         <Text style={styles.privacy}>{state.privacyMessage}</Text>
@@ -168,11 +170,16 @@ function ActionButton({ label, onPress, disabled = false }: { label: string; onP
 }
 
 function modelStatusText(
-  model: { state: string; supported: boolean; capabilityReason: string | null; currentAsset: string | null; message: string | null },
+  model: { state: string; supported: boolean; capabilityReason: string | null; currentAsset: string | null; message: string | null; bundled: boolean },
   percent: number,
   loaded: boolean,
 ): string {
   if (!model.supported) {return model.capabilityReason || 'This device cannot load the high-accuracy vision model.';}
+  if (model.state === 'ready' && model.bundled) {
+    return loaded
+      ? 'Apple FastVLM is ready. Non-commercial research use only.'
+      : 'Apple FastVLM is bundled and loads when a session starts. Non-commercial research use only.';
+  }
   if (model.state === 'ready') {return loaded ? 'Installed and ready for detailed scene descriptions.' : 'Installed. It loads when a guidance session starts.';}
   if (model.state === 'downloading') {return `Downloading ${model.currentAsset || 'model'}, ${percent} percent complete.`;}
   if (model.state === 'paused') {return `Download paused at ${percent} percent.`;}

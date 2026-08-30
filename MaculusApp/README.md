@@ -9,25 +9,27 @@ MaculusNext starts obstacle monitoring before optional AI models, treats stale
 or failed sensor data as unknown rather than clear, keeps scene objects and
 random person aliases for the active session, and routes all application speech
 through one priority coordinator. Verified object narration is always available;
-when installed, the optional local VLM describes a recent camera frame and also
-handles general conversation. Generated movement instructions are rejected. The
+the local VLM describes a recent camera frame and handles every non-control
+spoken request. Generated movement instructions are rejected. The
 primary phone camera is processed locally and no preview frame is rendered in
 React.
 
 See [`src/next/README.md`](src/next/README.md) for module boundaries, the sensor
 contract, and the production BLE/accessory requirement.
 
-The optional LFM2.5-VL-1.6B model is installed only after an explicit user
-action. Its two pinned files total about 1.3 GB, resume partial downloads, and
-must pass SHA-256 verification before loading. Images and prompts never contact
-a cloud inference API.
+The iOS 18.2+ research build embeds Apple FastVLM-1.5B INT8 and runs its Core ML
+vision encoder plus MLX language model fully on device. The unsigned build
+script pins Apple's source commit and downloads the official weights before
+building; the weights are not committed to Git. FastVLM's weights are restricted
+to non-commercial research and academic use. Android retains the existing
+optional LFM2.5-VL-1.6B `llama.rn` path. Images and prompts never contact a cloud
+inference API.
 
 ## Legacy prototype notes
 
 Maculus keeps collision and walking decisions inside the deterministic temporal
-vision engine. The optional local LFM2.5 companion receives only stabilized,
-expiring scene facts and can understand natural requests, converse briefly, and
-start generic searches for classes supported by the bundled COCO detector.
+vision engine. On iOS, FastVLM receives a current camera frame for every natural
+spoken request and is grounded with stabilized, expiring detector facts.
 Emergency and warning speech never waits for the language model.
 
 After the wake word, speech is free-form rather than limited to a command list.
@@ -38,11 +40,9 @@ conversation retains at most six session-only exchanges. The assistant cannot
 identify real people, inspect unseen space, certify that a seat is empty, or
 attach an ultrasonic measurement to an ambiguously matched object.
 
-The optional download installs `LFM2.5-VL-1.6B-Q4_K_M.gguf` and its Q8
-multimodal projector into app-private storage. Downloads resume from `.part`
-files and are installed only after pinned SHA-256 verification. No GGUF needs to
-be copied into Android or iOS build assets. All inference is offline after this
-one-time download.
+Android's optional download installs `LFM2.5-VL-1.6B-Q4_K_M.gguf` and its Q8
+multimodal projector into app-private storage. iOS does not link `llama.rn`; its
+FastVLM model is embedded at build time so only one VLM engine ships on iPhone.
 
 Model provenance is recorded in
 `src/models/lfm2.5-vl-1.6b-q4_k_m.provenance.json`; the complete LFM Open License
@@ -50,10 +50,10 @@ v1.0 is in `src/models/LFM_OPEN_LICENSE.txt`. Commercial entities at or above
 the license's USD 10 million annual-revenue threshold need separate permission
 from Liquid AI.
 
-The React Native runtime pins multimodal `llama.rn` 0.12.9 and enables React
-Native's New Architecture. Android builds set `rnllamaBuildFromSource=true`;
-CocoaPods and the unsigned iOS script set `RNLLAMA_BUILD_FROM_SOURCE=1`
-automatically.
+The React Native runtime pins multimodal `llama.rn` 0.12.9 for Android and
+enables React Native's New Architecture. Android builds set
+`rnllamaBuildFromSource=true`; `react-native.config.js` disables that dependency
+on iOS in favor of FastVLM.
 
 This is a [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
 

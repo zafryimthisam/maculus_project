@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 
 export type LocalLlmState = 'unavailable' | 'unloaded' | 'loading' | 'ready' | 'generating' | 'error';
 
@@ -31,6 +31,25 @@ type LlamaContextLike = {
   release(): Promise<void> | void;
 };
 
+type NativeFastVlmResult = {
+  text?: string;
+  timeToFirstTokenMs?: number;
+  totalTimeMs?: number;
+};
+
+type NativeFastVlmModule = {
+  load(): Promise<{ ready: boolean; modelName?: string; backend?: string }>;
+  generate(
+    base64Jpeg: string | null,
+    prompt: string,
+    maxTokens: number,
+  ): Promise<NativeFastVlmResult>;
+  cancel(): Promise<boolean>;
+  release(): Promise<boolean>;
+};
+
+const nativeFastVlm = NativeModules.MaculusFastVLM as NativeFastVlmModule | undefined;
+
 export interface LocalLlmStreamChunk {
   token: string;
   done: boolean;
@@ -46,6 +65,7 @@ export class LocalLlmService {
   private lastError: string | null = null;
   private thermalThrottled = false;
   private lastCompletionEndedAt = 0;
+  private usingFastVlm = false;
 
   getState(): LocalLlmState {return this.state;}
   getLastError(): string | null {return this.lastError;}
@@ -54,6 +74,35 @@ export class LocalLlmService {
 
   async load(modelPath: string, projectorPath?: string | null): Promise<boolean> {
     const requestedProjector = projectorPath || null;
+    if (Platform.OS === 'ios') {
+      if (this.usingFastVlm && this.modelPath === modelPath && this.state === 'ready') {
+        this.lastError = null;
+        return true;
+      }
+      await this.release();
+      this.state = 'loading';
+      this.lastError = null;
+      try {
+        if (!nativeFastVlm) {throw new Error('MaculusFastVLM native module is unavailable. Rebuild the iOS app.');}
+        const loaded = await nativeFastVlm.load();
+        if (!loaded?.ready) {throw new Error('Apple FastVLM did not report a ready state.');}
+        this.usingFastVlm = true;
+        this.modelPath = modelPath;
+        this.projectorPath = requestedProjector;
+        this.visionReady = true;
+        this.state = 'ready';
+        return true;
+      } catch (error: any) {
+        if (nativeFastVlm) {await ignoreNativeFailure(() => nativeFastVlm.release());}
+        this.usingFastVlm = false;
+        this.modelPath = null;
+        this.projectorPath = null;
+        this.visionReady = false;
+        this.state = 'error';
+        this.lastError = error?.message || 'Apple FastVLM could not be loaded.';
+        return false;
+      }
+    }
     if (this.context && this.modelPath === modelPath && this.projectorPath === requestedProjector) {
       this.lastError = null;
       return true;
@@ -74,7 +123,9 @@ export class LocalLlmService {
         n_ubatch: 128,
         n_parallel: 1,
         n_threads: this.thermalThrottled ? 1 : Platform.OS === 'android' ? 2 : 4,
-        n_gpu_layers: Platform.OS === 'ios' ? 99 : 0,
+        // iOS returns through the native FastVLM branch above. The remaining
+        // llama.cpp path is Android and intentionally CPU-only.
+        n_gpu_layers: 0,
         flash_attn_type: 'auto',
         cache_type_k: 'q8_0',
         cache_type_v: 'q8_0',
@@ -89,10 +140,7 @@ export class LocalLlmService {
       if (requestedProjector) {
         const initialized = await this.context.initMultimodal({
           path: requestedProjector.startsWith('file://') ? requestedProjector : `file://${requestedProjector}`,
-          // Keep the LLM layers on Metal, but evaluate the vision projector on
-          // CPU. llama.rn has a reproducible iOS Metal path where image chunk
-          // evaluation can abort with "Failed to evaluate chunks"/GPU Hang.
-          // Android already used the CPU projector path.
+          // Android evaluates this projector on CPU.
           use_gpu: false,
           image_min_tokens: 64,
           image_max_tokens: 256,
@@ -124,6 +172,15 @@ export class LocalLlmService {
   }
 
   async complete(request: LocalLlmCompletionRequest): Promise<string> {
+    if (this.usingFastVlm) {
+      return this.completeFastVlm(
+        null,
+        request.messages.map(message => `${message.role}: ${message.content}`).join('\n'),
+        request.maxTokens,
+        request.timeoutMs,
+        'Conversational response',
+      );
+    }
     if (!this.context || this.state !== 'ready') {
       throw new Error('Conversational model is not ready.');
     }
@@ -175,6 +232,15 @@ export class LocalLlmService {
   }
 
   async completeVision(request: LocalVisionCompletionRequest): Promise<string> {
+    if (this.usingFastVlm) {
+      return this.completeFastVlm(
+        request.imageBase64,
+        request.prompt,
+        this.thermalThrottled ? Math.min(request.maxTokens, 64) : request.maxTokens,
+        request.timeoutMs,
+        'Visual description',
+      );
+    }
     if (!this.context || !this.visionReady || this.state !== 'ready') {
       throw new Error('On-device vision model is not ready.');
     }
@@ -317,6 +383,11 @@ export class LocalLlmService {
 
   async cancel(): Promise<void> {
     this.generationId += 1;
+    if (this.usingFastVlm && nativeFastVlm) {
+      await ignoreNativeFailure(() => nativeFastVlm.cancel());
+      this.state = 'ready';
+      return;
+    }
     const context = this.context;
     if (context) {await ignoreNativeFailure(() => context.stopCompletion());}
     if (this.context) {this.state = 'ready';}
@@ -324,6 +395,8 @@ export class LocalLlmService {
 
   async release(): Promise<void> {
     this.generationId += 1;
+    const wasUsingFastVlm = this.usingFastVlm;
+    this.usingFastVlm = false;
     const context = this.context;
     this.context = null;
     this.modelPath = null;
@@ -333,7 +406,52 @@ export class LocalLlmService {
       await ignoreNativeFailure(() => context.releaseMultimodal());
       await ignoreNativeFailure(() => context.release());
     }
+    if (wasUsingFastVlm && nativeFastVlm) {
+      await ignoreNativeFailure(() => nativeFastVlm.release());
+    }
     this.state = 'unloaded';
+  }
+
+  private async completeFastVlm(
+    imageBase64: string | null,
+    prompt: string,
+    maxTokens: number,
+    timeoutMs: number,
+    label: string,
+  ): Promise<string> {
+    if (!nativeFastVlm || !this.usingFastVlm || this.state !== 'ready') {
+      throw new Error('Apple FastVLM is not ready.');
+    }
+    const generation = ++this.generationId;
+    this.state = 'generating';
+    this.lastError = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const completionPromise = nativeFastVlm.generate(imageBase64, prompt, maxTokens);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} timed out.`)), timeoutMs);
+      });
+      const result = await Promise.race([completionPromise, timeoutPromise]);
+      if (generation !== this.generationId) {throw new Error(`${label} was cancelled.`);}
+      const text = result.text?.trim() || '';
+      if (!text) {throw new Error('Apple FastVLM returned an empty response.');}
+      if (__DEV__) {
+        console.info(
+          `[MaculusNext] FastVLM TTFT ${Number(result.timeToFirstTokenMs) || 0} ms, total ${Number(result.totalTimeMs) || 0} ms`,
+        );
+      }
+      return text;
+    } catch (error) {
+      if (generation === this.generationId) {
+        this.lastError = completionErrorMessage(error);
+        await ignoreNativeFailure(() => nativeFastVlm.cancel());
+      }
+      throw error;
+    } finally {
+      if (timeout) {clearTimeout(timeout);}
+      this.lastCompletionEndedAt = Date.now();
+      if (generation === this.generationId && this.usingFastVlm) {this.state = 'ready';}
+    }
   }
 }
 
@@ -345,7 +463,7 @@ function completionErrorMessage(error: unknown): string {
   return 'The local model failed without an error message.';
 }
 
-async function ignoreNativeFailure(action: () => Promise<void> | void): Promise<void> {
+async function ignoreNativeFailure(action: () => Promise<unknown> | unknown): Promise<void> {
   try {
     await action();
   } catch {

@@ -2,63 +2,52 @@
 
 Decision date: 2026-08-30
 
-## Selected runtime
+## iOS selection: Apple FastVLM-1.5B INT8
 
-Maculus uses **LFM2.5-VL-1.6B** with the official Q4_K_M GGUF language model
-and Q8 multimodal projector through llama.cpp/libmtmd and llama.rn 0.12.9.
+Maculus iOS uses Apple's official FastVLM-1.5B INT8 reference implementation:
+a Core ML FastViT-HD vision encoder and an MLX language/model projector path.
+The app requires iOS 18.2 and targets an iPhone 14 Pro Max with 6 GB memory.
 
-This is the best current balance for the app rather than the absolute largest
-model:
+Why this configuration:
 
-- Liquid recommends the 1.6B model for most vision workloads and describes it
-  as its fast/accurate option.
-- Its published evaluation is stronger than FastVLM-1.5B on RealWorldQA,
-  instruction following, InfoVQA, OCRBench v2, BLINK and multilingual vision.
-- The two quantized runtime files total 1,314,006,144 bytes, preserving much
-  more memory headroom than the 3B option for the independent detector and
-  obstacle loop.
-- The same language backbone supports private general conversation, avoiding a
-  second text-only model.
-- The official GGUF files run in llama.cpp, whose current multimodal library is
-  exposed directly by the React Native binding used by this project.
+- Apple describes 1.5B INT8 as the balanced option when both speed and accuracy
+  matter on larger devices.
+- The official implementation provides native cancellation during token
+  generation and a measured time-to-first-token path.
+- Core ML handles the image encoder while MLX keeps the language model on
+  Apple's GPU stack, avoiding the previous llama.cpp CPU projector bottleneck.
+- One model stays loaded for the guidance session; outputs are deterministic and
+  bounded to concise guide responses.
 
-Official sources:
+Source is pinned to commit
+`592b4add3c1c8a518e77d95dc6248e76c1dd591f`. The build downloads
+`llava-fastvithd_1.5b_stage3_llm.int8` from Apple's official CDN and embeds the
+software license, model agreement, and acknowledgements in the framework.
 
-- https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B
-- https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-GGUF
-- https://docs.liquid.ai/lfm/models/vision-models
-- https://github.com/ggml-org/llama.cpp/tree/master/tools/mtmd
-- https://github.com/mybigday/llama.rn
+Official references:
 
-## iOS runtime configuration
+- https://github.com/apple/ml-fastvlm
+- https://github.com/apple/ml-fastvlm/blob/main/app/README.md
+- https://github.com/apple/ml-fastvlm/blob/main/LICENSE_MODEL
 
-The language-model layers remain offloaded to Metal. The multimodal projector
-uses CPU evaluation on iOS because llama.rn has a reported Metal failure where
-image processing aborts with `Failed to evaluate chunks`/`GPU Hang`; CPU
-projector evaluation is the known reliable path. The context uses a 512 logical
-batch with a 128 physical micro-batch and Q8 KV caches to reduce image-chunk
-calls and unified-memory pressure.
+The model license is restricted to non-commercial scientific research and
+academic development. It excludes commercial exploitation and product
+development. See `FASTVLM_RESEARCH_NOTICE.md`.
 
-- https://github.com/mybigday/llama.rn/issues/176
-- https://github.com/mybigday/llama.rn/blob/v0.12.9/README.md#multimodal-vision--audio
+## Android runtime retained
 
-## Alternatives considered
+Android continues to use LFM2.5-VL-1.6B Q4_K_M plus its Q8 multimodal projector
+through llama.cpp/libmtmd and `llama.rn` 0.12.9. `react-native.config.js`
+disables `llama.rn` only for iOS, so this change does not disrupt Android.
 
-| Model | Strength | Why it is not the default |
-| --- | --- | --- |
-| LFM2.5-VL-3B | Best Liquid vision accuracy and grounding | Roughly 2.25 GB of Q4 model plus projector and about 3 GB runtime memory is too aggressive beside continuous camera inference. |
-| LFM2.5-VL-450M | About 332 MB with Q4 model and Q8 projector; fastest fallback candidate | Published real-world and reasoning accuracy is materially below 1.6B. |
-| FastVLM-1.5B | Excellent Apple-device first-token latency and an official iOS demo | Lower published instruction, OCR and multilingual scores; released model terms must also be reviewed for the intended distribution. |
-| Gemma 3n E2B | Designed for multimodal use on phones | Larger deployment footprint and no equally direct path through the app's existing llama.cpp integration. |
-
-## Accuracy boundary
+## Accuracy and safety boundary
 
 Vendor benchmark scores do not prove safe performance for blind navigation.
-Before release, evaluate the exact quantized files on a versioned Maculus test
-set covering low light, glare, motion blur, occlusion, stairs, curbs, doors,
-vehicles, signs, crowds and adversarial near-obstacle cases. Record first-token
-latency, total response latency, missed important objects, hallucinated objects,
-unsafe wording and thermal/memory failures by iPhone model.
+Evaluate the exact research IPA on low light, glare, motion blur, occlusion,
+stairs, curbs, doors, vehicles, signs, crowds, and near-obstacle cases. Record
+time to first token, total latency, misses, hallucinations, unsafe wording,
+memory pressure, and thermal failures.
 
-The VLM must remain outside the emergency decision path regardless of those
-results. YOLO tracking and the ultrasonic accessory own emergency alerts.
+FastVLM remains outside the emergency decision path. The ultrasonic accessory
+and deterministic safety coordinator own the 40 cm emergency alert; that alert
+cancels native FastVLM generation and interrupts its speech.

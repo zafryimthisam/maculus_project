@@ -16,6 +16,10 @@
 		13B07FC11A68108700A75B9A /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 13B07FB71A68108700A75B9A /* main.m */; };
 		7699B88040F8A987B510C191 /* libPods-MaculusApp-MaculusAppTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 19F6CBCC0A4E27FBF8BF4A61 /* libPods-MaculusApp-MaculusAppTests.a */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		F10000012F00000100FA57A1 /* MaculusFastVLMBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000212F00000100FA57A1 /* MaculusFastVLMBridge.swift */; };
+		F10000022F00000100FA57A1 /* MaculusFastVLMBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F10000222F00000100FA57A1 /* MaculusFastVLMBridge.m */; };
+		F10000032F00000100FA57A1 /* FastVLM.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F10000242F00000100FA57A1 /* FastVLM.framework */; };
+		F10000042F00000100FA57A1 /* FastVLM.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F10000242F00000100FA57A1 /* FastVLM.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -26,7 +30,35 @@
 			remoteGlobalIDString = 13B07F861A680F5B00A75B9A;
 			remoteInfo = MaculusApp;
 		};
+		F10000112F00000100FA57A1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F10000232F00000100FA57A1 /* FastVLM.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = C39BB3E52D79082A005DB8FB;
+			remoteInfo = FastVLM;
+		};
+		F10000122F00000100FA57A1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F10000232F00000100FA57A1 /* FastVLM.xcodeproj */;
+			proxyType = 2;
+			remoteGlobalIDString = C39BB3E62D79082A005DB8FB;
+			remoteInfo = FastVLM;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		F10000412F00000100FA57A1 /* Embed FastVLM Framework */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				F10000042F00000100FA57A1 /* FastVLM.framework in Embed Frameworks */,
+			);
+			name = "Embed FastVLM Framework";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		00E356EE1AD99517003FC87E /* MaculusAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MaculusAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -48,7 +80,20 @@
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = MaculusApp/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		89C6BE57DB24E9ADA2F236DE /* Pods-MaculusApp-MaculusAppTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaculusApp-MaculusAppTests.release.xcconfig"; path = "Target Support Files/Pods-MaculusApp-MaculusAppTests/Pods-MaculusApp-MaculusAppTests.release.xcconfig"; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
+		F10000212F00000100FA57A1 /* MaculusFastVLMBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MaculusFastVLMBridge.swift; path = MaculusApp/MaculusFastVLMBridge.swift; sourceTree = "<group>"; };
+		F10000222F00000100FA57A1 /* MaculusFastVLMBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = MaculusFastVLMBridge.m; path = MaculusApp/MaculusFastVLMBridge.m; sourceTree = "<group>"; };
+		F10000232F00000100FA57A1 /* FastVLM.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = FastVLM.xcodeproj; path = FastVLMVendor/app/FastVLM.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXReferenceProxy section */
+		F10000242F00000100FA57A1 /* FastVLM.framework */ = {
+			isa = PBXReferenceProxy;
+			fileType = wrapper.framework;
+			path = FastVLM.framework;
+			remoteRef = F10000122F00000100FA57A1 /* PBXContainerItemProxy */;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+/* End PBXReferenceProxy section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		00E356EB1AD99517003FC87E /* Frameworks */ = {
@@ -63,6 +108,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F10000032F00000100FA57A1 /* FastVLM.framework in Frameworks */,
 				0C80B921A6F3F58F76C31292 /* libPods-MaculusApp.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -93,6 +139,8 @@
 			children = (
 				13B07FAF1A68108700A75B9A /* AppDelegate.h */,
 				13B07FB01A68108700A75B9A /* AppDelegate.mm */,
+				F10000212F00000100FA57A1 /* MaculusFastVLMBridge.swift */,
+				F10000222F00000100FA57A1 /* MaculusFastVLMBridge.m */,
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
@@ -115,6 +163,7 @@
 		832341AE1AAA6A7D00B99B32 /* Libraries */ = {
 			isa = PBXGroup;
 			children = (
+				F10000232F00000100FA57A1 /* FastVLM.xcodeproj */,
 			);
 			name = Libraries;
 			sourceTree = "<group>";
@@ -154,6 +203,14 @@
 			path = Pods;
 			sourceTree = "<group>";
 		};
+		F10000312F00000100FA57A1 /* FastVLM Products */ = {
+			isa = PBXGroup;
+			children = (
+				F10000242F00000100FA57A1 /* FastVLM.framework */,
+			);
+			name = "FastVLM Products";
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -186,6 +243,7 @@
 				13B07F871A680F5B00A75B9A /* Sources */,
 				13B07F8C1A680F5B00A75B9A /* Frameworks */,
 				13B07F8E1A680F5B00A75B9A /* Resources */,
+				F10000412F00000100FA57A1 /* Embed FastVLM Framework */,
 				00DD1BFF1BD5951E006B06BC /* Bundle React Native code and images */,
 				00EEFC60759A1932668264C0 /* [CP] Embed Pods Frameworks */,
 				E235C05ADACE081382539298 /* [CP] Copy Pods Resources */,
@@ -193,6 +251,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				F10000512F00000100FA57A1 /* PBXTargetDependency */,
 			);
 			name = MaculusApp;
 			productName = MaculusApp;
@@ -226,6 +285,12 @@
 			);
 			mainGroup = 83CBB9F61A601CBA00E9B192;
 			productRefGroup = 83CBBA001A601CBA00E9B192 /* Products */;
+			projectReferences = (
+				{
+					ProductGroup = F10000312F00000100FA57A1 /* FastVLM Products */;
+					ProjectRef = F10000232F00000100FA57A1 /* FastVLM.xcodeproj */;
+				},
+			);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -400,6 +465,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F10000022F00000100FA57A1 /* MaculusFastVLMBridge.m in Sources */,
+				F10000012F00000100FA57A1 /* MaculusFastVLMBridge.swift in Sources */,
 				13B07FBC1A68108700A75B9A /* AppDelegate.mm in Sources */,
 				13B07FC11A68108700A75B9A /* main.m in Sources */,
 			);
@@ -412,6 +479,11 @@
 			isa = PBXTargetDependency;
 			target = 13B07F861A680F5B00A75B9A /* MaculusApp */;
 			targetProxy = 00E356F41AD99517003FC87E /* PBXContainerItemProxy */;
+		};
+		F10000512F00000100FA57A1 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = FastVLM;
+			targetProxy = F10000112F00000100FA57A1 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -426,7 +498,7 @@
 					"$(inherited)",
 				);
 				INFOPLIST_FILE = MaculusAppTests/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 13.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -451,7 +523,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				COPY_PHASE_STRIP = NO;
 				INFOPLIST_FILE = MaculusAppTests/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 13.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -572,7 +644,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 13.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					/usr/lib/swift,
 					"$(inherited)",
@@ -638,7 +710,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 13.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					/usr/lib/swift,
 					"$(inherited)",

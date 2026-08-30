@@ -16,6 +16,7 @@ export interface NextModelState {
   supported: boolean;
   capabilityReason: string | null;
   message: string | null;
+  bundled: boolean;
 }
 
 export interface SafetyAlert {
@@ -127,6 +128,7 @@ export const EMPTY_MODEL_STATE: NextModelState = {
   supported: true,
   capabilityReason: null,
   message: null,
+  bundled: false,
 };
 
 export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
