@@ -1,10 +1,11 @@
-import { Detection, DistanceReading, PersonEmbedding } from '../types';
+import { CameraSource, Detection, DistanceReading, PersonEmbedding } from '../types';
 import type { VoiceCommandStatus } from '../services/VoiceCommandService';
 
 export type NextRuntimePhase = 'idle' | 'starting' | 'running' | 'degraded' | 'stopping' | 'error';
 export type SensorHealth = 'unknown' | 'healthy' | 'warning' | 'emergency' | 'stale' | 'fault';
 export type EntityVisibility = 'visible' | 'occluded';
 export type NextModelAssetState = 'missing' | 'downloading' | 'paused' | 'ready' | 'error';
+export type PiConnectionState = 'unknown' | 'searching' | 'connected' | 'unavailable';
 
 export interface NextModelState {
   state: NextModelAssetState;
@@ -86,7 +87,13 @@ export interface NextRuntimeState {
   sessionStartedAt: number | null;
   guidanceActive: boolean;
   cameraReady: boolean;
+  cameraSource: CameraSource;
   visionBackend: string;
+  piConnection: PiConnectionState;
+  piUrl: string | null;
+  piCameraAvailable: boolean;
+  piSensorAvailable: boolean;
+  piLastSeenAt: number | null;
   sensor: SafetyState;
   voiceStatus: VoiceCommandStatus;
   conversationReady: boolean;
@@ -98,6 +105,12 @@ export interface NextRuntimeState {
   sceneRevision: number;
   sceneDescription: string;
   people: string[];
+  previewEnabled: boolean;
+  previewFrameBase64: string | null;
+  previewResolution: string | null;
+  previewDetections: Detection[];
+  previewFrameSource: CameraSource;
+  previewUpdatedAt: number | null;
   lastSpokenText: string;
   message: string;
   privacyMessage: string;
@@ -134,7 +147,13 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   sessionStartedAt: null,
   guidanceActive: false,
   cameraReady: false,
+  cameraSource: 'none',
   visionBackend: 'not loaded',
+  piConnection: 'unknown',
+  piUrl: null,
+  piCameraAvailable: false,
+  piSensorAvailable: false,
+  piLastSeenAt: null,
   sensor: EMPTY_SAFETY_STATE,
   voiceStatus: 'off',
   conversationReady: false,
@@ -146,6 +165,12 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   sceneRevision: 0,
   sceneDescription: 'No active scene session.',
   people: [],
+  previewEnabled: false,
+  previewFrameBase64: null,
+  previewResolution: null,
+  previewDetections: [],
+  previewFrameSource: 'none',
+  previewUpdatedAt: null,
   lastSpokenText: '',
   message: 'Ready to start',
   privacyMessage: 'Camera, speech, scene memory, and conversation stay on this device.',

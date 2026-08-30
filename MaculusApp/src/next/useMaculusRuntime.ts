@@ -30,6 +30,7 @@ export function useMaculusRuntime() {
     describeScene: () => maculusRuntime.describeScene(),
     repeatLast: () => maculusRuntime.repeatLast(),
     setGuidanceActive: (active: boolean) => maculusRuntime.setGuidanceActive(active),
+    setPreviewEnabled: (enabled: boolean) => maculusRuntime.setPreviewEnabled(enabled),
     installPrivateVisionModel: (allowCellular: boolean = false) => maculusRuntime.installPrivateVisionModel(allowCellular),
     cancelPrivateVisionModelDownload: () => maculusRuntime.cancelPrivateVisionModelDownload(),
     deletePrivateVisionModel: () => maculusRuntime.deletePrivateVisionModel(),

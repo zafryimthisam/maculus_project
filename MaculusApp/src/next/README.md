@@ -20,8 +20,26 @@ MaculusNext is the clean runtime and the default application entry registered by
   deterministic scene snapshot on any error. The same local backbone handles
   general conversation.
 - `MaculusRuntime` owns lifecycle, camera inference, sensor polling and voice
-  command coordination. React renders compact state; it never receives a camera
-  preview.
+  command coordination. It verifies a Maculus Pi through the Pi status contract,
+  prefers the Pi camera when available, and automatically falls back to the
+  iPhone camera. React receives camera JPEG data only while the user enables the
+  local diagnostic preview.
+
+## Pi connection and camera preview
+
+Starting a session searches the current local network for a `/status` response
+whose `system` field is exactly `Maculus Pi`. The interface reports the verified
+Pi URL, Pi camera availability, and ultrasonic sensor health separately. A
+successful sensor response also refreshes the connected state; ordinary Wi-Fi
+connectivity alone is never shown as a Pi connection.
+
+The visual pipeline tries the Raspberry Pi `/capture` endpoint first. A missing,
+slow, or unavailable Pi camera falls back to the already-running iPhone camera
+without stopping object detection. The **Show camera preview** control displays
+the latest processed frame, its true source, and YOLO detection boxes. Preview
+updates are throttled to reduce React Native bridge and rendering work, while
+the underlying guidance loop continues at its normal rate. Frames remain local
+and the preview is disabled by default.
 
 ## Detailed scene description
 

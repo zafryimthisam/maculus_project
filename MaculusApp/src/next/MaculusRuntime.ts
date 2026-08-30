@@ -1,5 +1,11 @@
 import { Vibration } from 'react-native';
-import { fetchDistance } from '../api/piClient';
+import {
+  discoverPiUrl,
+  fetchDistance,
+  fetchFrame,
+  fetchStatus,
+  getPiUrl,
+} from '../api/piClient';
 import { depthService } from '../services/DepthService';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
@@ -24,6 +30,16 @@ const SENSOR_INTERVAL_MS = 250;
 const VISION_IDLE_MS = 70;
 const DEPTH_INTERVAL_MS = 1200;
 const REID_INTERVAL_MS = 650;
+const PI_STALE_MS = 3000;
+const PI_CAMERA_RETRY_MS = 4000;
+const PREVIEW_INTERVAL_MS = 350;
+
+type VisionObservation = {
+  frame: CapturedFrame;
+  snapshot: NextSceneSnapshot;
+  detections: Detection[];
+  receivedAt: number;
+};
 
 export class MaculusRuntime {
   private state: NextRuntimeState = cloneInitialState();
@@ -40,7 +56,9 @@ export class MaculusRuntime {
   private lastDepthAt = 0;
   private lastReIdAt = 0;
   private lastFrameKey = '';
-  private latestVisionObservation: { frame: CapturedFrame; snapshot: NextSceneSnapshot; receivedAt: number } | null = null;
+  private lastPiCameraAttemptAt = 0;
+  private lastPreviewAt = 0;
+  private latestVisionObservation: VisionObservation | null = null;
   private modelUnsubscribe: (() => void) | null = null;
   private modelPreparePromise: Promise<void> | null = null;
 
@@ -122,6 +140,8 @@ export class MaculusRuntime {
     this.lastDepthAt = 0;
     this.lastReIdAt = 0;
     this.lastFrameKey = '';
+    this.lastPiCameraAttemptAt = 0;
+    this.lastPreviewAt = 0;
     this.latestVisionObservation = null;
     const preservedModel = this.state.model;
     this.update({
@@ -130,6 +150,7 @@ export class MaculusRuntime {
       phase: 'starting',
       sessionStartedAt: Date.now(),
       guidanceActive: true,
+      piConnection: 'searching',
       message: 'Starting private on-device guidance…',
     });
 
@@ -139,28 +160,43 @@ export class MaculusRuntime {
       // Safety starts before camera, depth, ReID, or conversational model
       // initialization. Optional AI must never delay obstacle monitoring.
       this.sensorLoop(generation).catch(error => console.warn('[MaculusNext] Sensor loop failed:', error));
+      const piDiscovery = this.discoverPi(generation)
+        .catch(error => console.warn('[MaculusNext] Pi discovery failed:', error));
       this.prepareModelAssets().catch(error => console.warn('[MaculusNext] Model status failed:', error));
-      let cameraReady = false;
+      let detectorReady = false;
+      let deviceCameraReady = false;
       let visionBackend = 'unavailable';
       try {
         const detectorInfo = await detectionService.loadModels();
         visionBackend = detectorInfo.backend || 'native';
-        await deviceCameraService.start();
-        cameraReady = true;
+        detectorReady = true;
       } catch (error: any) {
-        visionBackend = 'unavailable';
-        this.speech.speakSystem('Camera guidance is unavailable. Obstacle sensor monitoring will continue.', 1, 'camera-unavailable');
-        console.warn('[MaculusNext] Vision startup failed:', error?.message || error);
+        console.warn('[MaculusNext] Detector startup failed:', error?.message || error);
       }
+      try {
+        await deviceCameraService.start();
+        deviceCameraReady = true;
+      } catch (error: any) {
+        console.warn('[MaculusNext] Phone fallback camera startup failed:', error?.message || error);
+      }
+      await piDiscovery;
 
       if (!this.running || generation !== this.generation) {
         await this.cleanupServices();
         return;
       }
 
+      const piCameraReady = this.state.piConnection === 'connected' && this.state.piCameraAvailable;
+      const cameraReady = detectorReady && (piCameraReady || deviceCameraReady);
+      const cameraSource = piCameraReady ? 'pi' : deviceCameraReady ? 'device' : 'none';
+      if (!cameraReady) {
+        this.speech.speakSystem('Camera guidance is unavailable. Obstacle sensor monitoring will continue.', 1, 'camera-unavailable');
+      }
+
       this.update({
         phase: cameraReady ? 'running' : 'degraded',
         cameraReady,
+        cameraSource,
         visionBackend,
         message: cameraReady ? 'Guidance session active' : 'Sensor-only degraded session',
       });
@@ -277,19 +313,67 @@ export class MaculusRuntime {
     this.speech.speakSystem(active ? 'Visual guidance resumed.' : 'Visual guidance paused. Obstacle sensor monitoring remains active.');
   }
 
+  setPreviewEnabled(enabled: boolean): void {
+    if (!this.running) {return;}
+    const observation = this.latestVisionObservation;
+    this.update({
+      previewEnabled: enabled,
+      previewFrameBase64: enabled && observation ? observation.frame.base64 : null,
+      previewResolution: enabled && observation ? observation.frame.resolution : null,
+      previewDetections: enabled && observation ? observation.detections : [],
+      previewFrameSource: enabled && observation ? observation.frame.source : 'none',
+      previewUpdatedAt: enabled && observation ? observation.receivedAt : null,
+    });
+  }
+
+  private discoverPi = async (generation: number): Promise<void> => {
+    const discoveredUrl = await discoverPiUrl(getPiUrl(), false);
+    if (!this.running || generation !== this.generation) {return;}
+    if (!discoveredUrl) {
+      if (this.state.piConnection !== 'connected') {
+        this.update({ piConnection: 'unavailable', piUrl: null });
+      }
+      return;
+    }
+    try {
+      const status = await fetchStatus(this.abortController?.signal);
+      if (!this.running || generation !== this.generation) {return;}
+      this.update({
+        piConnection: 'connected',
+        piUrl: discoveredUrl,
+        piCameraAvailable: status.camera,
+        piSensorAvailable: status.sensor && status.sensor_healthy !== false,
+        piLastSeenAt: Date.now(),
+      });
+    } catch (error: any) {
+      if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {return;}
+      if (this.state.piConnection !== 'connected') {
+        this.update({ piConnection: 'unavailable', piUrl: discoveredUrl });
+      }
+    }
+  };
+
   private sensorLoop = async (generation: number): Promise<void> => {
     while (this.running && generation === this.generation) {
       const startedAt = Date.now();
       try {
         const reading = await fetchDistance(this.abortController?.signal);
-        const alert = this.safety.ingest({ reading, receivedAt: Date.now() });
+        const receivedAt = Date.now();
+        const alert = this.safety.ingest({ reading, receivedAt });
         const sensor = this.safety.getState();
         const phase = this.state.phase === 'starting'
           ? 'starting'
           : this.state.cameraReady || sensor.health === 'healthy'
           ? 'running'
           : 'degraded';
-        this.update({ sensor, phase });
+        this.update({
+          sensor,
+          phase,
+          piConnection: 'connected',
+          piUrl: getPiUrl(),
+          piSensorAvailable: reading.healthy === true && reading.valid === true,
+          piLastSeenAt: receivedAt,
+        });
         if (sensor.health === 'emergency') {this.interruptAssistantForEmergency();}
         if (alert) {
           this.speech.speakSafety(alert);
@@ -297,9 +381,15 @@ export class MaculusRuntime {
       } catch (error: any) {
         if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {break;}
         const alert = this.safety.recordTransportFailure('Check the Raspberry Pi or Bluetooth sensor connection.');
+        const piIsStale = this.state.piLastSeenAt === null ||
+          Date.now() - this.state.piLastSeenAt > PI_STALE_MS;
         this.update({
           sensor: this.safety.getState(),
           phase: this.state.phase === 'starting' ? 'starting' : this.state.cameraReady ? 'running' : 'degraded',
+          ...(piIsStale ? {
+            piConnection: 'unavailable' as const,
+            piSensorAvailable: false,
+          } : {}),
         });
         if (alert) {this.speech.speakSafety(alert);}
       }
@@ -317,7 +407,7 @@ export class MaculusRuntime {
         continue;
       }
       try {
-        const frame = await deviceCameraService.captureFrame(this.abortController?.signal);
+        const frame = await this.captureActiveFrame(this.abortController?.signal);
         const frameKey = capturedFrameKey(frame);
         if (frameKey === this.lastFrameKey) {
           await delay(VISION_IDLE_MS);
@@ -341,7 +431,8 @@ export class MaculusRuntime {
           detections,
           personEmbeddings: embeddings,
         });
-        this.latestVisionObservation = { frame, snapshot, receivedAt: now };
+        this.latestVisionObservation = { frame, snapshot, detections, receivedAt: now };
+        this.publishPreview(frame, detections, now);
         const elapsed = Math.max(1, now - previousFrameAt);
         const currentFps = 1000 / elapsed;
         smoothedFps = smoothedFps === 0 ? currentFps : smoothedFps * 0.8 + currentFps * 0.2;
@@ -359,6 +450,49 @@ export class MaculusRuntime {
       await delay(VISION_IDLE_MS);
     }
   };
+
+  private captureActiveFrame = async (signal?: AbortSignal): Promise<CapturedFrame> => {
+    const now = Date.now();
+    const shouldProbePi = this.state.piConnection === 'connected' && (
+      this.state.piCameraAvailable || now - this.lastPiCameraAttemptAt >= PI_CAMERA_RETRY_MS
+    );
+    if (shouldProbePi) {
+      this.lastPiCameraAttemptAt = now;
+      try {
+        const frame = await fetchFrame(signal);
+        this.update({
+          piConnection: 'connected',
+          piUrl: getPiUrl(),
+          piCameraAvailable: true,
+          piLastSeenAt: Date.now(),
+          cameraReady: true,
+          cameraSource: 'pi',
+        });
+        return frame;
+      } catch (error: any) {
+        if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {throw error;}
+        this.update({ piCameraAvailable: false });
+      }
+    }
+
+    const frame = await deviceCameraService.captureFrame(signal);
+    if (this.state.cameraSource !== 'device') {
+      this.update({ cameraReady: true, cameraSource: 'device' });
+    }
+    return frame;
+  };
+
+  private publishPreview(frame: CapturedFrame, detections: Detection[], now: number): void {
+    if (!this.state.previewEnabled || now - this.lastPreviewAt < PREVIEW_INTERVAL_MS) {return;}
+    this.lastPreviewAt = now;
+    this.update({
+      previewFrameBase64: frame.base64,
+      previewResolution: frame.resolution,
+      previewDetections: detections,
+      previewFrameSource: frame.source,
+      previewUpdatedAt: now,
+    });
+  }
 
   private personEmbeddings = async (
     frame: CapturedFrame,
@@ -488,7 +622,7 @@ export class MaculusRuntime {
     this.speech.stop();
   }
 
-  private currentVisionObservation(): { frame: CapturedFrame; snapshot: NextSceneSnapshot; receivedAt: number } | null {
+  private currentVisionObservation(): VisionObservation | null {
     const observation = this.latestVisionObservation;
     if (!observation || Date.now() - observation.receivedAt > 2500 || !this.state.cameraReady || !this.state.guidanceActive) {
       return null;
@@ -521,6 +655,7 @@ function cloneInitialState(): NextRuntimeState {
     sensor: { ...INITIAL_NEXT_RUNTIME_STATE.sensor },
     model: { ...INITIAL_NEXT_RUNTIME_STATE.model },
     people: [],
+    previewDetections: [],
   };
 }
 

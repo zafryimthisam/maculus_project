@@ -9,6 +9,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { DetectionPreview } from '../components/DetectionPreview';
 import { useMaculusRuntime } from './useMaculusRuntime';
 
 export default function MaculusNextApp(): React.JSX.Element {
@@ -19,6 +20,7 @@ export default function MaculusNextApp(): React.JSX.Element {
     describeScene,
     repeatLast,
     setGuidanceActive,
+    setPreviewEnabled,
     installPrivateVisionModel,
     cancelPrivateVisionModelDownload,
     deletePrivateVisionModel,
@@ -56,6 +58,18 @@ export default function MaculusNextApp(): React.JSX.Element {
         <Text style={styles.title} accessibilityRole="header">Maculus Next</Text>
         <Text style={styles.subtitle}>{state.message}</Text>
 
+        <View
+          style={[styles.connectionCard, piConnectionStyle(state.piConnection)]}
+          accessibilityLiveRegion="polite"
+        >
+          <Text style={styles.cardLabel}>MACULUS PI</Text>
+          <Text style={styles.connectionValue}>{piConnectionTitle(state.piConnection)}</Text>
+          <Text style={styles.connectionBody}>{piConnectionDescription(state)}</Text>
+          {state.piConnection === 'connected' && state.piUrl && (
+            <Text style={styles.connectionUrl}>{state.piUrl}</Text>
+          )}
+        </View>
+
         <View style={[styles.safetyCard, safetyStyle(state.sensor.health)]}>
           <Text style={styles.cardLabel}>OBSTACLE SAFETY</Text>
           <Text style={styles.safetyValue}>{sensorTitle(state.sensor.health)}</Text>
@@ -85,6 +99,37 @@ export default function MaculusNextApp(): React.JSX.Element {
               label={state.guidanceActive ? 'Pause camera' : 'Resume camera'}
               onPress={() => setGuidanceActive(!state.guidanceActive)}
             />
+            <ActionButton
+              label={state.previewEnabled ? 'Hide camera preview' : 'Show camera preview'}
+              onPress={() => setPreviewEnabled(!state.previewEnabled)}
+            />
+          </View>
+        )}
+
+        {active && state.previewEnabled && (
+          <View style={styles.card}>
+            <Text style={styles.cardLabel}>LIVE DETECTION PREVIEW</Text>
+            <Text style={styles.previewSource} accessibilityLiveRegion="polite">
+              Source: {cameraSourceLabel(
+                state.previewFrameSource !== 'none' ? state.previewFrameSource : state.cameraSource,
+              )}
+            </Text>
+            {state.previewFrameBase64 ? (
+              <DetectionPreview
+                frameBase64={state.previewFrameBase64}
+                resolution={state.previewResolution}
+                detections={state.previewDetections}
+              />
+            ) : (
+              <View style={styles.previewWaiting}>
+                <Text style={styles.previewWaitingText}>
+                  Waiting for the next processed camera frame…
+                </Text>
+              </View>
+            )}
+            <Text style={styles.previewFootnote}>
+              Green boxes are the objects used by guidance. This private diagnostic preview never uploads a frame.
+            </Text>
           </View>
         )}
 
@@ -110,7 +155,13 @@ export default function MaculusNextApp(): React.JSX.Element {
         )}
 
         <View style={styles.statusGrid}>
-          <StatusItem label="Camera" value={state.cameraReady && state.guidanceActive ? 'Active' : 'Paused'} />
+          <StatusItem
+            label="Camera"
+            value={state.cameraReady && state.guidanceActive
+              ? cameraSourceLabel(state.cameraSource)
+              : state.cameraReady ? 'Paused' : 'Unavailable'}
+          />
+          <StatusItem label="Maculus Pi" value={piConnectionTitle(state.piConnection)} />
           <StatusItem label="Voice" value={state.voiceStatus.replace(/_/g, ' ')} />
           <StatusItem label="Local AI" value={state.conversationReady ? 'Camera VLM ready' : 'Vision AI not ready'} />
           <StatusItem label="Vision" value={state.fps > 0 ? `${state.fps} FPS` : state.visionBackend} />
@@ -196,6 +247,44 @@ function sensorTitle(health: string): string {
   return 'DEGRADED';
 }
 
+function piConnectionTitle(connection: string): string {
+  if (connection === 'connected') {return 'CONNECTED';}
+  if (connection === 'searching') {return 'SEARCHING';}
+  if (connection === 'unavailable') {return 'NOT FOUND';}
+  return 'NOT CHECKED';
+}
+
+function piConnectionDescription(state: {
+  piConnection: string;
+  piCameraAvailable: boolean;
+  piSensorAvailable: boolean;
+}): string {
+  if (state.piConnection === 'connected') {
+    const camera = state.piCameraAvailable ? 'Pi camera ready' : 'Pi camera unavailable; using iPhone fallback';
+    const sensor = state.piSensorAvailable ? 'ultrasonic sensor reporting' : 'ultrasonic sensor unavailable';
+    return `${camera}. ${sensor}.`;
+  }
+  if (state.piConnection === 'searching') {
+    return 'Looking for a verified Maculus Pi on the current local network.';
+  }
+  if (state.piConnection === 'unavailable') {
+    return 'No Maculus Pi response. Visual guidance uses the iPhone camera; ultrasonic safety is unavailable.';
+  }
+  return 'Start a session to check the Pi camera and ultrasonic sensor.';
+}
+
+function cameraSourceLabel(source: string): string {
+  if (source === 'pi') {return 'Raspberry Pi camera';}
+  if (source === 'device') {return 'iPhone fallback camera';}
+  return 'Waiting for camera';
+}
+
+function piConnectionStyle(connection: string) {
+  if (connection === 'connected') {return styles.connectionConnected;}
+  if (connection === 'searching') {return styles.connectionSearching;}
+  return styles.connectionUnavailable;
+}
+
 function safetyStyle(health: string) {
   if (health === 'emergency') {return styles.safetyEmergency;}
   if (health === 'warning') {return styles.safetyWarning;}
@@ -209,6 +298,13 @@ const styles = StyleSheet.create({
   eyebrow: { color: '#66d9c7', fontSize: 13, fontWeight: '800', letterSpacing: 1.4 },
   title: { color: '#ffffff', fontSize: 38, lineHeight: 44, fontWeight: '800', marginTop: 6 },
   subtitle: { color: '#b9c7d8', fontSize: 18, lineHeight: 25, marginTop: 8, marginBottom: 22 },
+  connectionCard: { borderRadius: 18, padding: 18, borderWidth: 2, marginBottom: 18 },
+  connectionConnected: { backgroundColor: '#0c302d', borderColor: '#2ed3b7' },
+  connectionSearching: { backgroundColor: '#10263d', borderColor: '#4d91d9' },
+  connectionUnavailable: { backgroundColor: '#252b35', borderColor: '#7f8b9d' },
+  connectionValue: { color: '#ffffff', fontSize: 22, fontWeight: '900', marginTop: 5 },
+  connectionBody: { color: '#e5ecf5', fontSize: 16, lineHeight: 23, marginTop: 7 },
+  connectionUrl: { color: '#8fe4d7', fontSize: 13, lineHeight: 18, marginTop: 8 },
   safetyCard: { borderRadius: 20, padding: 20, borderWidth: 2, marginBottom: 18 },
   safetyHealthy: { backgroundColor: '#0c302d', borderColor: '#2ed3b7' },
   safetyWarning: { backgroundColor: '#3b2c05', borderColor: '#ffbf47' },
@@ -219,6 +315,10 @@ const styles = StyleSheet.create({
   cardLabel: { color: '#9eb0c6', fontSize: 12, fontWeight: '800', letterSpacing: 1.1 },
   cardBody: { color: '#f4f7fb', fontSize: 18, lineHeight: 26, marginTop: 8 },
   people: { color: '#66d9c7', fontSize: 16, lineHeight: 23, marginTop: 12 },
+  previewSource: { color: '#8fe4d7', fontSize: 15, fontWeight: '700', marginTop: 8, marginBottom: 8 },
+  previewWaiting: { minHeight: 180, borderRadius: 10, backgroundColor: '#020617', justifyContent: 'center', alignItems: 'center', padding: 20, marginTop: 4 },
+  previewWaitingText: { color: '#b9c7d8', fontSize: 16, lineHeight: 23, textAlign: 'center' },
+  previewFootnote: { color: '#9eb0c6', fontSize: 13, lineHeight: 19, marginTop: 2 },
   primaryButton: { minHeight: 68, borderRadius: 18, backgroundColor: '#2ed3b7', justifyContent: 'center', alignItems: 'center', padding: 16 },
   stopButton: { backgroundColor: '#ff6666' },
   disabledButton: { opacity: 0.55 },

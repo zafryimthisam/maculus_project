@@ -137,7 +137,9 @@ export const fetchFrame = async (signal?: AbortSignal): Promise<CapturedFrame> =
   try {
     res = await axios.get(`${PI_BASE_URL}/capture`, {
       responseType: 'arraybuffer',
-      timeout: 8000,
+      // A missing Pi must fall back to the already-running phone camera before
+      // visual guidance appears frozen.
+      timeout: 1800,
       signal,
       headers: { Accept: 'image/jpeg' },
     });
