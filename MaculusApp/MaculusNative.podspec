@@ -6,7 +6,7 @@ Pod::Spec.new do |spec|
   spec.license      = { :type => 'MIT' }
   spec.author       = 'Maculus contributors'
   spec.source       = { :git => 'https://github.com/zafryimthisam/maculus_project.git', :tag => spec.version.to_s }
-  spec.platform     = :ios, '13.4'
+  spec.platform     = :ios, '18.2'
   spec.swift_version = '5.0'
 
   spec.source_files = 'ios/MaculusApp/MaculusNative/**/*.{swift,m,h}'

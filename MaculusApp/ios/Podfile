@@ -8,7 +8,7 @@ require_relative '../node_modules/@react-native-community/cli-platform-ios/nativ
 ENV['RCT_NEW_ARCH_ENABLED'] = '1'
 ENV['RNLLAMA_BUILD_FROM_SOURCE'] = '1'
 
-platform :ios, min_ios_version_supported
+platform :ios, '18.2'
 prepare_react_native_project!
 
 linkage = ENV['USE_FRAMEWORKS']
@@ -42,5 +42,15 @@ target 'MaculusApp' do
       config[:reactNativePath],
       :mac_catalyst_enabled => false
     )
+
+    # Keep every Swift pod on the app's iOS 18.2 floor. Building MaculusNative
+    # for the old React Native 13.4 default makes current Xcode emit references
+    # to legacy swiftCompatibility libraries that its iPhoneOS toolchain no
+    # longer ships at the auto-linked path.
+    installer.pods_project.targets.each do |pod_target|
+      pod_target.build_configurations.each do |build_configuration|
+        build_configuration.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '18.2'
+      end
+    end
   end
 end

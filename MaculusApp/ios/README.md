@@ -5,6 +5,8 @@ offline models as Android. `MaculusNative.podspec` compiles the local Swift
 modules and copies the shared models from `android/app/src/main/assets` into
 the iOS app during `pod install`.
 
+The minimum supported iOS version is 18.2.
+
 Native iOS coverage includes:
 
 - signed-INT8 YOLO11s object detection through TensorFlow Lite;
