@@ -1,0 +1,21 @@
+diff --git a/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m b/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m
+--- a/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m
++++ b/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m
+@@ -97 +97 @@
+-RCT_EXPORT_METHOD(stop:(BOOL *)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
++RCT_EXPORT_METHOD(stop:(BOOL)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
+@@ -101 +101 @@
+-    if(onWordBoundary != NULL && onWordBoundary) {
++    if(onWordBoundary) {
+@@ -112 +112 @@
+-RCT_EXPORT_METHOD(pause:(BOOL *)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
++RCT_EXPORT_METHOD(pause:(BOOL)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
+@@ -116 +116 @@
+-    if(onWordBoundary != NULL && onWordBoundary) {
++    if(onWordBoundary) {
+@@ -135 +135 @@
+-RCT_EXPORT_METHOD(setDucking:(BOOL *)ducking
++RCT_EXPORT_METHOD(setDucking:(BOOL)ducking
+@@ -181 +181 @@
+-                  skipTransform:(BOOL *)skipTransform // not used, compatibility with Android native module signature
++                  skipTransform:(BOOL)skipTransform // not used, compatibility with Android native module signature
