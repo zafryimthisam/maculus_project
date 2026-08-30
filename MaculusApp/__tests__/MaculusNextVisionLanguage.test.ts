@@ -3,6 +3,7 @@ import { localLlmService } from '../src/services/LocalLlmService';
 import {
   buildVisionPrompt,
   ConversationService,
+  isVisualSceneRequest,
   sanitizeVisionDescription,
 } from '../src/next/ConversationService';
 import { NextSceneSnapshot, SafetyState } from '../src/next/domain';
@@ -29,7 +30,12 @@ describe('MaculusNext vision-language descriptions', () => {
 
     expect(result.source).toBe('vision-language');
     expect(result.text).toContain('blue shirt');
+    expect(result.text).toContain('Alex is the anonymous session name');
     expect(result.text).toContain('Separately, the ultrasonic sensor is healthy');
+    expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
+      maxTokens: 144,
+      timeoutMs: 45000,
+    }));
   });
 
   it('rejects generated mobility directions and falls back to deterministic facts', async () => {
@@ -45,7 +51,7 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(result.text).not.toContain('walk forward');
   });
 
-  it('rejects softer unsafe directions such as permission to proceed', async () => {
+  it('removes an unsafe direction while preserving the useful visual sentence', async () => {
     const service = readyService();
     jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(
       'There is a doorway ahead. You can proceed straight through it.',
@@ -53,7 +59,8 @@ describe('MaculusNext vision-language descriptions', () => {
 
     const result = await service.describeFrame('jpeg-base64', scene(), healthySensor());
 
-    expect(result.source).toBe('deterministic');
+    expect(result.source).toBe('vision-language');
+    expect(result.text).toContain('doorway ahead');
     expect(result.text).not.toContain('proceed');
   });
 
@@ -72,6 +79,45 @@ describe('MaculusNext vision-language descriptions', () => {
   it('cleans model control tokens and labels before speech', () => {
     expect(sanitizeVisionDescription('<|im_start|> assistant:  A kitchen   with a table. <|im_end|>'))
       .toBe('A kitchen with a table.');
+  });
+
+  it('routes natural find requests through the current camera frame', async () => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(
+      'A wooden chair is visible on the left side of the image.',
+    );
+
+    const answer = await service.respond(
+      'Can you find a place to sit?',
+      scene(),
+      healthySensor(),
+      'jpeg-base64',
+    );
+
+    expect(answer).toContain('wooden chair');
+    expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
+      imageBase64: 'jpeg-base64',
+      prompt: expect.stringContaining('Can you find a place to sit?'),
+    }));
+  });
+
+  it('recognizes visual requests without treating general knowledge as camera work', () => {
+    expect(isVisualSceneRequest('Find a place to sit')).toBe(true);
+    expect(isVisualSceneRequest('Where is my backpack?')).toBe(true);
+    expect(isVisualSceneRequest('What is the capital of France?')).toBe(false);
+    expect(isVisualSceneRequest('Who is the president of France?')).toBe(false);
+    expect(isVisualSceneRequest('Find information about Saturn online')).toBe(false);
+  });
+
+  it('reports a timeout instead of silently pretending the VLM answered', async () => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'completeVision').mockRejectedValue(
+      new Error('On-device visual description timed out.'),
+    );
+
+    const result = await service.describeFrame('jpeg-base64', scene(), healthySensor());
+
+    expect(result).toMatchObject({ source: 'deterministic', fallbackReason: 'timeout' });
   });
 });
 

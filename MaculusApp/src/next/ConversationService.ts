@@ -7,6 +7,12 @@ type HistoryEntry = { role: 'user' | 'assistant'; content: string };
 export interface VisionDescriptionResult {
   text: string;
   source: 'vision-language' | 'deterministic';
+  fallbackReason?: 'no-frame' | 'not-ready' | 'timeout' | 'unsafe-output' | 'inference-error';
+}
+
+export interface ConversationResponse {
+  text: string;
+  vision?: VisionDescriptionResult;
 }
 
 export class ConversationService {
@@ -51,6 +57,10 @@ export class ConversationService {
     localLlmService.cancel().catch(() => {});
   }
 
+  async cancel(): Promise<void> {
+    await localLlmService.cancel();
+  }
+
   async describeFrame(
     imageBase64: string | null,
     scene: NextSceneSnapshot,
@@ -58,8 +68,11 @@ export class ConversationService {
     question: string = 'Describe the current scene.',
   ): Promise<VisionDescriptionResult> {
     const fallback = `${scene.description}${sensorDescription(sensor)}`;
-    if (!imageBase64 || !this.isVisionReady()) {
-      return { text: fallback, source: 'deterministic' };
+    if (!imageBase64) {
+      return { text: fallback, source: 'deterministic', fallbackReason: 'no-frame' };
+    }
+    if (!this.isVisionReady()) {
+      return { text: fallback, source: 'deterministic', fallbackReason: 'not-ready' };
     }
 
     try {
@@ -67,19 +80,27 @@ export class ConversationService {
       const response = await localLlmService.completeVision({
         imageBase64,
         prompt: buildVisionPrompt(question, scene),
-        maxTokens: 120,
-        timeoutMs: 9000,
+        maxTokens: 144,
+        // The first multimodal turn also initializes image processing and Metal
+        // resources. Nine seconds was too short on real iPhones and silently
+        // converted genuine camera requests into deterministic fallbacks.
+        timeoutMs: 45000,
       });
-      const safe = sanitizeVisionDescription(response);
-      if (!safe || containsMobilityInstruction(safe)) {
-        return { text: fallback, source: 'deterministic' };
+      const safe = removeMobilitySentences(sanitizeVisionDescription(response));
+      if (!safe) {
+        return { text: fallback, source: 'deterministic', fallbackReason: 'unsafe-output' };
       }
       return {
-        text: `${safe}${sensorDescription(sensor)}`,
+        text: `${appendMissingPersonAliases(safe, scene)}${sensorDescription(sensor)}`,
         source: 'vision-language',
       };
-    } catch {
-      return { text: fallback, source: 'deterministic' };
+    } catch (error: any) {
+      console.warn('[MaculusNext] On-device visual description failed:', error?.message || error);
+      return {
+        text: fallback,
+        source: 'deterministic',
+        fallbackReason: /timed out/i.test(error?.message || '') ? 'timeout' : 'inference-error',
+      };
     }
   }
 
@@ -89,16 +110,26 @@ export class ConversationService {
     sensor: SafetyState,
     imageBase64?: string | null,
   ): Promise<string> {
+    return (await this.respondWithMetadata(transcript, scene, sensor, imageBase64)).text;
+  }
+
+  async respondWithMetadata(
+    transcript: string,
+    scene: NextSceneSnapshot,
+    sensor: SafetyState,
+    imageBase64?: string | null,
+  ): Promise<ConversationResponse> {
     const question = transcript.trim();
-    if (!question) {return 'I did not hear a question.';}
-    if (isSceneQuestion(question)) {
+    if (!question) {return { text: 'I did not hear a question.' };}
+    if (isVisualSceneRequest(question)) {
       if (/\b(who|person|people)\b/i.test(question) && !imageBase64) {
-        return groundedPeopleReply(scene);
+        return { text: groundedPeopleReply(scene) };
       }
-      return (await this.describeFrame(imageBase64 || null, scene, sensor, question)).text;
+      const vision = await this.describeFrame(imageBase64 || null, scene, sensor, question);
+      return { text: vision.text, vision };
     }
     if (!this.isReady() || localLlmService.getState() !== 'ready') {
-      return 'I can describe verified live objects and the obstacle sensor now. Install the optional private vision model for detailed descriptions and conversation.';
+      return { text: 'I can describe verified live objects and the obstacle sensor now. Install the optional private vision model for detailed descriptions and conversation.' };
     }
 
     try {
@@ -126,9 +157,9 @@ export class ConversationService {
       const answer = safe || 'I could not form a response.';
       this.history.push({ role: 'user', content: question }, { role: 'assistant', content: answer });
       this.history = this.history.slice(-10);
-      return answer;
+      return { text: answer };
     } catch {
-      return 'The on-device conversation model did not respond. Live safety monitoring is still active.';
+      return { text: 'The on-device conversation model did not respond. Live safety monitoring is still active.' };
     }
   }
 
@@ -158,6 +189,7 @@ export function buildVisionPrompt(question: string, scene: NextSceneSnapshot): s
     'Mention an obvious immediate physical hazard, but never tell the user to walk, move, step, turn, cross, or continue.',
     'Never say a route or path is safe or clear, and never estimate exact distance.',
     'Use supplied anonymous session labels consistently, but never claim a real identity.',
+    'For a find or locate request, say whether a likely match is visible and where it appears in the image, without giving walking directions.',
     'Do not infer age, ethnicity, disability, emotion, intent, or other sensitive traits.',
     'If an important detail is unclear, say that it is uncertain. Do not invent details outside the image.',
     `Verified object-detector hints, which may be incomplete: ${verifiedObjects}`,
@@ -176,8 +208,35 @@ export function sanitizeVisionDescription(text: string): string {
   return sentenceEnd >= 120 ? shortened.slice(0, sentenceEnd + 1) : `${shortened.trim()}…`;
 }
 
-function isSceneQuestion(text: string): boolean {
-  return /\b(see|scene|around|ahead|front|left|right|person|people|who|wearing|doing|color|colour|read|sign|obstacle|distance|path|camera)\b/i.test(text);
+export function isVisualSceneRequest(text: string): boolean {
+  if (/\b(scene|surroundings|camera|image|frame|ahead|nearby|wearing|visible|obstacle|path)\b|\baround me\b|\bin front of me\b|\bto (?:my|the) (?:left|right)\b/i.test(text)) {
+    return true;
+  }
+  if (/\bwhat (?:can|do) you see\b|\bdescribe (?:this|that|the|my|what|around)\b|\bwhat (?:color|colour) (?:is|are)\b/i.test(text)) {
+    return true;
+  }
+  if (/\bwho (?:is|are) (?:there|here|ahead|nearby|that person|this person|those people|in front of me)\b|\b(?:is|are) there (?:a |any )?(?:person|people)\b/i.test(text)) {
+    return true;
+  }
+  if (/\bread (?:this|that|the|my)|\b(?:read|scan) (?:a |the )?sign\b/i.test(text)) {
+    return true;
+  }
+  if (/\b(place to sit|somewhere to sit|seat|chair|bench)\b/i.test(text)) {
+    return true;
+  }
+  if (/\b(where (?:is|are)|can you (?:find|locate|spot)|do you see)\b/i.test(text)) {
+    return true;
+  }
+  return /\b(find|locate|look for|search for|spot)\b/i.test(text) &&
+    !/\b(online|internet|web|definition|meaning|information about)\b/i.test(text);
+}
+
+export function removeMobilitySentences(text: string): string {
+  return (text.match(/[^.!?]+[.!?]?/g) || [])
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence && !containsMobilityInstruction(sentence))
+    .join(' ')
+    .trim();
 }
 
 function groundedPeopleReply(scene: NextSceneSnapshot): string {
@@ -196,12 +255,27 @@ function sensorDescription(sensor: SafetyState): string {
   return ' The ultrasonic sensor is unavailable, so distance safety is unknown.';
 }
 
+function appendMissingPersonAliases(text: string, scene: NextSceneSnapshot): string {
+  const missingAliases = [...new Set(scene.visibleEntities
+    .filter(entity => entity.label === 'person' && entity.alias)
+    .map(entity => entity.alias!))]
+    .filter(alias => !new RegExp(`\\b${escapeRegExp(alias)}\\b`, 'i').test(text));
+  if (missingAliases.length === 0) {return text;}
+  const labels = missingAliases.map(alias => `${alias} is the anonymous session name for a visible person`).join('; ');
+  return `${text.replace(/[\s.]+$/, '')}. ${labels}.`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function containsMobilityInstruction(text: string): boolean {
   return [
     /\b(you can|you should|please|now)\s+(step|walk|move|turn|veer|head|go|proceed|continue|cross)\b/i,
     /\b(step|walk|move|turn|veer|head|go|cross)\s+(left|right|forward|straight|backward|across|toward|through|around|past)\b/i,
     /\b(proceed|continue)\s+(forward|ahead|straight)\b/i,
     /\b(path|route|way|crossing)\s+(is|looks|appears)\s+(clear|safe)\b/i,
+    /\b(area|space|floor)\s+(is|looks|appears)\s+(clear|safe)\b/i,
     /\bsafe\s+(to|for you to)\s+(step|walk|move|turn|head|go|proceed|continue|cross)\b/i,
   ].some(pattern => pattern.test(text));
 }

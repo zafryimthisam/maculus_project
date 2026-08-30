@@ -11,11 +11,24 @@ export class SpeechCoordinator {
   private hapticsEnabled = true;
   private lastText = '';
   private onSpoken: ((text: string) => void) | null = null;
+  private conversationSpeechActive = false;
+  private ttsSubscription: (() => void) | null = null;
 
   async initialize(onSpoken?: (text: string) => void): Promise<void> {
     if (!this.initialized) {
       await tts.init();
       this.initialized = true;
+    }
+    if (!this.ttsSubscription) {
+      this.ttsSubscription = tts.onSpeakingChange(speaking => {
+        if (speaking) {return;}
+        // TTS may synchronously start the next queued item after announcing
+        // that the previous item finished. Defer the check so conversation
+        // mode is not cleared between those two events.
+        setTimeout(() => {
+          if (!tts.isSpeaking()) {this.conversationSpeechActive = false;}
+        }, 0);
+      });
     }
     this.onSpoken = onSpoken ?? null;
   }
@@ -31,6 +44,7 @@ export class SpeechCoordinator {
 
   speakSafety(alert: SafetyAlert): void {
     if (alert.priority === 2) {
+      this.conversationSpeechActive = false;
       voiceCommandService.interruptForEmergency().catch(() => {});
       if (this.hapticsEnabled) {Vibration.vibrate([0, 140, 70, 140, 70, 180]);}
     } else if (this.hapticsEnabled && alert.kind !== 'clear') {
@@ -40,7 +54,7 @@ export class SpeechCoordinator {
   }
 
   speakScene(change: SceneChange): void {
-    if (!change.speak) {return;}
+    if (!change.speak || this.conversationSpeechActive) {return;}
     this.speak(change.text, change.kind === 'path-blocked' ? 1 : 0, 'ambient', change.key, false);
   }
 
@@ -61,6 +75,7 @@ export class SpeechCoordinator {
   stop(): void {
     Vibration.cancel();
     tts.stop();
+    this.conversationSpeechActive = false;
     this.onSpoken = null;
   }
 
@@ -73,6 +88,7 @@ export class SpeechCoordinator {
   ): void {
     const trimmed = text.trim();
     if (!this.initialized || !trimmed) {return;}
+    if (source === 'conversation') {this.conversationSpeechActive = true;}
     this.lastText = trimmed;
     this.onSpoken?.(trimmed);
     tts.speakGuidance({
@@ -85,5 +101,10 @@ export class SpeechCoordinator {
       interruption: immediate ? 'immediate' : source === 'conversation' ? 'after-command' : 'never',
       source,
     });
+    if (source === 'conversation') {
+      setTimeout(() => {
+        if (!tts.isSpeaking()) {this.conversationSpeechActive = false;}
+      }, 0);
+    }
   }
 }

@@ -8,7 +8,7 @@ import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetServi
 import { reIdService } from '../services/ReIdService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
 import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
-import { ConversationService } from './ConversationService';
+import { ConversationService, isVisualSceneRequest } from './ConversationService';
 import {
   INITIAL_NEXT_RUNTIME_STATE,
   NextRuntimeState,
@@ -34,6 +34,8 @@ export class MaculusRuntime {
   private conversation = new ConversationService();
   private running = false;
   private generation = 0;
+  private assistantGeneration = 0;
+  private assistantBusy = false;
   private abortController: AbortController | null = null;
   private lastDepthAt = 0;
   private lastReIdAt = 0;
@@ -112,9 +114,11 @@ export class MaculusRuntime {
     if (this.running || this.state.phase === 'starting') {return;}
     this.running = true;
     const generation = ++this.generation;
+    this.assistantGeneration += 1;
     this.abortController = new AbortController();
     this.safety.reset();
     this.scene.reset();
+    this.assistantBusy = false;
     this.lastDepthAt = 0;
     this.lastReIdAt = 0;
     this.lastFrameKey = '';
@@ -194,6 +198,8 @@ export class MaculusRuntime {
     this.update({ phase: 'stopping', message: 'Ending session and clearing private memory…' });
     this.running = false;
     this.generation += 1;
+    this.assistantGeneration += 1;
+    this.assistantBusy = false;
     this.abortController?.abort();
     this.abortController = null;
     await this.cleanupServices();
@@ -204,12 +210,23 @@ export class MaculusRuntime {
   }
 
   async describeScene(): Promise<void> {
-    if (!this.running || this.state.descriptionInProgress) {return;}
+    if (!this.running || this.state.descriptionInProgress || this.assistantBusy) {return;}
+    if (this.safety.getState().health === 'emergency') {
+      this.update({ message: 'Emergency obstacle remains within 40 centimeters — AI description is paused' });
+      return;
+    }
     const generation = this.generation;
+    const assistantGeneration = ++this.assistantGeneration;
+    this.assistantBusy = true;
     const observation = this.currentVisionObservation();
     const snapshot = observation?.snapshot || this.scene.getSnapshot();
     const canUseVlm = Boolean(observation && this.conversation.isVisionReady());
-    this.update({ descriptionInProgress: canUseVlm });
+    this.update({
+      descriptionInProgress: true,
+      message: canUseVlm
+        ? 'Analyzing the current camera frame privately on this device…'
+        : 'Preparing the latest verified scene description…',
+    });
     if (canUseVlm) {
       this.speech.speakSystem('Analyzing the current camera frame on this device.', 0, 'vlm-analyzing');
     }
@@ -219,14 +236,28 @@ export class MaculusRuntime {
         snapshot,
         this.safety.getState(),
       );
-      if (!this.running || generation !== this.generation) {return;}
+      if (
+        !this.running ||
+        generation !== this.generation ||
+        assistantGeneration !== this.assistantGeneration
+      ) {return;}
       this.update({
         detailedDescription: result.text,
         descriptionSource: result.source,
+        message: result.source === 'vision-language'
+          ? 'Scene analyzed privately on this device'
+          : fallbackStatusMessage(result.fallbackReason),
       });
       this.speech.speakConversation(result.text, `describe:${snapshot.revision}:${Date.now()}`);
     } finally {
-      if (this.running && generation === this.generation) {this.update({ descriptionInProgress: false });}
+      if (
+        this.running &&
+        generation === this.generation &&
+        assistantGeneration === this.assistantGeneration
+      ) {
+        this.assistantBusy = false;
+        this.update({ descriptionInProgress: false });
+      }
     }
   }
 
@@ -255,7 +286,10 @@ export class MaculusRuntime {
           ? 'running'
           : 'degraded';
         this.update({ sensor, phase });
-        if (alert) {this.speech.speakSafety(alert);}
+        if (sensor.health === 'emergency') {this.interruptAssistantForEmergency();}
+        if (alert) {
+          this.speech.speakSafety(alert);
+        }
       } catch (error: any) {
         if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {break;}
         const alert = this.safety.recordTransportFailure('Check the Raspberry Pi or Bluetooth sensor connection.');
@@ -366,15 +400,69 @@ export class MaculusRuntime {
   private handleVoiceTurn = async (turn: ConversationTurn, fastCommand: VoiceCommand | null): Promise<void> => {
     if (!this.running) {return;}
     if (fastCommand && this.handleFastCommand(fastCommand)) {return;}
+    if (this.safety.getState().health === 'emergency') {
+      this.update({ message: 'Emergency obstacle remains within 40 centimeters — AI conversation is paused' });
+      return;
+    }
+    const generation = this.generation;
+    const assistantGeneration = ++this.assistantGeneration;
+    this.assistantBusy = true;
+    const visualRequest = isVisualSceneRequest(turn.transcript);
     const observation = this.currentVisionObservation();
-    const answer = await this.conversation.respond(
-      turn.transcript,
-      observation?.snapshot || this.scene.getSnapshot(),
-      this.safety.getState(),
-      observation?.frame.base64,
-    );
-    if (this.running) {this.speech.speakConversation(answer, `answer:${turn.timestamp}`);}
+    const snapshot = observation?.snapshot || this.scene.getSnapshot();
+    if (visualRequest) {
+      this.update({
+        descriptionInProgress: true,
+        message: 'Analyzing your visual request privately on this device…',
+      });
+      this.speech.speakSystem('Let me look at the current scene.', 0, `visual-request:${turn.timestamp}`);
+    }
+    try {
+      const response = await this.conversation.respondWithMetadata(
+        turn.transcript,
+        snapshot,
+        this.safety.getState(),
+        observation?.frame.base64,
+      );
+      if (
+        !this.running ||
+        generation !== this.generation ||
+        assistantGeneration !== this.assistantGeneration
+      ) {return;}
+      if (response.vision) {
+        this.update({
+          detailedDescription: response.vision.text,
+          descriptionSource: response.vision.source,
+          message: response.vision.source === 'vision-language'
+            ? 'Visual request answered privately on this device'
+            : fallbackStatusMessage(response.vision.fallbackReason),
+        });
+      }
+      this.speech.speakConversation(response.text, `answer:${turn.timestamp}`);
+    } finally {
+      if (
+        this.running &&
+        generation === this.generation &&
+        assistantGeneration === this.assistantGeneration
+      ) {
+        this.assistantBusy = false;
+        if (visualRequest) {this.update({ descriptionInProgress: false });}
+      }
+    }
   };
+
+  private interruptAssistantForEmergency(): void {
+    if (!this.assistantBusy && !this.state.descriptionInProgress) {return;}
+    this.assistantBusy = false;
+    this.assistantGeneration += 1;
+    this.conversation.cancel().catch(() => {});
+    if (this.state.descriptionInProgress) {
+      this.update({
+        descriptionInProgress: false,
+        message: 'Emergency obstacle detected — AI response interrupted',
+      });
+    }
+  }
 
   private handleFastCommand(command: VoiceCommand): boolean {
     switch (command) {
@@ -448,6 +536,16 @@ function nextModelState(status: ModelAssetStatus): NextRuntimeState['model'] {
     capabilityReason: status.capabilityReason || null,
     message: status.message || null,
   };
+}
+
+function fallbackStatusMessage(reason?: 'no-frame' | 'not-ready' | 'timeout' | 'unsafe-output' | 'inference-error'): string {
+  switch (reason) {
+    case 'no-frame': return 'No fresh camera frame was available; verified detector guidance was used';
+    case 'not-ready': return 'The private vision model was not ready; verified detector guidance was used';
+    case 'timeout': return 'The private vision model timed out; verified detector guidance was used';
+    case 'unsafe-output': return 'Unsafe AI movement wording was removed; verified detector guidance was used';
+    default: return 'The private vision model failed; verified detector guidance was used';
+  }
 }
 
 export const maculusRuntime = new MaculusRuntime();

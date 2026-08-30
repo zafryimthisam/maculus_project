@@ -58,6 +58,16 @@ describe('MaculusNext SafetyCoordinator', () => {
     expect(alert?.text).not.toMatch(/left|right/i);
   });
 
+  it('treats exactly 40 centimeters as an emergency', () => {
+    const safety = new SafetyCoordinator();
+    const alert = safety.ingest({
+      reading: reading({ distance_cm: 40, obstacle: true, sampled_at: 2 }),
+      receivedAt: 2000,
+    });
+
+    expect(alert).toMatchObject({ kind: 'emergency', priority: 2, distanceCm: 40 });
+  });
+
   it('requires two readings beyond the hysteresis boundary before clearing', () => {
     const safety = new SafetyCoordinator();
     safety.ingest({

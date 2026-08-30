@@ -9,7 +9,8 @@ MaculusNext is the clean runtime and the default application entry registered by
 - `SafetyCoordinator` accepts only explicit healthy, valid and fresh sensor
   samples. Missing or stale data becomes **unknown/fault**, never clear.
 - `SpeechCoordinator` is the only MaculusNext component allowed to submit TTS
-  guidance. Emergency sensor speech interrupts lower-priority output.
+  guidance. Ambient object narration is suppressed while a conversational
+  answer is speaking. Emergency sensor speech interrupts lower-priority output.
 - `SessionSceneStore` owns temporal scene state, duplicate-frame rejection,
   object occlusion and random person aliases. Its memory is erased on session
   stop.
@@ -38,6 +39,18 @@ The optional download contains two checksum-pinned files (about 1.3 GB total):
 The VLM is informational only. It cannot publish safety events, update tracked
 objects, identify people, or issue movement guidance. See
 `src/models/VLM_SELECTION.md` for the selection rationale and benchmark caveats.
+
+Natural visual requests such as “find a place to sit” use the same recent camera
+frame and ask the VLM to report whether a likely match is visible and where it
+appears in the image. Anonymous person names supplied by `SessionSceneStore` are
+merged into the answer if the VLM omits them, so names remain stable for the
+session without claiming a real identity.
+
+Visual inference and ordinary scene narration pause during these requests. A
+valid ultrasonic reading at or below 40 centimeters cancels any in-progress
+model generation, interrupts conversational speech, and immediately submits the
+priority-two stop alert. The local detector and sensor remain the safety source;
+the VLM never decides whether a route is safe.
 
 ## Sensor response contract
 
