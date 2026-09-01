@@ -21,6 +21,7 @@ export type VoiceCommandStatus =
   | 'wake_detected'
   | 'command_listening'
   | 'processing'
+  | 'speaking'
   | 'paused'
   | 'unavailable'
   | 'error';
@@ -257,7 +258,6 @@ export class VoiceCommandService {
       this.emitter = new NativeEventEmitter(MaculusVoiceCommand as any);
       this.subscriptions = [
         this.emitter.addListener('MaculusVoiceWakeDetected', this.handleWakeDetected),
-        this.emitter.addListener('MaculusVoiceBargeInDetected', this.handleBargeInDetected),
         this.emitter.addListener('MaculusVoiceCommandState', this.handleState),
         this.emitter.addListener('MaculusVoiceCommandError', this.handleError),
       ];
@@ -305,11 +305,12 @@ export class VoiceCommandService {
 
     this.commandBusy = true;
     const directCapture = detection.name === 'barge_in' || detection.name === 'followup';
+    const interruptedSpeech = tts.isSpeaking();
     this.safetyInterrupted = false;
     this.reserveConversationWindow(this.effectiveQuietMs());
     this.setStatus('wake_detected');
     if (!directCapture) {Vibration.vibrate([0, 60]);}
-    if (detection.name === 'barge_in') {
+    if (detection.name === 'barge_in' || interruptedSpeech) {
       tts.stop();
       await soundCueService.stopAll();
     }
@@ -317,10 +318,9 @@ export class VoiceCommandService {
     await tts.prepareForListening(AUDIO_HANDOFF_MS);
     if (!directCapture) {
       await soundCueService.stopAll();
-      // Start the non-verbal cue without holding full STT for its entire
-      // duration. This preserves one-phrase commands such as
-      // "Hey LiveKit, start Maculus" while still giving audible feedback.
-      soundCueService.playActivation().catch(() => {});
+      // Let the activation cue finish before command recognition takes over
+      // the audio session. Otherwise the recognizer can make the cue inaudible.
+      await soundCueService.playActivation();
     }
 
     if (!this.enabled || !MaculusVoiceCommand || this.safetyInterrupted) {
@@ -401,15 +401,6 @@ export class VoiceCommandService {
     }
   };
 
-  private handleBargeInDetected = () => {
-    if (!this.enabled || this.commandBusy || !tts.isSpeaking()) {return;}
-    this.handleWakeDetected({ name: 'barge_in', label: 'Barge in', confidence: 1 })
-      .catch(error => {
-        console.warn('[Voice] Barge-in capture failed:', error);
-        this.scheduleWakeRecovery();
-      });
-  };
-
   private effectiveQuietMs(): number {
     return localLlmService.getState() === 'ready'
       ? CONVERSATION_QUIET_MS_LLM_READY
@@ -425,12 +416,13 @@ export class VoiceCommandService {
       this.scheduleWakeRecovery();
       return;
     }
-    // In Siri-style mode the wake detector remains armed while Maculus is
-    // speaking so the user can say "Hey LiveKit" to barge in. The native
-    // detector may report wake_listening, but the user-facing interaction
-    // state is still paused until the answer is interrupted or finishes.
+    // Preserve explicit activation/listening/processing states while a command
+    // owns the interaction. Native pause/resume events are transport details.
+    if (this.commandBusy && (state.state === 'paused' || state.state === 'wake_listening')) {
+      return;
+    }
     if (this.alwaysListening && tts.isSpeaking() && state.state === 'wake_listening') {
-      this.setStatus('paused');
+      this.setStatus('speaking');
       return;
     }
     this.setStatus(state.state);
@@ -452,16 +444,22 @@ export class VoiceCommandService {
       return;
     }
     if (speaking) {
-      if (this.alwaysListening) {
-        MaculusVoiceCommand.startBargeInMonitoring().catch(() => {
-          // Wake-word interruption remains a fallback for audio routes that
-          // cannot run echo-cancelled voice activity detection with TTS.
-          MaculusVoiceCommand.resumeAfterTts().catch(() => {});
+      if (this.safetyInterrupted) {
+        // Never open a microphone monitor over emergency speech. It can hear
+        // the speaker and cancel the <=40 cm warning mid-sentence.
+        MaculusVoiceCommand.pauseForTts().catch(() => {});
+        this.setStatus('paused');
+      } else if (this.alwaysListening) {
+        // Wake-word-only interruption avoids the noisy always-open voice-chat
+        // route. "Hey LiveKit" can still interrupt ordinary AI speech.
+        MaculusVoiceCommand.resumeAfterTts().catch(() => {
+          MaculusVoiceCommand.pauseForTts().catch(() => {});
         });
+        this.setStatus('speaking');
       } else {
         MaculusVoiceCommand.pauseForTts().catch(() => {});
+        this.setStatus('speaking');
       }
-      this.setStatus('paused');
       return;
     }
     MaculusVoiceCommand.stopBargeInMonitoring().catch(() => {});

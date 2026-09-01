@@ -24,6 +24,7 @@ import {
   INITIAL_NEXT_RUNTIME_STATE,
   NextRuntimeState,
   NextSceneSnapshot,
+  SafetyAlert,
   SceneChange,
 } from './domain';
 import { SafetyCoordinator } from './SafetyCoordinator';
@@ -74,6 +75,7 @@ export class MaculusRuntime {
   private lastGoalEntityId: number | null = null;
   private lastGoalZone: string | null = null;
   private lastGoalAnnouncementAt = 0;
+  private sensorFaultAnnounced = false;
 
   getState(): NextRuntimeState {return this.state;}
 
@@ -161,6 +163,7 @@ export class MaculusRuntime {
     this.lastGoalEntityId = null;
     this.lastGoalZone = null;
     this.lastGoalAnnouncementAt = 0;
+    this.sensorFaultAnnounced = false;
     const preservedModel = this.state.model;
     this.update({
       ...cloneInitialState(),
@@ -473,6 +476,9 @@ export class MaculusRuntime {
         0,
         'pi-connected',
       );
+      if (!(status.sensor && status.sensor_healthy === true)) {
+        this.sensorFaultAnnounced = true;
+      }
     }
   }
 
@@ -498,9 +504,7 @@ export class MaculusRuntime {
           piLastSeenAt: receivedAt,
         });
         if (sensor.health === 'emergency') {this.interruptAssistantForEmergency();}
-        if (alert) {
-          this.speech.speakSafety(alert);
-        }
+        if (alert) {this.speakSafetyAlert(alert);}
       } catch (error: any) {
         if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {break;}
         const alert = this.safety.recordTransportFailure('Check the Raspberry Pi or Bluetooth sensor connection.');
@@ -514,7 +518,7 @@ export class MaculusRuntime {
             piSensorAvailable: false,
           } : {}),
         });
-        if (alert) {this.speech.speakSafety(alert);}
+        if (alert) {this.speakSafetyAlert(alert);}
       }
       await delay(Math.max(30, SENSOR_INTERVAL_MS - (Date.now() - startedAt)));
     }
@@ -677,6 +681,14 @@ export class MaculusRuntime {
       sceneDescription: snapshot.description,
       people,
     });
+  }
+
+  private speakSafetyAlert(alert: SafetyAlert): void {
+    if (alert.kind === 'sensor-fault') {
+      if (this.sensorFaultAnnounced) {return;}
+      this.sensorFaultAnnounced = true;
+    }
+    this.speech.speakSafety(alert);
   }
 
   private handleVoiceTurn = async (turn: ConversationTurn, fastCommand: VoiceCommand | null): Promise<void> => {

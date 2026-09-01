@@ -5,10 +5,9 @@ const EMERGENCY_CM = 40;
 const READING_MAX_AGE_MS = 1200;
 const CLEAR_HYSTERESIS_CM = 15;
 const FAILURE_CONFIRMATION_COUNT = 2;
-const FAULT_REPEAT_MS = 15000;
 const WARNING_REPEAT_MS = 4000;
-const EMERGENCY_REPEAT_MS = 1400;
-const CLOSER_DELTA_CM = 10;
+const EMERGENCY_REPEAT_MS = 6000;
+const CLOSER_DELTA_CM = 15;
 
 export class SafetyCoordinator {
   private state: SafetyState = { ...EMPTY_SAFETY_STATE };
@@ -16,7 +15,7 @@ export class SafetyCoordinator {
   private consecutiveClear = 0;
   private lastAlertAt = 0;
   private lastAlertDistance: number | null = null;
-  private lastFaultAt = 0;
+  private faultAnnounced = false;
 
   reset(): void {
     this.state = { ...EMPTY_SAFETY_STATE };
@@ -24,7 +23,7 @@ export class SafetyCoordinator {
     this.consecutiveClear = 0;
     this.lastAlertAt = 0;
     this.lastAlertDistance = null;
-    this.lastFaultAt = 0;
+    this.faultAnnounced = false;
   }
 
   getState(): SafetyState {
@@ -35,7 +34,7 @@ export class SafetyCoordinator {
     const now = input.receivedAt ?? Date.now();
     const reading = input.reading;
     if (!isUsable(reading, now)) {
-      return this.recordFailure(reading.error || 'Obstacle sensor reading is stale or invalid.', now);
+      return this.recordFailure(now);
     }
 
     const distanceCm = reading.distance_cm;
@@ -70,7 +69,7 @@ export class SafetyCoordinator {
         distanceCm,
         timestamp: now,
         text: emergency
-          ? `Stop. Obstacle directly ahead, about ${rounded} centimeters away.`
+          ? `Stop. Obstacle directly ahead. About ${rounded} centimeters away.`
           : `Caution. Obstacle ahead, about ${rounded} centimeters away.`,
       };
     }
@@ -103,11 +102,11 @@ export class SafetyCoordinator {
     return null;
   }
 
-  recordTransportFailure(message: string, now: number = Date.now()): SafetyAlert | null {
-    return this.recordFailure(message, now);
+  recordTransportFailure(_message: string, now: number = Date.now()): SafetyAlert | null {
+    return this.recordFailure(now);
   }
 
-  private recordFailure(message: string, now: number): SafetyAlert | null {
+  private recordFailure(now: number): SafetyAlert | null {
     this.consecutiveFailures += 1;
     this.consecutiveClear = 0;
     this.state = {
@@ -121,18 +120,18 @@ export class SafetyCoordinator {
     };
     if (
       this.consecutiveFailures < FAILURE_CONFIRMATION_COUNT ||
-      (this.lastFaultAt > 0 && now - this.lastFaultAt < FAULT_REPEAT_MS)
+      this.faultAnnounced
     ) {
       return null;
     }
-    this.lastFaultAt = now;
+    this.faultAnnounced = true;
     return {
-      key: `sensor-fault:${Math.floor(now / FAULT_REPEAT_MS)}`,
+      key: 'sensor-fault:session',
       priority: 1,
       kind: 'sensor-fault',
       distanceCm: null,
       timestamp: now,
-      text: `Obstacle sensor unavailable. Stop if you are unsure. ${cleanDiagnostic(message)}`,
+      text: 'Obstacle sensor is unavailable. Distance safety alerts are off until it reconnects.',
     };
   }
 }
@@ -150,9 +149,4 @@ function isUsable(reading: DistanceReading, now: number): boolean {
 
 function roundedDistance(distanceCm: number): number {
   return Math.max(10, Math.round(distanceCm / 5) * 5);
-}
-
-function cleanDiagnostic(message: string): string {
-  const cleaned = message.replace(/[^a-zA-Z0-9 ._-]/g, '').trim();
-  return cleaned && cleaned.length < 80 ? cleaned : 'Check the sensor connection.';
 }

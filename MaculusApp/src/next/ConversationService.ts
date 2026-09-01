@@ -240,24 +240,39 @@ export function buildVisionPrompt(
         : entity.label;
       return `${label} ${position}${entity.inPath ? ' overlapping the center view' : ''}`;
     }).join('; ');
-  const recentConversation = history.length === 0
-    ? 'No earlier conversational turns.'
-    : history.slice(-6).map(entry => `${entry.role}: ${entry.content.slice(0, 300)}`).join('\n');
+  const safetyRule = 'never give movement directions, call a path safe, estimate exact distance, claim a real identity, or infer sensitive traits. State uncertainty instead of guessing.';
+  const goalContext = activeGuidanceGoal
+    ? `The user's persistent visual guidance goal is ${activeGuidanceGoal}.`
+    : '';
+  const recentConversation = history.slice(-2)
+    .map(entry => `${entry.role}: ${entry.content.slice(0, 120)}`)
+    .join('\n');
+  if (visualRequest) {
+    // Keep the visual path close to the short prompt that performs reliably on
+    // the 1.6B device model. Extra persona/history tokens noticeably increase
+    // image prompt-evaluation time on phones.
+    return [
+      'Privately analyze this live camera frame for a blind user.',
+      `Request: ${question.trim().slice(0, 200)}`,
+      'Reply directly in one or two short natural sentences using only visible facts.',
+      'For a broad request, give the setting and the most useful people, objects, actions, positions, colors, or readable text. For a find request, say whether it is visible and where it appears.',
+      recentConversation ? `Recent conversation:\n${recentConversation}` : '',
+      goalContext,
+      'Use supplied anonymous session names consistently. Mention an obvious hazard.',
+      safetyRule,
+      `Detector hints, which may be incomplete: ${verifiedObjects}`,
+    ].filter(Boolean).join(' ');
+  }
+
   return [
-    'You are Maculus, a warm, concise multimodal assistant for a blind user. Process this spoken request together with the current private camera frame.',
-    `Request: ${question.trim().slice(0, 240)}`,
-    visualRequest
-      ? 'This request concerns the live surroundings. Reply in one or two short natural sentences using only facts visible in the image or supplied detector hints.'
-      : 'This is a general or conversational request. Answer it directly from general knowledge in one to three short sentences. Use the image only if it is relevant; do not force an unrelated scene description.',
-    'Resolve natural follow-ups from the recent conversation when possible.',
-    activeGuidanceGoal
-      ? `The user's persistent visual guidance goal is ${activeGuidanceGoal}. Keep follow-up answers related to that goal when relevant.`
-      : 'There is no active destination guidance goal.',
-    `Recent conversation:\n${recentConversation}`,
-    'For a broad visual request, give the setting and the most useful people, objects, actions, positions, colors, or readable text. For a visual find request, say whether it is visible and where it appears in the image.',
-    'Use supplied anonymous session names consistently. Mention an obvious hazard, but never give movement directions, call a path safe, estimate exact distance, claim a real identity, or infer sensitive traits. State uncertainty instead of guessing.',
-    `Detector hints, which may be incomplete: ${verifiedObjects}`,
-  ].join(' ');
+    'You are Maculus, a concise multimodal assistant for a blind user.',
+    `Request: ${question.trim().slice(0, 200)}`,
+    'Answer it directly from general knowledge in one to three short sentences. Use the image only if relevant; do not force a scene description.',
+    recentConversation ? `Recent conversation:\n${recentConversation}` : '',
+    goalContext,
+    safetyRule,
+    `Optional detector hints: ${verifiedObjects}`,
+  ].filter(Boolean).join(' ');
 }
 
 export function sanitizeVisionDescription(text: string): string {

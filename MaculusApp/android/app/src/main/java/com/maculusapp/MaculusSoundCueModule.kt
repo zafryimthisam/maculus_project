@@ -1,5 +1,6 @@
 package com.maculusapp
 
+import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
@@ -15,6 +16,10 @@ class MaculusSoundCueModule(
     private var activationPlayer: MediaPlayer? = null
     private var activationPromise: Promise? = null
     private var processingPlayer: MediaPlayer? = null
+    private val cueAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+        .build()
 
     override fun getName(): String = "MaculusSoundCue"
 
@@ -23,10 +28,11 @@ class MaculusSoundCueModule(
         mainHandler.post {
             stopActivation(resolvePending = true)
             try {
-                val player = MediaPlayer.create(reactContext, R.raw.activation_sound)
+                val player = MediaPlayer.create(reactContext, R.raw.activation_sound, cueAttributes, 0)
                     ?: throw IllegalStateException("Activation sound is unavailable")
                 activationPlayer = player
                 activationPromise = promise
+                player.setVolume(1f, 1f)
                 player.setOnCompletionListener {
                     stopActivation(resolvePending = true)
                 }
@@ -57,10 +63,10 @@ class MaculusSoundCueModule(
                     return@post
                 }
                 stopProcessingPlayer()
-                val player = MediaPlayer.create(reactContext, R.raw.processing_sound)
+                val player = MediaPlayer.create(reactContext, R.raw.processing_sound, cueAttributes, 0)
                     ?: throw IllegalStateException("Processing sound is unavailable")
                 player.isLooping = true
-                player.setVolume(0.45f, 0.45f)
+                player.setVolume(0.3f, 0.3f)
                 processingPlayer = player
                 player.start()
                 promise.resolve(null)

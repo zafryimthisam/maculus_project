@@ -112,21 +112,24 @@ context. “Start/stop Maculus” and “start/stop guidance” are equivalent l
 guidance controls after “Hey LiveKit.”
 
 The interaction uses the bundled user-supplied `activation_sound.mp3` after a
-real wake-word detection and loops `processing_sound.mp3` only while the private
-multimodal model is working. Wake-free follow-ups and barge-in do not replay the
-activation cue. Both sounds stop before assistant speech and immediately on an
-emergency or session shutdown.
+real wake-word detection and waits for that cue before command capture takes the
+audio session. The bundled cue is level-normalized for a phone speaker.
+`processing_sound.mp3` loops quietly only while the private multimodal model is
+working. Wake-free follow-ups do not replay the activation cue. Both sounds stop
+before assistant speech and immediately on an emergency or session shutdown.
 
 From wake detection through user capture, model thinking, and AI speech, the
 conversation exclusively owns TTS. Ambient detector narration and non-emergency
 distance warnings are suppressed, and stale queued guidance is discarded.
-During AI speech an echo-cancelled native voice-activity monitor remains armed,
-allowing ordinary sustained speech to barge in, stop the answer, and open a new
-full speech capture. If that monitor is unavailable for the current audio route,
-“Hey LiveKit” wake-word interruption remains the fallback. A valid
+During ordinary AI speech only the lightweight “Hey LiveKit” detector can remain
+armed for interruption. The former always-open voice-chat VAD was removed from
+this path because it degraded speaker audio and could hear/cancel Maculus's own
+speech. Emergency speech pauses every microphone monitor until the complete stop
+warning finishes. A valid
 ultrasonic reading at or below 40 centimeters is the sole speech exception: it
 cancels any in-progress model generation, interrupts conversational speech, and
-immediately submits the priority-two stop alert. The local detector and sensor
+immediately submits one uninterrupted priority-two stop alert. Missing-sensor
+speech is limited to one notice per session while status remains visible. The local detector and sensor
 remain the safety source; the VLM never decides whether a route is safe.
 
 “Guide/lead/take me to …” creates a persistent private visual goal. Supported

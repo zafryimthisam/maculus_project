@@ -82,6 +82,17 @@ describe('TTSService guidance speech', () => {
     expect(service.queue[0]).toMatchObject({ text: 'Stop now.', priority: 2, kind: 'guidance' });
   });
 
+  it('does not restart emergency TTS while an emergency sentence is already playing', async () => {
+    const service = await createService();
+    service.speaking = true;
+    service.currentItem = { text: 'Stop. Obstacle at 25 centimeters.', priority: 2, kind: 'guidance', source: 'safety' };
+
+    service.speakGuidance(guidance('sensor:emergency:closer', 'Stop. Obstacle at 15 centimeters.', 2));
+
+    expect(Tts.stop).not.toHaveBeenCalled();
+    expect(service.queue).toHaveLength(0);
+  });
+
   it('lets a direct conversation answer jump ahead of disposable guidance', async () => {
     jest.useFakeTimers();
     const service = await createService();
@@ -195,7 +206,7 @@ describe('TTSService guidance speech', () => {
 
     (service as any).speakWithProsody('Stop! Obstacle ahead.', 'emergency', { force: true });
 
-    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.55);
+    expect(Tts.setDefaultRate).toHaveBeenCalledWith(0.5);
     expect(Tts.setDefaultPitch).toHaveBeenCalledWith(0.95);
   });
 
@@ -212,4 +223,3 @@ describe('TTSService guidance speech', () => {
     expect(Tts.speak).toHaveBeenCalledTimes(1);
   });
 });
-

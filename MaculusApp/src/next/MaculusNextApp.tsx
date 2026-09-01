@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  ActivityIndicator,
   Alert,
   SafeAreaView,
   ScrollView,
@@ -31,6 +32,11 @@ export default function MaculusNextApp(): React.JSX.Element {
   const [piConnecting, setPiConnecting] = React.useState(false);
   const active = state.phase !== 'idle' && state.phase !== 'error';
   const busy = state.phase === 'starting' || state.phase === 'stopping';
+  const interactionBusy = state.descriptionInProgress || [
+    'wake_detected',
+    'command_listening',
+    'processing',
+  ].includes(state.voiceStatus);
   const modelPercent = state.model.totalBytes > 0
     ? Math.min(100, Math.round(state.model.downloadedBytes * 100 / state.model.totalBytes))
     : 0;
@@ -76,6 +82,22 @@ export default function MaculusNextApp(): React.JSX.Element {
         <Text style={styles.eyebrow}>PRIVATE ON-DEVICE GUIDE</Text>
         <Text style={styles.title} accessibilityRole="header">Maculus Next</Text>
         <Text style={styles.subtitle}>{state.message}</Text>
+
+        {active && (
+          <View style={styles.interactionCard} accessibilityLiveRegion="polite">
+            <ActivityIndicator
+              animating={interactionBusy}
+              color="#66d9c7"
+              size="small"
+            />
+            <View style={styles.interactionText}>
+              <Text style={styles.cardLabel}>VOICE INTERACTION</Text>
+              <Text style={styles.interactionValue}>
+                {state.descriptionInProgress ? 'Processing your request' : voiceStatusTitle(state.voiceStatus)}
+              </Text>
+            </View>
+          </View>
+        )}
 
         <View
           style={[styles.connectionCard, piConnectionStyle(state.piConnection)]}
@@ -217,7 +239,7 @@ export default function MaculusNextApp(): React.JSX.Element {
               : state.cameraReady ? 'Paused' : 'Unavailable'}
           />
           <StatusItem label="Maculus Pi" value={piConnectionTitle(state.piConnection)} />
-          <StatusItem label="Voice" value={state.voiceStatus.replace(/_/g, ' ')} />
+          <StatusItem label="Voice" value={voiceStatusTitle(state.voiceStatus)} />
           <StatusItem label="Local AI" value={state.conversationReady ? 'Camera VLM ready' : 'Vision AI not ready'} />
           <StatusItem label="Vision" value={state.fps > 0 ? `${state.fps} FPS` : state.visionBackend} />
         </View>
@@ -302,6 +324,18 @@ function sensorTitle(health: string): string {
   return 'DEGRADED';
 }
 
+function voiceStatusTitle(status: string): string {
+  if (status === 'wake_listening') {return 'Waiting for “Hey LiveKit”';}
+  if (status === 'wake_detected') {return 'Activated';}
+  if (status === 'command_listening') {return 'Listening to you';}
+  if (status === 'processing') {return 'Processing your request';}
+  if (status === 'speaking') {return 'Maculus is speaking';}
+  if (status === 'paused') {return 'Paused for safety';}
+  if (status === 'unavailable') {return 'Voice unavailable';}
+  if (status === 'error') {return 'Voice needs attention';}
+  return 'Voice off';
+}
+
 function piConnectionTitle(connection: string): string {
   if (connection === 'connected') {return 'CONNECTED';}
   if (connection === 'searching') {return 'SEARCHING';}
@@ -353,6 +387,9 @@ const styles = StyleSheet.create({
   eyebrow: { color: '#66d9c7', fontSize: 13, fontWeight: '800', letterSpacing: 1.4 },
   title: { color: '#ffffff', fontSize: 38, lineHeight: 44, fontWeight: '800', marginTop: 6 },
   subtitle: { color: '#b9c7d8', fontSize: 18, lineHeight: 25, marginTop: 8, marginBottom: 22 },
+  interactionCard: { minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 14, borderRadius: 16, borderWidth: 1, borderColor: '#36506d', backgroundColor: '#0d1a2a', paddingHorizontal: 16, marginBottom: 18 },
+  interactionText: { flex: 1, paddingVertical: 12 },
+  interactionValue: { color: '#ffffff', fontSize: 17, fontWeight: '800', marginTop: 4 },
   connectionCard: { borderRadius: 18, padding: 18, borderWidth: 2, marginBottom: 18 },
   connectionConnected: { backgroundColor: '#0c302d', borderColor: '#2ed3b7' },
   connectionSearching: { backgroundColor: '#10263d', borderColor: '#4d91d9' },

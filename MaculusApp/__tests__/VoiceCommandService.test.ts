@@ -73,30 +73,57 @@ describe('VoiceCommandService parser', () => {
   });
 });
 
-describe('VoiceCommandService Siri-style interruption', () => {
+describe('VoiceCommandService clean Siri-style interruption', () => {
   beforeEach(() => {jest.clearAllMocks();});
   afterEach(() => {jest.restoreAllMocks();});
 
-  it('arms native voice-activity barge-in while the assistant is speaking', () => {
+  it('uses wake-word interruption instead of a noisy open-mic VAD while speaking', () => {
     const service = new VoiceCommandService() as any;
     service.enabled = true;
     service.alwaysListening = true;
 
     service.handleTtsSpeakingChange(true);
 
-    expect(NativeModules.MaculusVoiceCommand.startBargeInMonitoring).toHaveBeenCalledTimes(1);
+    expect(NativeModules.MaculusVoiceCommand.resumeAfterTts).toHaveBeenCalledTimes(1);
+    expect(NativeModules.MaculusVoiceCommand.startBargeInMonitoring).not.toHaveBeenCalled();
+    expect(service.getStatus()).toBe('speaking');
   });
 
-  it('turns a detected ordinary utterance into a direct capture without another wake word', () => {
+  it('keeps the microphone paused throughout emergency speech', () => {
+    const service = new VoiceCommandService() as any;
+    service.enabled = true;
+    service.alwaysListening = true;
+    service.safetyInterrupted = true;
+
+    service.handleTtsSpeakingChange(true);
+
+    expect(NativeModules.MaculusVoiceCommand.pauseForTts).toHaveBeenCalledTimes(1);
+    expect(NativeModules.MaculusVoiceCommand.resumeAfterTts).not.toHaveBeenCalled();
+    expect(NativeModules.MaculusVoiceCommand.startBargeInMonitoring).not.toHaveBeenCalled();
+  });
+
+  it('finishes the activation cue before opening command recognition', async () => {
     const service = new VoiceCommandService() as any;
     service.enabled = true;
     service.commandBusy = false;
-    service.handleWakeDetected = jest.fn(async () => {});
-    jest.spyOn(tts, 'isSpeaking').mockReturnValue(true);
+    service.onTurn = jest.fn();
+    jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
+    jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
+    let finishCue!: () => void;
+    (NativeModules.MaculusSoundCue.playActivation as jest.Mock).mockImplementationOnce(
+      () => new Promise<void>(resolve => {finishCue = resolve;}),
+    );
 
-    service.handleBargeInDetected();
+    const capture = service.handleWakeDetected({ name: 'hey_livekit' });
+    for (let step = 0; step < 8; step += 1) {await Promise.resolve();}
 
-    expect(service.handleWakeDetected).toHaveBeenCalledWith(expect.objectContaining({ name: 'barge_in' }));
+    expect(NativeModules.MaculusSoundCue.playActivation).toHaveBeenCalledTimes(1);
+    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).not.toHaveBeenCalled();
+
+    finishCue();
+    await capture;
+
+    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
   });
 });
 

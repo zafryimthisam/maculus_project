@@ -46,6 +46,16 @@ describe('MaculusNext SafetyCoordinator', () => {
     expect(safety.getState().message).toContain('unknown');
   });
 
+  it('announces a missing obstacle sensor only once per session', () => {
+    const safety = new SafetyCoordinator();
+    const invalid = reading({ valid: false, healthy: false, distance_cm: Number.NaN });
+
+    safety.ingest({ reading: invalid, receivedAt: 1000 });
+    expect(safety.ingest({ reading: invalid, receivedAt: 1100 })?.kind).toBe('sensor-fault');
+    expect(safety.ingest({ reading: invalid, receivedAt: 20_000 })).toBeNull();
+    expect(safety.ingest({ reading: invalid, receivedAt: 40_000 })).toBeNull();
+  });
+
   it('interrupts for an emergency and never gives a directional detour', () => {
     const safety = new SafetyCoordinator();
     const alert = safety.ingest({

@@ -52,13 +52,13 @@ export class TTSService {
   private readonly IS_IOS = Platform.OS === 'ios';
   private readonly DEFAULT_RATE = Platform.OS === 'ios' ? 0.5 : 0.55;
   private readonly PROFILES: Record<TtsProsodyProfile, { rate: number; pitch: number }> = Platform.OS === 'ios' ? {
-    emergency: { rate: 0.55, pitch: 0.95 },
+    emergency: { rate: 0.5, pitch: 0.95 },
     urgent: { rate: 0.52, pitch: 0.97 },
     scene: { rate: 0.5, pitch: 1.0 },
     ack: { rate: 0.48, pitch: 1.05 },
     conversational: { rate: 0.5, pitch: 1.02 },
   } : {
-    emergency: { rate: 0.6, pitch: 0.95 },
+    emergency: { rate: 0.54, pitch: 0.95 },
     urgent: { rate: 0.58, pitch: 0.97 },
     scene: { rate: 0.55, pitch: 1.0 },
     ack: { rate: 0.5, pitch: 1.05 },
@@ -332,6 +332,12 @@ export class TTSService {
       source: event.source,
       expiresAt: event.expiresAt,
     };
+
+    // Do not restart an emergency sentence with every new distance sample.
+    // Repeated immediate stops made the warning fade into silence.
+    if (event.priority >= 2 && this.speaking && (this.currentItem?.priority ?? 0) >= 2) {
+      return;
+    }
 
     if (event.interruption === 'immediate' || event.priority >= 2) {
       if (this.speaking || this.queue.length > 0) {
