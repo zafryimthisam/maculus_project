@@ -465,11 +465,6 @@ class MaculusVoiceCommandModule(
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            // These are hints only; several OEM recognizers ignore them. The
-            // JS service also retries an early empty result until its deadline.
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 5000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, reactContext.packageName)
             if (isOnDeviceAvailable()) {
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
@@ -501,6 +496,7 @@ class MaculusVoiceCommandModule(
         override fun onEndOfSpeech() = Unit
         override fun onPartialResults(partialResults: Bundle?) {
             rememberLatestCommand(partialResults)
+            emitCommandTranscript(isFinal = false)
         }
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
@@ -518,7 +514,7 @@ class MaculusVoiceCommandModule(
             }
             Log.w(TAG, "Command recognizer error: $message (code=$error)")
             emitError(message, fatal = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
-            pending?.resolve(null)
+            pending?.reject("VOICE_RECOGNITION_ERROR", message)
         }
 
         override fun onResults(results: Bundle?) {
@@ -535,6 +531,7 @@ class MaculusVoiceCommandModule(
             }
             latestCommandText = matches[0]
             latestCommandConfidence = confidences?.firstOrNull()
+            emitCommandTranscript(isFinal = true)
             pending?.resolve(latestCommandResult())
             clearLatestCommandResult()
         }
@@ -665,6 +662,15 @@ class MaculusVoiceCommandModule(
         emit(EVENT_STATE, Arguments.createMap().apply { putString("state", state) })
     }
 
+    private fun emitCommandTranscript(isFinal: Boolean) {
+        val text = latestCommandText ?: return
+        emit(EVENT_TRANSCRIPT, Arguments.createMap().apply {
+            putString("text", text)
+            latestCommandConfidence?.let { putDouble("confidence", it.toDouble()) } ?: putNull("confidence")
+            putBoolean("isFinal", isFinal)
+        })
+    }
+
     private fun emitError(message: String, fatal: Boolean) {
         emit(EVENT_ERROR, Arguments.createMap().apply {
             putString("message", message)
@@ -723,6 +729,7 @@ class MaculusVoiceCommandModule(
         private const val WAKE_LABEL = "Hey LiveKit"
         private const val EVENT_WAKE_DETECTED = "MaculusVoiceWakeDetected"
         private const val EVENT_BARGE_IN_DETECTED = "MaculusVoiceBargeInDetected"
+        private const val EVENT_TRANSCRIPT = "MaculusVoiceCommandTranscript"
         private const val EVENT_STATE = "MaculusVoiceCommandState"
         private const val EVENT_ERROR = "MaculusVoiceCommandError"
     }

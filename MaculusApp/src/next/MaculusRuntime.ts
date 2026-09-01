@@ -234,9 +234,19 @@ export class MaculusRuntime {
           // must not substitute parser or detector feedback.
           forwardAllTranscripts: true,
           onTurnComplete: () => voiceCommandService.openFollowupWindow(),
+          onTranscript: transcript => this.update({
+            lastUserTranscript: transcript,
+            voiceDiagnostic: 'Transcript captured. Preparing the private vision request.',
+          }),
+          onDiagnostic: voiceDiagnostic => this.update({ voiceDiagnostic }),
         },
       );
-      if (!voiceStarted) {this.update({ voiceStatus: 'unavailable' });}
+      if (!voiceStarted) {
+        this.update({
+          voiceStatus: 'unavailable',
+          voiceDiagnostic: 'Native voice recognition is unavailable on this device.',
+        });
+      }
       this.speech.speakSystem(
         cameraReady
           ? `Maculus is ready. Say ${WAKE_WORD_LABEL}, then ask naturally.`
@@ -693,9 +703,21 @@ export class MaculusRuntime {
 
   private handleVoiceTurn = async (turn: ConversationTurn, fastCommand: VoiceCommand | null): Promise<void> => {
     if (!this.running) {return;}
-    if (fastCommand && fastCommand !== 'describe_scene' && this.handleFastCommand(fastCommand)) {return;}
+    this.update({
+      lastUserTranscript: turn.transcript,
+      voiceDiagnostic: fastCommand
+        ? `Recognized local command: ${fastCommand.replace(/_/g, ' ')}.`
+        : 'Transcript received. Capturing a camera frame for the private vision AI.',
+    });
+    if (fastCommand && fastCommand !== 'describe_scene' && this.handleFastCommand(fastCommand)) {
+      this.update({ voiceDiagnostic: 'The recognized command was completed locally.' });
+      return;
+    }
     if (this.safety.getState().health === 'emergency') {
-      this.update({ message: 'Emergency obstacle remains within 40 centimeters — AI conversation is paused' });
+      this.update({
+        message: 'Emergency obstacle remains within 40 centimeters — AI conversation is paused',
+        voiceDiagnostic: 'The transcript was captured, but the AI request was blocked by an active safety emergency.',
+      });
       return;
     }
     const requestedGoal = extractGuidanceGoal(turn.transcript);
@@ -713,6 +735,7 @@ export class MaculusRuntime {
     this.update({
       descriptionInProgress: true,
       message: 'Maculus heard you and is checking the private vision AI…',
+      voiceDiagnostic: 'Transcript and camera frame are being processed by the private vision AI.',
     });
     await soundCueService.startProcessing();
     try {
@@ -739,10 +762,24 @@ export class MaculusRuntime {
           detailedDescription: response.vision.text,
           descriptionSource: response.vision.source,
           message: voiceVisionStatusMessage(response.vision),
+          voiceDiagnostic: response.vision.source === 'vision-language'
+            ? 'The private vision AI returned an answer. Maculus is speaking it now.'
+            : `The private vision AI could not answer: ${voiceVisionStatusMessage(response.vision)}.`,
         });
       }
       await soundCueService.stopProcessing();
       this.speech.speakConversation(response.text, `answer:${turn.timestamp}`);
+    } catch (error: any) {
+      const detail = String(error?.message || error || 'Unknown voice request failure.');
+      console.warn('[MaculusNext] Voice request failed:', detail);
+      this.update({
+        message: 'Voice request failed before an answer was produced',
+        voiceDiagnostic: `Voice request failed: ${detail}`,
+      });
+      this.speech.speakConversation(
+        'I heard your request, but the private vision AI could not finish the answer.',
+        `answer-error:${turn.timestamp}`,
+      );
     } finally {
       await soundCueService.stopProcessing();
       this.speech.endConversationTurn();

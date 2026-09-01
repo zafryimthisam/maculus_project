@@ -27,6 +27,8 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
   private var recognitionTask: SFSpeechRecognitionTask?
   private var commandTimeout: DispatchWorkItem?
+  private var commandSilenceTimeout: DispatchWorkItem?
+  private var commandAudioEnded = false
   private var latestCommandResult: [String: Any]?
   private var commandPromise: (
     resolve: RCTPromiseResolveBlock,
@@ -59,7 +61,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   @objc override static func requiresMainQueueSetup() -> Bool { false }
 
   override func supportedEvents() -> [String]! {
-    ["MaculusVoiceWakeDetected", "MaculusVoiceBargeInDetected", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
+    ["MaculusVoiceWakeDetected", "MaculusVoiceBargeInDetected", "MaculusVoiceCommandTranscript", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
   }
 
   override func startObserving() { hasEventListeners = true }
@@ -170,6 +172,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
         self.commandAudioEngine = engine
         self.recognitionRequest = request
         self.latestCommandResult = nil
+        self.commandAudioEnded = false
         engine.prepare()
         try engine.start()
 
@@ -186,10 +189,20 @@ final class MaculusVoiceCommand: RCTEventEmitter {
               let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
               if !text.isEmpty {
                 self.latestCommandResult = ["text": text, "confidence": bridgedConfidence]
+                self.emit("MaculusVoiceCommandTranscript", body: [
+                  "text": text,
+                  "confidence": bridgedConfidence,
+                  "isFinal": result.isFinal,
+                ])
+                if !result.isFinal { self.scheduleCommandEndAfterSpeech() }
               }
               if result.isFinal { self.finishCommand(result: self.latestCommandResult) }
-            } else if error != nil {
-              self.finishCommand(result: self.latestCommandResult)
+            } else if let error {
+              if self.latestCommandResult != nil {
+                self.finishCommand(result: self.latestCommandResult)
+              } else {
+                self.failCommand(error: error)
+              }
             }
           }
         }
@@ -442,10 +455,36 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     return Array(UnsafeBufferPointer(start: channel, count: Int(converted.frameLength)))
   }
 
+  private func scheduleCommandEndAfterSpeech() {
+    guard commandPromise != nil, !commandAudioEnded else { return }
+    commandSilenceTimeout?.cancel()
+    let silence = DispatchWorkItem { [weak self] in
+      self?.endCommandAudioAfterSpeech()
+    }
+    commandSilenceTimeout = silence
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: silence)
+  }
+
+  private func endCommandAudioAfterSpeech() {
+    guard commandPromise != nil, latestCommandResult != nil, !commandAudioEnded else { return }
+    commandAudioEnded = true
+    commandSilenceTimeout = nil
+    if let engine = commandAudioEngine {
+      engine.inputNode.removeTap(onBus: 0)
+      engine.stop()
+      commandAudioEngine = nil
+    }
+    // Apple requires live-buffer requests to receive endAudio() before they
+    // can reliably deliver their final transcription.
+    recognitionRequest?.endAudio()
+  }
+
   private func finishCommand(result: [String: Any]?) {
     guard commandPromise != nil || commandAudioEngine != nil else { return }
     commandTimeout?.cancel()
     commandTimeout = nil
+    commandSilenceTimeout?.cancel()
+    commandSilenceTimeout = nil
     recognitionRequest?.endAudio()
     recognitionTask?.cancel()
     recognitionTask = nil
@@ -455,10 +494,33 @@ final class MaculusVoiceCommand: RCTEventEmitter {
       engine.stop()
     }
     commandAudioEngine = nil
+    commandAudioEnded = false
     let promise = commandPromise
     commandPromise = nil
     latestCommandResult = nil
     promise?.resolve(result)
+  }
+
+  private func failCommand(error: Error) {
+    guard commandPromise != nil || commandAudioEngine != nil else { return }
+    commandTimeout?.cancel()
+    commandTimeout = nil
+    commandSilenceTimeout?.cancel()
+    commandSilenceTimeout = nil
+    recognitionRequest?.endAudio()
+    recognitionTask?.cancel()
+    recognitionTask = nil
+    recognitionRequest = nil
+    if let engine = commandAudioEngine {
+      engine.inputNode.removeTap(onBus: 0)
+      engine.stop()
+    }
+    commandAudioEngine = nil
+    commandAudioEnded = false
+    let promise = commandPromise
+    commandPromise = nil
+    latestCommandResult = nil
+    promise?.reject("VOICE_RECOGNITION_ERROR", error.localizedDescription, error)
   }
 
   private func configureAudioSession() throws {

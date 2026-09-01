@@ -130,28 +130,74 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
   });
 
-  it('retries an early empty endpointer result and processes the next transcript', async () => {
+  it('processes one native capture as soon as its transcript is finalized', async () => {
     const service = new VoiceCommandService() as any;
     const onTurn = jest.fn(async () => {});
     const onStatus = jest.fn();
+    const onTranscript = jest.fn();
+    const onDiagnostic = jest.fn();
     service.enabled = true;
     service.commandBusy = false;
     service.forwardAllTranscripts = true;
     service.onTurn = onTurn;
     service.onStatus = onStatus;
+    service.onTranscript = onTranscript;
+    service.onDiagnostic = onDiagnostic;
     jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
     (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any)
-      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ text: 'What color is the chair?', confidence: 0.91 });
 
     await service.handleWakeDetected({ name: 'followup' });
 
-    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(2);
+    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
     expect(onStatus).toHaveBeenCalledWith('processing');
+    expect(onTranscript).toHaveBeenCalledWith('What color is the chair?');
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      'Transcript captured. Sending it to MaculusNext for processing.',
+    );
     expect(onTurn).toHaveBeenCalledWith(
       expect.objectContaining({ transcript: 'What color is the chair?' }),
       null,
+    );
+  });
+
+  it('does not extend listening by retrying an empty native capture', async () => {
+    const service = new VoiceCommandService() as any;
+    const onTurn = jest.fn();
+    const onDiagnostic = jest.fn();
+    service.enabled = true;
+    service.commandBusy = false;
+    service.forwardAllTranscripts = true;
+    service.onTurn = onTurn;
+    service.onDiagnostic = onDiagnostic;
+    jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
+    jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
+    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any).mockResolvedValueOnce(null);
+
+    await service.handleWakeDetected({ name: 'followup' });
+
+    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
+    expect(onTurn).not.toHaveBeenCalled();
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      'No spoken words were recognized. Say “Hey LiveKit,” wait for the sound, then speak.',
+    );
+  });
+
+  it('surfaces partial native speech in the UI before final recognition', () => {
+    const service = new VoiceCommandService() as any;
+    const onTranscript = jest.fn();
+    const onDiagnostic = jest.fn();
+    service.enabled = true;
+    service.commandBusy = true;
+    service.onTranscript = onTranscript;
+    service.onDiagnostic = onDiagnostic;
+
+    service.handlePartialTranscript({ text: 'What is in front', isFinal: false });
+
+    expect(onTranscript).toHaveBeenCalledWith('What is in front');
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      'Speech detected. Listening until you finish talking.',
     );
   });
 });

@@ -95,6 +95,10 @@ export default function MaculusNextApp(): React.JSX.Element {
               <Text style={styles.interactionValue}>
                 {state.descriptionInProgress ? 'Processing your request' : voiceStatusTitle(state.voiceStatus)}
               </Text>
+              <Text style={styles.transcriptText}>
+                Heard: {state.lastUserTranscript ? `“${state.lastUserTranscript}”` : 'Nothing yet'}
+              </Text>
+              <Text style={styles.diagnosticText}>{state.voiceDiagnostic}</Text>
             </View>
           </View>
         )}
@@ -390,6 +394,8 @@ const styles = StyleSheet.create({
   interactionCard: { minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 14, borderRadius: 16, borderWidth: 1, borderColor: '#36506d', backgroundColor: '#0d1a2a', paddingHorizontal: 16, marginBottom: 18 },
   interactionText: { flex: 1, paddingVertical: 12 },
   interactionValue: { color: '#ffffff', fontSize: 17, fontWeight: '800', marginTop: 4 },
+  transcriptText: { color: '#8fe4d7', fontSize: 15, lineHeight: 21, marginTop: 7 },
+  diagnosticText: { color: '#b9c7d8', fontSize: 13, lineHeight: 19, marginTop: 4 },
   connectionCard: { borderRadius: 18, padding: 18, borderWidth: 2, marginBottom: 18 },
   connectionConnected: { backgroundColor: '#0c302d', borderColor: '#2ed3b7' },
   connectionSearching: { backgroundColor: '#10263d', borderColor: '#4d91d9' },

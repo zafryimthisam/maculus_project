@@ -133,10 +133,15 @@ immediately submits one uninterrupted priority-two stop alert. Missing-sensor
 speech is limited to one notice per session while status remains visible. The local detector and sensor
 remain the safety source; the VLM never decides whether a route is safe.
 
-Some platform speech endpointers return an empty no-speech result before the
-eight-second Maculus command window expires. Empty results are safely retried
-until that deadline; any non-empty transcript immediately advances to
-`processing` and is passed with the current camera frame to the private VLM.
+Each activation opens one native speech capture; an empty result is not retried
+or stretched into a longer listening window. On iOS, partial recognition updates
+the Voice Interaction card while the user speaks, then 1.1 seconds without a new
+recognized phrase ends the live audio request so Speech can finalize it. The
+eight-second command timeout is only a no-speech ceiling. A non-empty final
+transcript immediately advances to `processing` and is passed with the current
+camera frame to the private VLM. The card shows the exact recognized text plus
+the current capture, VLM handoff, answer, or failure diagnostic so device-only
+problems can be reported without guesswork.
 
 “Guide/lead/take me to …” creates a persistent private visual goal. Supported
 YOLO targets such as a chair, person, vehicle, bag, or place to sit are tracked

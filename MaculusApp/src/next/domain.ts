@@ -99,6 +99,8 @@ export interface NextRuntimeState {
   piLastSeenAt: number | null;
   sensor: SafetyState;
   voiceStatus: VoiceCommandStatus;
+  lastUserTranscript: string;
+  voiceDiagnostic: string;
   conversationReady: boolean;
   model: NextModelState;
   descriptionInProgress: boolean;
@@ -160,6 +162,8 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   piLastSeenAt: null,
   sensor: EMPTY_SAFETY_STATE,
   voiceStatus: 'off',
+  lastUserTranscript: '',
+  voiceDiagnostic: 'Start a session, then say “Hey LiveKit.”',
   conversationReady: false,
   model: EMPTY_MODEL_STATE,
   descriptionInProgress: false,

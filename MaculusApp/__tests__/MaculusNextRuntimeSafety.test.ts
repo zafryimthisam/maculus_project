@@ -108,7 +108,55 @@ describe('MaculusNext runtime emergency AI interruption', () => {
     expect(runtime.getState()).toMatchObject({
       descriptionSource: 'vision-language',
       descriptionInProgress: false,
+      lastUserTranscript: 'Describe the scene',
+      voiceDiagnostic: 'The private vision AI returned an answer. Maculus is speaking it now.',
     });
+  });
+
+  it('surfaces a captured transcript and VLM failure in the runtime diagnostics', async () => {
+    const runtime = new MaculusRuntime();
+    const speakConversation = jest.fn();
+    const testable = runtime as any;
+    testable.running = true;
+    testable.state = {
+      ...INITIAL_NEXT_RUNTIME_STATE,
+      phase: 'running',
+      cameraReady: true,
+      guidanceActive: true,
+    };
+    testable.safety = { getState: () => healthySafety() };
+    testable.scene = { getSnapshot: () => sceneSnapshot() };
+    testable.currentVisionObservation = () => ({
+      frame: { base64: 'camera-frame' },
+      snapshot: sceneSnapshot(),
+      receivedAt: Date.now(),
+    });
+    testable.conversation = {
+      respondWithMetadata: jest.fn(async () => {throw new Error('Native VLM context stopped');}),
+    };
+    testable.speech = {
+      beginConversationTurn: jest.fn(),
+      endConversationTurn: jest.fn(),
+      speakConversation,
+    };
+
+    await testable.handleVoiceTurn({
+      transcript: 'What is in front of me?',
+      timestamp: 3000,
+      confidence: 0.88,
+      sessionId: 'test',
+    }, null);
+
+    expect(runtime.getState()).toMatchObject({
+      lastUserTranscript: 'What is in front of me?',
+      descriptionInProgress: false,
+      message: 'Voice request failed before an answer was produced',
+    });
+    expect(runtime.getState().voiceDiagnostic).toContain('Native VLM context stopped');
+    expect(speakConversation).toHaveBeenCalledWith(
+      'I heard your request, but the private vision AI could not finish the answer.',
+      'answer-error:3000',
+    );
   });
 
   it('keeps safe visual destination intent separate from unsupported route claims', () => {

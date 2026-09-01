@@ -78,7 +78,6 @@ const MIN_CONFIDENCE = 0.35;
 // such as "Hey LiveKit, start Maculus" does not lose the first command word.
 // TTS is already stopped before this delay begins.
 const AUDIO_HANDOFF_MS = 120;
-const EMPTY_RECOGNIZER_RETRY_MS = 120;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
@@ -222,6 +221,8 @@ export class VoiceCommandService {
   private followupWindowUntil = 0;
   private followupWindowTimer: ReturnType<typeof setTimeout> | null = null;
   private onStatus: ((status: VoiceCommandStatus) => void) | null = null;
+  private onTranscript: ((transcript: string) => void) | null = null;
+  private onDiagnostic: ((message: string) => void) | null = null;
   private onTurn: ((turn: ConversationTurn, fastCommand: VoiceCommand | null) => void | Promise<void>) | null = null;
   private onTurnComplete: (() => Promise<void> | void) | null = null;
 
@@ -232,6 +233,8 @@ export class VoiceCommandService {
       alwaysListening?: boolean;
       forwardAllTranscripts?: boolean;
       onTurnComplete?: () => Promise<void> | void;
+      onTranscript?: (transcript: string) => void;
+      onDiagnostic?: (message: string) => void;
     } = {},
   ): Promise<boolean> {
     if (!MaculusVoiceCommand) {
@@ -245,6 +248,8 @@ export class VoiceCommandService {
     this.forwardAllTranscripts = Boolean(options.forwardAllTranscripts);
     this.onTurn = onTurn;
     this.onTurnComplete = options.onTurnComplete ?? null;
+    this.onTranscript = options.onTranscript ?? null;
+    this.onDiagnostic = options.onDiagnostic ?? null;
     this.sessionId = `voice:${Date.now()}`;
     this.onStatus = onStatus;
 
@@ -259,6 +264,7 @@ export class VoiceCommandService {
       this.emitter = new NativeEventEmitter(MaculusVoiceCommand as any);
       this.subscriptions = [
         this.emitter.addListener('MaculusVoiceWakeDetected', this.handleWakeDetected),
+        this.emitter.addListener('MaculusVoiceCommandTranscript', this.handlePartialTranscript),
         this.emitter.addListener('MaculusVoiceCommandState', this.handleState),
         this.emitter.addListener('MaculusVoiceCommandError', this.handleError),
       ];
@@ -266,6 +272,7 @@ export class VoiceCommandService {
 
       await MaculusVoiceCommand.startWakeListening();
       this.setStatus('wake_listening');
+      this.setDiagnostic(`Waiting for “${WAKE_WORD_LABEL}”.`);
       return true;
     } catch (e) {
       console.warn('[Voice] Start failed:', e);
@@ -310,6 +317,8 @@ export class VoiceCommandService {
     this.safetyInterrupted = false;
     this.reserveConversationWindow(this.effectiveQuietMs());
     this.setStatus('wake_detected');
+    this.onTranscript?.('');
+    this.setDiagnostic('Wake word detected. Playing the activation sound.');
     if (!directCapture) {Vibration.vibrate([0, 60]);}
     if (detection.name === 'barge_in' || interruptedSpeech) {
       tts.stop();
@@ -330,22 +339,11 @@ export class VoiceCommandService {
     }
 
     this.setStatus('command_listening');
+    this.setDiagnostic('Listening for your request. Speak after the activation sound.');
     try {
-      // Platform endpointers can return an empty no-speech result after roughly
-      // two seconds even though our command window is longer. The native
-      // promise resolves only after results/error, so retrying an empty result
-      // cannot overlap an active recognizer. A real transcript is never retried.
-      const commandDeadline = Date.now() + COMMAND_TIMEOUT_MS;
-      let result: VoiceCommandResult | null = null;
-      do {
-        const remainingMs = Math.max(1000, commandDeadline - Date.now());
-        result = await MaculusVoiceCommand.listenForCommandOnce(remainingMs);
-        if (result?.text || !this.enabled || this.safetyInterrupted || Date.now() >= commandDeadline) {
-          break;
-        }
-        this.setStatus('command_listening');
-        await wait(EMPTY_RECOGNIZER_RETRY_MS);
-      } while (Date.now() < commandDeadline);
+      // This is a ceiling for no-speech cases. Native endpointing completes
+      // this single capture as soon as the user stops talking.
+      const result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled) {
         this.commandBusy = false;
@@ -354,12 +352,16 @@ export class VoiceCommandService {
 
       if (!result?.text) {
         console.log('[Voice] No command transcript returned');
+        this.setDiagnostic('No spoken words were recognized. Say “Hey LiveKit,” wait for the sound, then speak.');
         this.reserveConversationWindow(EMPTY_CAPTURE_QUIET_MS);
         if (!this.safetyInterrupted) {Vibration.vibrate([0, 45, 60, 45]);}
         return;
       }
 
       this.setStatus('processing');
+      const transcript = result.text.trim();
+      this.onTranscript?.(transcript);
+      this.setDiagnostic('Transcript captured. Sending it to MaculusNext for processing.');
       this.reserveConversationWindow(this.effectiveQuietMs());
       const command = parseVoiceCommand(result.text, result.confidence, {
         requireWakeWord: false,
@@ -386,7 +388,7 @@ export class VoiceCommandService {
         return;
       }
       await this.onTurn?.({
-        transcript: result.text.trim(),
+        transcript,
         timestamp: Date.now(),
         confidence: typeof result.confidence === 'number' ? result.confidence : null,
         sessionId: this.sessionId,
@@ -394,6 +396,7 @@ export class VoiceCommandService {
     } catch (e) {
       console.warn('[Voice] Command listen failed:', e);
       this.setStatus('error');
+      this.setDiagnostic(`Voice recognition failed: ${errorMessage(e)}`);
     } finally {
       this.commandBusy = false;
       this.safetyInterrupted = false;
@@ -436,8 +439,19 @@ export class VoiceCommandService {
     this.setStatus(state.state);
   };
 
+  private handlePartialTranscript = (event: { text?: string; isFinal?: boolean }) => {
+    if (!this.enabled || !this.commandBusy) {return;}
+    const transcript = event.text?.trim();
+    if (!transcript) {return;}
+    this.onTranscript?.(transcript);
+    this.setDiagnostic(event.isFinal
+      ? 'Speech ended. Finalizing the recognized text.'
+      : 'Speech detected. Listening until you finish talking.');
+  };
+
   private handleError = (error: { message?: string; fatal?: boolean }) => {
     console.warn('[Voice] Native error:', error);
+    this.setDiagnostic(`Native voice error: ${error.message || 'Unknown recognition error.'}`);
     if (error.fatal) {
       this.setStatus('unavailable');
       this.stopLocal();
@@ -558,6 +572,8 @@ export class VoiceCommandService {
     this.emitter = null;
     this.onTurn = null;
     this.onTurnComplete = null;
+    this.onTranscript = null;
+    this.onDiagnostic = null;
     this.sessionId = '';
     this.safetyInterrupted = false;
     this.conversationQuietUntil = 0;
@@ -569,6 +585,10 @@ export class VoiceCommandService {
   private setStatus(status: VoiceCommandStatus): void {
     this.status = status;
     this.onStatus?.(status);
+  }
+
+  private setDiagnostic(message: string): void {
+    this.onDiagnostic?.(message);
   }
 
   getStatus(): VoiceCommandStatus {
@@ -635,8 +655,9 @@ function containsAny(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word));
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {return error.message;}
+  return typeof error === 'string' && error ? error : 'Unknown speech-recognition error.';
 }
 
 export const voiceCommandService = new VoiceCommandService();
