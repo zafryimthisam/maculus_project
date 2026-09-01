@@ -47,7 +47,7 @@ final class MaculusSoundCue: NSObject, AVAudioPlayerDelegate {
       do {
         let player = try AVAudioPlayer(contentsOf: try self.soundURL(named: "processing_sound"))
         player.numberOfLoops = -1
-        player.volume = 0.3
+        player.volume = 1
         player.prepareToPlay()
         guard player.play() else {
           throw MaculusNativeError.message("Processing sound could not start")

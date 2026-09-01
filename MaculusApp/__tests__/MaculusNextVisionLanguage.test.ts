@@ -134,6 +134,30 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(textCompletion).not.toHaveBeenCalled();
   });
 
+  it('passes a captured example transcript into the VLM and returns its answer', async () => {
+    const service = readyService();
+    const vision = jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(
+      'The chair in front of you is blue.',
+    );
+
+    const response = await service.respondWithMetadata(
+      'What color is the chair in front of me?',
+      scene(),
+      healthySensor(),
+      'live-camera-jpeg',
+      { visionOnly: true },
+    );
+
+    expect(vision).toHaveBeenCalledWith(expect.objectContaining({
+      imageBase64: 'live-camera-jpeg',
+      prompt: expect.stringContaining('What color is the chair in front of me?'),
+    }));
+    expect(response).toMatchObject({
+      text: expect.stringContaining('chair in front of you is blue'),
+      vision: { source: 'vision-language' },
+    });
+  });
+
   it('includes recent multimodal conversation so follow-up questions retain context', async () => {
     const service = readyService();
     const vision = jest.spyOn(localLlmService, 'completeVision')

@@ -109,6 +109,10 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     service.onTurn = jest.fn();
     jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
+    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any).mockResolvedValueOnce({
+      text: 'describe scene',
+      confidence: 0.9,
+    });
     let finishCue!: () => void;
     (NativeModules.MaculusSoundCue.playActivation as jest.Mock).mockImplementationOnce(
       () => new Promise<void>(resolve => {finishCue = resolve;}),
@@ -124,6 +128,31 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     await capture;
 
     expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries an early empty endpointer result and processes the next transcript', async () => {
+    const service = new VoiceCommandService() as any;
+    const onTurn = jest.fn(async () => {});
+    const onStatus = jest.fn();
+    service.enabled = true;
+    service.commandBusy = false;
+    service.forwardAllTranscripts = true;
+    service.onTurn = onTurn;
+    service.onStatus = onStatus;
+    jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
+    jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
+    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ text: 'What color is the chair?', confidence: 0.91 });
+
+    await service.handleWakeDetected({ name: 'followup' });
+
+    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(2);
+    expect(onStatus).toHaveBeenCalledWith('processing');
+    expect(onTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ transcript: 'What color is the chair?' }),
+      null,
+    );
   });
 });
 

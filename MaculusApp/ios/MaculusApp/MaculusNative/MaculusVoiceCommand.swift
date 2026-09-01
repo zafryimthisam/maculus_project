@@ -157,6 +157,8 @@ final class MaculusVoiceCommand: RCTEventEmitter {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
+        request.taskHint = .dictation
+        request.contextualStrings = ["Hey LiveKit", "Maculus", "start guidance", "stop guidance", "describe scene"]
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {

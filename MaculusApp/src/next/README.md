@@ -114,8 +114,9 @@ guidance controls after “Hey LiveKit.”
 The interaction uses the bundled user-supplied `activation_sound.mp3` after a
 real wake-word detection and waits for that cue before command capture takes the
 audio session. The bundled cue is level-normalized for a phone speaker.
-`processing_sound.mp3` loops quietly only while the private multimodal model is
-working. Wake-free follow-ups do not replay the activation cue. Both sounds stop
+Both bundled files are loudness-normalized and play at full app/media volume;
+`processing_sound.mp3` loops only while the private multimodal model is working.
+Wake-free follow-ups do not replay the activation cue. Both sounds stop
 before assistant speech and immediately on an emergency or session shutdown.
 
 From wake detection through user capture, model thinking, and AI speech, the
@@ -131,6 +132,11 @@ cancels any in-progress model generation, interrupts conversational speech, and
 immediately submits one uninterrupted priority-two stop alert. Missing-sensor
 speech is limited to one notice per session while status remains visible. The local detector and sensor
 remain the safety source; the VLM never decides whether a route is safe.
+
+Some platform speech endpointers return an empty no-speech result before the
+eight-second Maculus command window expires. Empty results are safely retried
+until that deadline; any non-empty transcript immediately advances to
+`processing` and is passed with the current camera frame to the private VLM.
 
 “Guide/lead/take me to …” creates a persistent private visual goal. Supported
 YOLO targets such as a chair, person, vehicle, bag, or place to sit are tracked

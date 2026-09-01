@@ -78,6 +78,7 @@ const MIN_CONFIDENCE = 0.35;
 // such as "Hey LiveKit, start Maculus" does not lose the first command word.
 // TTS is already stopped before this delay begins.
 const AUDIO_HANDOFF_MS = 120;
+const EMPTY_RECOGNIZER_RETRY_MS = 120;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
@@ -330,14 +331,21 @@ export class VoiceCommandService {
 
     this.setStatus('command_listening');
     try {
-      // Wait for the recognizer to finalize naturally. We do not retry on an
-      // early empty result: if iOS's SFSpeechAudioBufferRecognitionRequest
-      // is still producing partials (e.g. the user is mid-sentence), a retry
-      // tears down the audio engine and aborts the in-flight recognition.
-      // pauseForTts + tts.prepareForListening already handle the audio
-      // session handoff, so the recognizer has time to start. A genuine
-      // empty capture will be caught by COMMAND_TIMEOUT_MS below.
-      const result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
+      // Platform endpointers can return an empty no-speech result after roughly
+      // two seconds even though our command window is longer. The native
+      // promise resolves only after results/error, so retrying an empty result
+      // cannot overlap an active recognizer. A real transcript is never retried.
+      const commandDeadline = Date.now() + COMMAND_TIMEOUT_MS;
+      let result: VoiceCommandResult | null = null;
+      do {
+        const remainingMs = Math.max(1000, commandDeadline - Date.now());
+        result = await MaculusVoiceCommand.listenForCommandOnce(remainingMs);
+        if (result?.text || !this.enabled || this.safetyInterrupted || Date.now() >= commandDeadline) {
+          break;
+        }
+        this.setStatus('command_listening');
+        await wait(EMPTY_RECOGNIZER_RETRY_MS);
+      } while (Date.now() < commandDeadline);
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled) {
         this.commandBusy = false;
@@ -625,6 +633,10 @@ function normalizeSpeech(text: string): string {
 
 function containsAny(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word));
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export const voiceCommandService = new VoiceCommandService();

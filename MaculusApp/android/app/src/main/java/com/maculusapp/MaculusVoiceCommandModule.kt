@@ -465,6 +465,11 @@ class MaculusVoiceCommandModule(
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            // These are hints only; several OEM recognizers ignore them. The
+            // JS service also retries an early empty result until its deadline.
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 5000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, reactContext.packageName)
             if (isOnDeviceAvailable()) {
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
