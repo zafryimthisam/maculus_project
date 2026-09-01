@@ -104,11 +104,40 @@ is unavailable, Maculus says that the vision AI cannot answer and labels the UI
 result as unavailable. Direct voice controls such as pause, resume, repeat, and
 haptic settings remain deterministic so they work without model inference.
 
-Visual inference and ordinary scene narration pause during these requests. A
-valid ultrasonic reading at or below 40 centimeters cancels any in-progress
-model generation, interrupts conversational speech, and immediately submits the
-priority-two stop alert. The local detector and sensor remain the safety source;
-the VLM never decides whether a route is safe.
+The multimodal prompt distinguishes camera questions from general knowledge
+questions without changing model paths: both use the VLM, while general answers
+omit unrelated detector, anonymous-person, and ultrasonic narration. Recent
+multimodal turns are included so short follow-ups can resolve conversational
+context. “Start/stop Maculus” and “start/stop guidance” are equivalent local
+guidance controls after “Hey LiveKit.”
+
+The interaction uses the bundled user-supplied `activation_sound.mp3` after a
+real wake-word detection and loops `processing_sound.mp3` only while the private
+multimodal model is working. Wake-free follow-ups and barge-in do not replay the
+activation cue. Both sounds stop before assistant speech and immediately on an
+emergency or session shutdown.
+
+From wake detection through user capture, model thinking, and AI speech, the
+conversation exclusively owns TTS. Ambient detector narration and non-emergency
+distance warnings are suppressed, and stale queued guidance is discarded.
+During AI speech an echo-cancelled native voice-activity monitor remains armed,
+allowing ordinary sustained speech to barge in, stop the answer, and open a new
+full speech capture. If that monitor is unavailable for the current audio route,
+“Hey LiveKit” wake-word interruption remains the fallback. A valid
+ultrasonic reading at or below 40 centimeters is the sole speech exception: it
+cancels any in-progress model generation, interrupts conversational speech, and
+immediately submits the priority-two stop alert. The local detector and sensor
+remain the safety source; the VLM never decides whether a route is safe.
+
+“Guide/lead/take me to …” creates a persistent private visual goal. Supported
+YOLO targets such as a chair, person, vehicle, bag, or place to sit are tracked
+across frames and announced only when their verified left/ahead/right position
+changes or after a long reminder interval. Unsupported semantic targets such as
+an entrance stay in multimodal conversation context, but are not falsely
+presented as continuously detector-tracked. Monocular vision and a forward
+ultrasonic sensor cannot verify route length or object-specific metres, so the
+runtime continues to reject invented exact distances and unverified “walk” or
+“path is safe” instructions.
 
 ## Sensor response contract
 

@@ -57,6 +57,21 @@ describe('MaculusNext SpeechCoordinator', () => {
     ]);
   });
 
+  it('gives a user/AI turn exclusive TTS while preserving the 40 centimeter emergency', async () => {
+    const coordinator = new SpeechCoordinator();
+    await coordinator.initialize();
+
+    coordinator.beginConversationTurn();
+    coordinator.speakScene(sceneChange());
+    coordinator.speakSafety(warningAlert());
+
+    expect(spoken).toHaveLength(0);
+
+    coordinator.speakSafety(emergencyAlert());
+    expect(spoken).toHaveLength(1);
+    expect(spoken[0]).toMatchObject({ priority: 2, source: 'safety' });
+  });
+
   it('submits a 40 centimeter emergency as an immediate priority-two interruption', async () => {
     const coordinator = new SpeechCoordinator();
     await coordinator.initialize();
@@ -91,6 +106,17 @@ function emergencyAlert(): SafetyAlert {
     text: 'Stop. Obstacle directly ahead, about 40 centimeters away.',
     kind: 'emergency',
     distanceCm: 40,
+    timestamp: 1000,
+  };
+}
+
+function warningAlert(): SafetyAlert {
+  return {
+    key: 'warning:8',
+    priority: 1,
+    text: 'Obstacle ahead, about 80 centimeters away.',
+    kind: 'warning',
+    distanceCm: 80,
     timestamp: 1000,
   };
 }

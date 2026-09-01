@@ -20,6 +20,7 @@ Pod::Spec.new do |spec|
     'android/app/src/main/assets/person_reid_osnet_x0_25.onnx',
     'android/app/src/main/assets/person_reid_osnet_x0_25.onnx.sha256',
     'android/app/src/main/assets/wakeword/*.onnx',
+    'ios/MaculusApp/MaculusNative/Audio/*.mp3',
     'src/models/LFM_OPEN_LICENSE.txt',
     'src/models/lfm2.5-vl-1.6b-q4_k_m.provenance.json'
   ]

@@ -13,6 +13,7 @@ class MaculusVisionPackage : ReactPackage {
         MaculusDepthModule(reactContext),
         MaculusReIdModule(reactContext),
         MaculusVoiceCommandModule(reactContext),
+        MaculusSoundCueModule(reactContext),
         MaculusDeviceCameraModule(reactContext),
         MaculusKeepAwakeModule(reactContext),
         MaculusModelManagerModule(reactContext)

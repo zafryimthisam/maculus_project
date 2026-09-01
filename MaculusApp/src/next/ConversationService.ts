@@ -18,10 +18,14 @@ export interface ConversationResponse {
 
 type VisionDescriptionOptions = {
   allowDeterministicFallback?: boolean;
+  appendSensor?: boolean;
+  conversationHistory?: HistoryEntry[];
+  activeGuidanceGoal?: string | null;
 };
 
 type ConversationResponseOptions = {
   visionOnly?: boolean;
+  activeGuidanceGoal?: string | null;
 };
 
 export class ConversationService {
@@ -78,7 +82,10 @@ export class ConversationService {
     options: VisionDescriptionOptions = {},
   ): Promise<VisionDescriptionResult> {
     const allowDeterministicFallback = options.allowDeterministicFallback !== false;
-    const fallback = `${scene.description}${sensorDescription(sensor)}`;
+    const appendSensor = options.appendSensor !== false;
+    const visualRequest = isVisualSceneRequest(question);
+    const sensorSuffix = appendSensor ? sensorDescription(sensor) : '';
+    const fallback = `${scene.description}${sensorSuffix}`;
     if (!imageBase64) {
       return visionFallback('no-frame', fallback, allowDeterministicFallback);
     }
@@ -95,7 +102,12 @@ export class ConversationService {
       await localLlmService.cancel();
       const response = await localLlmService.completeVision({
         imageBase64,
-        prompt: buildVisionPrompt(question, scene),
+        prompt: buildVisionPrompt(
+          question,
+          scene,
+          options.conversationHistory,
+          options.activeGuidanceGoal,
+        ),
         // Liquid's own example uses 64 output tokens. A small allowance above
         // that keeps two natural spoken sentences possible without making the
         // user wait for a long visual monologue.
@@ -107,7 +119,7 @@ export class ConversationService {
         return visionFallback('unsafe-output', fallback, allowDeterministicFallback);
       }
       return {
-        text: `${appendMissingPersonAliases(safe, scene)}${sensorDescription(sensor)}`,
+        text: `${visualRequest ? appendMissingPersonAliases(safe, scene) : safe}${sensorSuffix}`,
         source: 'vision-language',
       };
     } catch (error: any) {
@@ -141,6 +153,7 @@ export class ConversationService {
     const question = transcript.trim();
     if (!question) {return { text: 'I did not hear a question.' };}
     if (options.visionOnly || isVisualSceneRequest(question)) {
+      const visualRequest = isVisualSceneRequest(question);
       if (!options.visionOnly && /\b(who|person|people)\b/i.test(question) && !imageBase64) {
         return { text: groundedPeopleReply(scene) };
       }
@@ -149,8 +162,16 @@ export class ConversationService {
         scene,
         sensor,
         question,
-        { allowDeterministicFallback: !options.visionOnly },
+        {
+          allowDeterministicFallback: !options.visionOnly,
+          // General questions are still processed by the multimodal model,
+          // but should not receive an unrelated obstacle-sensor suffix.
+          appendSensor: visualRequest,
+          conversationHistory: this.history.slice(-8),
+          activeGuidanceGoal: options.activeGuidanceGoal,
+        },
       );
+      this.rememberTurn(question, vision.text);
       return { text: vision.text, vision };
     }
     if (!this.isReady() || localLlmService.getState() !== 'ready') {
@@ -180,8 +201,7 @@ export class ConversationService {
         ? 'I cannot give an unverified movement instruction. Ask me what I can currently see instead.'
         : response.trim();
       const answer = safe || 'I could not form a response.';
-      this.history.push({ role: 'user', content: question }, { role: 'assistant', content: answer });
-      this.history = this.history.slice(-10);
+      this.rememberTurn(question, answer);
       return { text: answer };
     } catch {
       return { text: 'The on-device conversation model did not respond. Live safety monitoring is still active.' };
@@ -194,9 +214,23 @@ export class ConversationService {
     this.ready = false;
     await localLlmService.release();
   }
+
+  private rememberTurn(question: string, answer: string): void {
+    this.history.push(
+      { role: 'user', content: question },
+      { role: 'assistant', content: answer },
+    );
+    this.history = this.history.slice(-10);
+  }
 }
 
-export function buildVisionPrompt(question: string, scene: NextSceneSnapshot): string {
+export function buildVisionPrompt(
+  question: string,
+  scene: NextSceneSnapshot,
+  history: HistoryEntry[] = [],
+  activeGuidanceGoal: string | null = null,
+): string {
+  const visualRequest = isVisualSceneRequest(question);
   const verifiedObjects = scene.visibleEntities.length === 0
     ? 'No stable object detections are available.'
     : scene.visibleEntities.slice(0, 6).map(entity => {
@@ -206,11 +240,21 @@ export function buildVisionPrompt(question: string, scene: NextSceneSnapshot): s
         : entity.label;
       return `${label} ${position}${entity.inPath ? ' overlapping the center view' : ''}`;
     }).join('; ');
+  const recentConversation = history.length === 0
+    ? 'No earlier conversational turns.'
+    : history.slice(-6).map(entry => `${entry.role}: ${entry.content.slice(0, 300)}`).join('\n');
   return [
-    'Privately analyze this live camera frame for a blind user.',
+    'You are Maculus, a warm, concise multimodal assistant for a blind user. Process this spoken request together with the current private camera frame.',
     `Request: ${question.trim().slice(0, 240)}`,
-    'Reply directly in one or two short natural sentences using only visible facts.',
-    'For a broad request, give the setting and the most useful people, objects, actions, positions, colors, or readable text. For a find request, say whether it is visible and where it appears in the image.',
+    visualRequest
+      ? 'This request concerns the live surroundings. Reply in one or two short natural sentences using only facts visible in the image or supplied detector hints.'
+      : 'This is a general or conversational request. Answer it directly from general knowledge in one to three short sentences. Use the image only if it is relevant; do not force an unrelated scene description.',
+    'Resolve natural follow-ups from the recent conversation when possible.',
+    activeGuidanceGoal
+      ? `The user's persistent visual guidance goal is ${activeGuidanceGoal}. Keep follow-up answers related to that goal when relevant.`
+      : 'There is no active destination guidance goal.',
+    `Recent conversation:\n${recentConversation}`,
+    'For a broad visual request, give the setting and the most useful people, objects, actions, positions, colors, or readable text. For a visual find request, say whether it is visible and where it appears in the image.',
     'Use supplied anonymous session names consistently. Mention an obvious hazard, but never give movement directions, call a path safe, estimate exact distance, claim a real identity, or infer sensitive traits. State uncertainty instead of guessing.',
     `Detector hints, which may be incomplete: ${verifiedObjects}`,
   ].join(' ');

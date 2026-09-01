@@ -103,6 +103,21 @@ describe('TTSService guidance speech', () => {
     expect(service.queue.some(item => item.text === 'Chair ahead.')).toBe(false);
   });
 
+  it('lets conversation replace non-emergency warning speech but not priority-two safety', async () => {
+    jest.useFakeTimers();
+    const service = await createService();
+    service.speaking = true;
+    service.currentItem = { text: 'Obstacle about 80 centimeters ahead.', priority: 1, kind: 'guidance', source: 'safety' };
+
+    service.speakGuidance(guidance('conversation:answer-exclusive', 'I heard your question.', 0, {
+      kind: 'conversation',
+      source: 'conversation',
+    }));
+
+    expect(Tts.stop).toHaveBeenCalledTimes(1);
+    expect(service.queue[0]).toMatchObject({ text: 'I heard your question.', source: 'conversation' });
+  });
+
   it('clears pending guidance on stop', async () => {
     const service = await createService();
     service.speaking = true;
@@ -197,5 +212,4 @@ describe('TTSService guidance speech', () => {
     expect(Tts.speak).toHaveBeenCalledTimes(1);
   });
 });
-
 

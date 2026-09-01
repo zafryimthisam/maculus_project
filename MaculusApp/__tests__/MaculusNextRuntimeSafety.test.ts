@@ -1,5 +1,9 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { MaculusRuntime } from '../src/next/MaculusRuntime';
+import {
+  detectorLabelsForGoal,
+  extractGuidanceGoal,
+  MaculusRuntime,
+} from '../src/next/MaculusRuntime';
 import { INITIAL_NEXT_RUNTIME_STATE } from '../src/next/domain';
 
 describe('MaculusNext runtime emergency AI interruption', () => {
@@ -61,6 +65,8 @@ describe('MaculusNext runtime emergency AI interruption', () => {
       },
     }));
     const speakConversation = jest.fn();
+    const beginConversationTurn = jest.fn();
+    const endConversationTurn = jest.fn();
     const testable = runtime as any;
     testable.running = true;
     testable.state = {
@@ -77,7 +83,7 @@ describe('MaculusNext runtime emergency AI interruption', () => {
       receivedAt: Date.now(),
     });
     testable.conversation = { respondWithMetadata };
-    testable.speech = { speakSystem: jest.fn(), speakConversation };
+    testable.speech = { beginConversationTurn, endConversationTurn, speakConversation };
 
     await testable.handleVoiceTurn({
       transcript: 'Describe the scene',
@@ -91,16 +97,25 @@ describe('MaculusNext runtime emergency AI interruption', () => {
       expect.any(Object),
       expect.any(Object),
       'camera-frame',
-      { visionOnly: true },
+      { visionOnly: true, activeGuidanceGoal: null },
     );
     expect(speakConversation).toHaveBeenCalledWith(
       'A lounge is visible with a chair on the left.',
       'answer:2000',
     );
+    expect(beginConversationTurn).toHaveBeenCalledTimes(1);
+    expect(endConversationTurn).toHaveBeenCalledTimes(1);
     expect(runtime.getState()).toMatchObject({
       descriptionSource: 'vision-language',
       descriptionInProgress: false,
     });
+  });
+
+  it('keeps safe visual destination intent separate from unsupported route claims', () => {
+    expect(extractGuidanceGoal('Guide me to the entrance please')).toBe('entrance');
+    expect(extractGuidanceGoal('Take me towards a place to sit')).toBe('place to sit');
+    expect(detectorLabelsForGoal('place to sit')).toEqual(['chair', 'bench', 'couch']);
+    expect(detectorLabelsForGoal('entrance')).toEqual([]);
   });
 });
 

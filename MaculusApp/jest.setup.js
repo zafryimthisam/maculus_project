@@ -106,6 +106,15 @@ NativeModules.MaculusVoiceCommand = {
   pauseForTts: jest.fn().mockResolvedValue(undefined),
   interruptForEmergency: jest.fn().mockResolvedValue(undefined),
   resumeAfterTts: jest.fn().mockResolvedValue(undefined),
+  startBargeInMonitoring: jest.fn().mockResolvedValue(undefined),
+  stopBargeInMonitoring: jest.fn().mockResolvedValue(undefined),
+};
+
+NativeModules.MaculusSoundCue = {
+  playActivation: jest.fn().mockResolvedValue(undefined),
+  startProcessing: jest.fn().mockResolvedValue(undefined),
+  stopProcessing: jest.fn().mockResolvedValue(undefined),
+  stopAll: jest.fn().mockResolvedValue(undefined),
 };
 
 // Lifecycle-aware phone camera fallback used when the Pi reports no camera.

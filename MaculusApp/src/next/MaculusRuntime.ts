@@ -9,12 +9,14 @@ import {
   setPiUrl,
 } from '../api/piClient';
 import { depthService } from '../services/DepthService';
+import { COCO_CLASSES } from '../config/CocoClasses';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
 import { deviceMotionService } from '../services/DeviceMotionService';
 import { keepAwakeService } from '../services/KeepAwakeService';
 import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { reIdService } from '../services/ReIdService';
+import { soundCueService } from '../services/SoundCueService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
 import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
 import { ConversationService, VisionDescriptionResult } from './ConversationService';
@@ -22,6 +24,7 @@ import {
   INITIAL_NEXT_RUNTIME_STATE,
   NextRuntimeState,
   NextSceneSnapshot,
+  SceneChange,
 } from './domain';
 import { SafetyCoordinator } from './SafetyCoordinator';
 import { SessionSceneStore } from './SessionSceneStore';
@@ -67,6 +70,10 @@ export class MaculusRuntime {
   private visionLoopRunning = false;
   private modelUnsubscribe: (() => void) | null = null;
   private modelPreparePromise: Promise<void> | null = null;
+  private activeGuidanceGoal: string | null = null;
+  private lastGoalEntityId: number | null = null;
+  private lastGoalZone: string | null = null;
+  private lastGoalAnnouncementAt = 0;
 
   getState(): NextRuntimeState {return this.state;}
 
@@ -150,6 +157,10 @@ export class MaculusRuntime {
     this.lastPreviewAt = 0;
     this.latestVisionObservation = null;
     this.visionLoopRunning = false;
+    this.activeGuidanceGoal = null;
+    this.lastGoalEntityId = null;
+    this.lastGoalZone = null;
+    this.lastGoalAnnouncementAt = 0;
     const preservedModel = this.state.model;
     this.update({
       ...cloneInitialState(),
@@ -251,6 +262,9 @@ export class MaculusRuntime {
     await this.cleanupServices();
     this.safety.reset();
     this.scene.reset();
+    this.activeGuidanceGoal = null;
+    this.lastGoalEntityId = null;
+    this.lastGoalZone = null;
     this.latestVisionObservation = null;
     this.update({ ...cloneInitialState(), model: this.state.model });
   }
@@ -274,7 +288,7 @@ export class MaculusRuntime {
         : 'Preparing the latest verified scene description…',
     });
     if (canUseVlm) {
-      this.speech.speakSystem('Analyzing the current camera frame on this device.', 0, 'vlm-analyzing');
+      await soundCueService.startProcessing();
     }
     try {
       const result = await this.conversation.describeFrame(
@@ -296,6 +310,7 @@ export class MaculusRuntime {
       });
       this.speech.speakConversation(result.text, `describe:${snapshot.revision}:${Date.now()}`);
     } finally {
+      await soundCueService.stopProcessing();
       if (
         this.running &&
         generation === this.generation &&
@@ -315,7 +330,16 @@ export class MaculusRuntime {
 
   setGuidanceActive(active: boolean): void {
     if (!this.running) {return;}
-    this.update({ guidanceActive: active, message: active ? 'Visual guidance active' : 'Visual guidance paused; safety sensor remains active' });
+    if (!active) {
+      this.activeGuidanceGoal = null;
+      this.lastGoalEntityId = null;
+      this.lastGoalZone = null;
+    }
+    this.update({
+      guidanceActive: active,
+      guidanceGoal: active ? this.activeGuidanceGoal : null,
+      message: active ? 'Visual guidance active' : 'Visual guidance paused; safety sensor remains active',
+    });
     this.speech.speakSystem(active ? 'Visual guidance resumed.' : 'Visual guidance paused. Obstacle sensor monitoring remains active.');
   }
 
@@ -547,7 +571,8 @@ export class MaculusRuntime {
         smoothedFps = smoothedFps === 0 ? currentFps : smoothedFps * 0.8 + currentFps * 0.2;
         previousFrameAt = now;
         this.publishScene(snapshot, smoothedFps);
-        const speakable = prioritizeChanges(snapshot).find(change => change.speak);
+        const goalChange = this.guidanceGoalChange(snapshot);
+        const speakable = goalChange || prioritizeChanges(snapshot).find(change => change.speak);
         if (speakable) {this.speech.speakScene(speakable);}
       } catch (error: any) {
         if (error?.name === 'AbortError') {break;}
@@ -661,23 +686,36 @@ export class MaculusRuntime {
       this.update({ message: 'Emergency obstacle remains within 40 centimeters — AI conversation is paused' });
       return;
     }
+    const requestedGoal = extractGuidanceGoal(turn.transcript);
+    if (requestedGoal) {
+      this.activeGuidanceGoal = requestedGoal;
+      this.lastGoalEntityId = null;
+      this.lastGoalZone = null;
+      this.lastGoalAnnouncementAt = 0;
+      this.update({ guidanceActive: true, guidanceGoal: requestedGoal });
+    }
     const generation = this.generation;
     const assistantGeneration = ++this.assistantGeneration;
     this.assistantBusy = true;
-    const observation = this.currentVisionObservation();
-    const snapshot = observation?.snapshot || this.scene.getSnapshot();
+    this.speech.beginConversationTurn();
     this.update({
       descriptionInProgress: true,
-      message: 'Sending your words only to the private vision AI…',
+      message: 'Maculus heard you and is checking the private vision AI…',
     });
-    this.speech.speakSystem('Let me check the current camera view.', 0, `visual-request:${turn.timestamp}`);
+    await soundCueService.startProcessing();
     try {
+      // Every non-control spoken turn receives a current camera frame, even
+      // when ambient camera narration is paused. General questions still go
+      // through this multimodal path; the prompt decides whether the image is
+      // relevant instead of routing the utterance to a separate text model.
+      const observation = await this.conversationVisionObservation(generation);
+      const snapshot = observation?.snapshot || this.scene.getSnapshot();
       const response = await this.conversation.respondWithMetadata(
         turn.transcript,
         snapshot,
         this.safety.getState(),
         observation?.frame.base64,
-        { visionOnly: true },
+        { visionOnly: true, activeGuidanceGoal: this.activeGuidanceGoal },
       );
       if (
         !this.running ||
@@ -691,8 +729,11 @@ export class MaculusRuntime {
           message: voiceVisionStatusMessage(response.vision),
         });
       }
+      await soundCueService.stopProcessing();
       this.speech.speakConversation(response.text, `answer:${turn.timestamp}`);
     } finally {
+      await soundCueService.stopProcessing();
+      this.speech.endConversationTurn();
       if (
         this.running &&
         generation === this.generation &&
@@ -709,6 +750,8 @@ export class MaculusRuntime {
     this.assistantBusy = false;
     this.assistantGeneration += 1;
     this.conversation.cancel().catch(() => {});
+    soundCueService.stopAll().catch(() => {});
+    this.speech.endConversationTurn();
     if (this.state.descriptionInProgress) {
       this.update({
         descriptionInProgress: false,
@@ -726,7 +769,15 @@ export class MaculusRuntime {
       case 'haptic_on': this.speech.setHapticsEnabled(true); this.speech.speakSystem('Haptic alerts are on.'); return true;
       case 'haptic_off': this.speech.setHapticsEnabled(false); this.speech.speakSystem('Haptic alerts are off.'); return true;
       case 'stop_haptic': Vibration.cancel(); return true;
-      case 'cancel_goal': this.speech.speakSystem('There is no active navigation goal.'); return true;
+      case 'cancel_goal': {
+        const hadGoal = Boolean(this.activeGuidanceGoal);
+        this.activeGuidanceGoal = null;
+        this.lastGoalEntityId = null;
+        this.lastGoalZone = null;
+        this.update({ guidanceGoal: null });
+        this.speech.speakSystem(hadGoal ? 'I stopped the current visual guidance goal.' : 'There is no active navigation goal.');
+        return true;
+      }
       default: return false;
     }
   }
@@ -738,16 +789,80 @@ export class MaculusRuntime {
       deviceMotionService.stop(),
       keepAwakeService.setEnabled(false),
       this.conversation.destroy(),
+      soundCueService.stopAll(),
     ]);
     this.speech.stop();
   }
 
   private currentVisionObservation(): VisionObservation | null {
     const observation = this.latestVisionObservation;
-    if (!observation || Date.now() - observation.receivedAt > 2500 || !this.state.cameraReady || !this.state.guidanceActive) {
+    if (!observation || Date.now() - observation.receivedAt > 2500 || !this.state.cameraReady) {
       return null;
     }
     return observation;
+  }
+
+  private async conversationVisionObservation(generation: number): Promise<VisionObservation | null> {
+    const current = this.currentVisionObservation();
+    if (current) {return current;}
+    if (!this.state.cameraReady) {return null;}
+    try {
+      const frame = await this.captureActiveFrame(this.abortController?.signal);
+      if (!this.running || generation !== this.generation) {return null;}
+      return {
+        frame,
+        snapshot: this.scene.getSnapshot(),
+        detections: [],
+        receivedAt: Date.now(),
+      };
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') {
+        console.warn('[MaculusNext] Could not capture a fresh conversational frame:', error?.message || error);
+      }
+      return null;
+    }
+  }
+
+  private guidanceGoalChange(snapshot: NextSceneSnapshot): SceneChange | null {
+    const goal = this.activeGuidanceGoal;
+    if (!goal) {return null;}
+    const labels = detectorLabelsForGoal(goal);
+    if (labels.length === 0) {return null;}
+    const target = snapshot.visibleEntities
+      .filter(entity => labels.includes(entity.label))
+      .sort((a, b) => Number(b.inPath) - Number(a.inPath) || b.confidence - a.confidence)[0];
+    const now = Date.now();
+    if (!target) {
+      if (this.lastGoalEntityId === null || now - this.lastGoalAnnouncementAt < 3000) {return null;}
+      this.lastGoalEntityId = null;
+      this.lastGoalZone = null;
+      this.lastGoalAnnouncementAt = now;
+      return {
+        key: `goal:${goal}:lost`,
+        kind: 'left',
+        entityId: -1,
+        text: `${goal} is no longer in the current camera view.`,
+        timestamp: now,
+        speak: true,
+      };
+    }
+    if (
+      target.id === this.lastGoalEntityId &&
+      target.zone === this.lastGoalZone &&
+      now - this.lastGoalAnnouncementAt < 15_000
+    ) {return null;}
+    this.lastGoalEntityId = target.id;
+    this.lastGoalZone = target.zone;
+    this.lastGoalAnnouncementAt = now;
+    const position = target.zone === 'ahead' ? 'ahead' : `to your ${target.zone}`;
+    return {
+      key: `goal:${goal}:${target.id}:${target.zone}`,
+      kind: 'moved',
+      entityId: target.id,
+      text: `${goal} is ${position}.`,
+      timestamp: now,
+      speak: true,
+    };
   }
 
   private update(patch: Partial<NextRuntimeState> | NextRuntimeState): void {
@@ -845,6 +960,37 @@ function voiceVisionStatusMessage(result: VisionDescriptionResult): string {
       ? `${result.failureDetail} No detector answer was substituted.`
       : 'Vision AI could not answer; no detector answer was substituted';
   }
+}
+
+export function extractGuidanceGoal(transcript: string): string | null {
+  const normalized = transcript.replace(/\s+/g, ' ').trim();
+  const match = normalized.match(
+    /\b(?:guide|lead|take)\s+me\s+(?:to|towards?)\s+(?:the\s+)?(.+?)(?:\s+please)?[.!?]*$/i,
+  );
+  if (!match?.[1]) {return null;}
+  const goal = match[1].trim().replace(/^(?:a|an|the)\s+/i, '').slice(0, 60);
+  return goal || null;
+}
+
+export function detectorLabelsForGoal(goal: string): string[] {
+  const normalized = goal.toLowerCase();
+  const synonyms: Array<[RegExp, string[]]> = [
+    [/\b(?:seat|place to sit)\b/, ['chair', 'bench', 'couch']],
+    [/\b(?:bike|cycle)\b/, ['bicycle', 'motorcycle']],
+    [/\b(?:vehicle)\b/, ['car', 'bus', 'truck', 'motorcycle']],
+    [/\b(?:phone|mobile)\b/, ['cell phone']],
+    [/\b(?:bag|luggage)\b/, ['backpack', 'handbag', 'suitcase']],
+    [/\b(?:screen|television)\b/, ['tv']],
+  ];
+  const synonymMatch = synonyms.find(([pattern]) => pattern.test(normalized));
+  if (synonymMatch) {return synonymMatch[1];}
+  return COCO_CLASSES.filter(label =>
+    new RegExp(`\\b${escapeRegExp(label)}s?\\b`, 'i').test(normalized),
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export const maculusRuntime = new MaculusRuntime();

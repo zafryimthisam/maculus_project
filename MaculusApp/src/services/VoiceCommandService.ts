@@ -2,6 +2,7 @@ import { EmitterSubscription, NativeEventEmitter, NativeModules, Vibration } fro
 import { COMMAND_TIMEOUT_MS, WAKE_WORD_LABEL, WAKE_WORD_PARSER_TOKEN } from '../config/WakeWordConfig';
 import { tts } from './TTSService';
 import { localLlmService } from './LocalLlmService';
+import { soundCueService } from './SoundCueService';
 import { ConversationTurn } from '../types';
 
 export type VoiceCommand =
@@ -50,6 +51,8 @@ type VoiceCommandNativeModule = {
   pauseForTts(): Promise<void>;
   resumeAfterTts(): Promise<void>;
   interruptForEmergency(): Promise<void>;
+  startBargeInMonitoring(): Promise<void>;
+  stopBargeInMonitoring(): Promise<void>;
 };
 
 type VoiceCommandActions = {
@@ -70,7 +73,10 @@ export type VoiceCommandExecution = {
 
 const WAKE_WORD = WAKE_WORD_PARSER_TOKEN;
 const MIN_CONFIDENCE = 0.35;
-const AUDIO_HANDOFF_MS = 350;
+// Keep the wake-to-command handoff short enough that a single natural phrase
+// such as "Hey LiveKit, start Maculus" does not lose the first command word.
+// TTS is already stopped before this delay begins.
+const AUDIO_HANDOFF_MS = 120;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
@@ -112,10 +118,17 @@ export function parseVoiceCommand(
   }
 
   const guidanceWords = ['guidance', 'guide', 'guiding'];
-  if (containsAny(command, ['stop', 'end', 'cancel']) && containsAny(command, guidanceWords)) {
+  const maculusWords = ['maculus', 'maculous'];
+  if (
+    containsAny(command, ['stop', 'end', 'cancel', 'pause']) &&
+    (containsAny(command, guidanceWords) || containsAny(command, maculusWords))
+  ) {
     return 'stop_guidance';
   }
-  if (containsAny(command, ['start', 'begin']) && containsAny(command, guidanceWords)) {
+  if (
+    containsAny(command, ['start', 'begin', 'resume']) &&
+    (containsAny(command, guidanceWords) || containsAny(command, maculusWords))
+  ) {
     return 'start_guidance';
   }
   if (
@@ -244,6 +257,7 @@ export class VoiceCommandService {
       this.emitter = new NativeEventEmitter(MaculusVoiceCommand as any);
       this.subscriptions = [
         this.emitter.addListener('MaculusVoiceWakeDetected', this.handleWakeDetected),
+        this.emitter.addListener('MaculusVoiceBargeInDetected', this.handleBargeInDetected),
         this.emitter.addListener('MaculusVoiceCommandState', this.handleState),
         this.emitter.addListener('MaculusVoiceCommandError', this.handleError),
       ];
@@ -277,6 +291,7 @@ export class VoiceCommandService {
     this.commandBusy = false;
     this.clearRecoveryTimer();
     this.setStatus(this.enabled ? 'paused' : 'off');
+    await soundCueService.stopAll();
     if (MaculusVoiceCommand) {
       await MaculusVoiceCommand.interruptForEmergency().catch(() => {});
     }
@@ -289,15 +304,24 @@ export class VoiceCommandService {
     }
 
     this.commandBusy = true;
+    const directCapture = detection.name === 'barge_in' || detection.name === 'followup';
     this.safetyInterrupted = false;
     this.reserveConversationWindow(this.effectiveQuietMs());
     this.setStatus('wake_detected');
-    Vibration.vibrate([0, 60]);
-    // Command capture uses a silent haptic acknowledgement. Spoken prompts can
-    // keep the iOS audio session occupied and are easy for the recognizer to
-    // mistake for the beginning of the user's question.
+    if (!directCapture) {Vibration.vibrate([0, 60]);}
+    if (detection.name === 'barge_in') {
+      tts.stop();
+      await soundCueService.stopAll();
+    }
     await MaculusVoiceCommand.pauseForTts().catch(() => {});
     await tts.prepareForListening(AUDIO_HANDOFF_MS);
+    if (!directCapture) {
+      await soundCueService.stopAll();
+      // Start the non-verbal cue without holding full STT for its entire
+      // duration. This preserves one-phrase commands such as
+      // "Hey LiveKit, start Maculus" while still giving audible feedback.
+      soundCueService.playActivation().catch(() => {});
+    }
 
     if (!this.enabled || !MaculusVoiceCommand || this.safetyInterrupted) {
       this.commandBusy = false;
@@ -377,6 +401,15 @@ export class VoiceCommandService {
     }
   };
 
+  private handleBargeInDetected = () => {
+    if (!this.enabled || this.commandBusy || !tts.isSpeaking()) {return;}
+    this.handleWakeDetected({ name: 'barge_in', label: 'Barge in', confidence: 1 })
+      .catch(error => {
+        console.warn('[Voice] Barge-in capture failed:', error);
+        this.scheduleWakeRecovery();
+      });
+  };
+
   private effectiveQuietMs(): number {
     return localLlmService.getState() === 'ready'
       ? CONVERSATION_QUIET_MS_LLM_READY
@@ -390,6 +423,14 @@ export class VoiceCommandService {
     if (state.state === 'off') {
       console.warn('[Voice] Native reported off while voice control is enabled; restarting wake listener');
       this.scheduleWakeRecovery();
+      return;
+    }
+    // In Siri-style mode the wake detector remains armed while Maculus is
+    // speaking so the user can say "Hey LiveKit" to barge in. The native
+    // detector may report wake_listening, but the user-facing interaction
+    // state is still paused until the answer is interrupted or finishes.
+    if (this.alwaysListening && tts.isSpeaking() && state.state === 'wake_listening') {
+      this.setStatus('paused');
       return;
     }
     this.setStatus(state.state);
@@ -411,10 +452,19 @@ export class VoiceCommandService {
       return;
     }
     if (speaking) {
-      MaculusVoiceCommand.pauseForTts().catch(() => {});
+      if (this.alwaysListening) {
+        MaculusVoiceCommand.startBargeInMonitoring().catch(() => {
+          // Wake-word interruption remains a fallback for audio routes that
+          // cannot run echo-cancelled voice activity detection with TTS.
+          MaculusVoiceCommand.resumeAfterTts().catch(() => {});
+        });
+      } else {
+        MaculusVoiceCommand.pauseForTts().catch(() => {});
+      }
       this.setStatus('paused');
       return;
     }
+    MaculusVoiceCommand.stopBargeInMonitoring().catch(() => {});
     if (this.safetyInterrupted) {
       // An emergency cancellation must never be interpreted as the end of a
       // conversational answer or reopen hands-free capture.
@@ -505,6 +555,7 @@ export class VoiceCommandService {
     this.sessionId = '';
     this.safetyInterrupted = false;
     this.conversationQuietUntil = 0;
+    soundCueService.stopAll().catch(() => {});
     this.setStatus('off');
     this.onStatus = null;
   }

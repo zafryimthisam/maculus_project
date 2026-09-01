@@ -1,5 +1,11 @@
-import { describe, expect, it, jest } from '@jest/globals';
-import { executeVoiceCommand, parseVoiceCommand } from '../src/services/VoiceCommandService';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { NativeModules } from 'react-native';
+import { tts } from '../src/services/TTSService';
+import {
+  executeVoiceCommand,
+  parseVoiceCommand,
+  VoiceCommandService,
+} from '../src/services/VoiceCommandService';
 
 const createActions = (isGuiding: boolean = false) => ({
   startGuidance: jest.fn(),
@@ -13,9 +19,12 @@ const createActions = (isGuiding: boolean = false) => ({
 });
 
 describe('VoiceCommandService parser', () => {
+  afterEach(() => {jest.restoreAllMocks();});
   it('accepts wake-word guidance commands', () => {
     expect(parseVoiceCommand('Livekit start guidance')).toBe('start_guidance');
     expect(parseVoiceCommand('please Livekit stop guidance now')).toBe('stop_guidance');
+    expect(parseVoiceCommand('Hey LiveKit start Maculus')).toBe('start_guidance');
+    expect(parseVoiceCommand('Hey LiveKit stop Maculus')).toBe('stop_guidance');
   });
 
   it('accepts wake-word scene description commands', () => {
@@ -61,6 +70,33 @@ describe('VoiceCommandService parser', () => {
     // and still route to the same commands.
     expect(parseVoiceCommand('Livekit what is around me', null, { requireWakeWord: true })).toBe('describe_scene');
     expect(parseVoiceCommand('Livekit start guidance', null, { requireWakeWord: true })).toBe('start_guidance');
+  });
+});
+
+describe('VoiceCommandService Siri-style interruption', () => {
+  beforeEach(() => {jest.clearAllMocks();});
+  afterEach(() => {jest.restoreAllMocks();});
+
+  it('arms native voice-activity barge-in while the assistant is speaking', () => {
+    const service = new VoiceCommandService() as any;
+    service.enabled = true;
+    service.alwaysListening = true;
+
+    service.handleTtsSpeakingChange(true);
+
+    expect(NativeModules.MaculusVoiceCommand.startBargeInMonitoring).toHaveBeenCalledTimes(1);
+  });
+
+  it('turns a detected ordinary utterance into a direct capture without another wake word', () => {
+    const service = new VoiceCommandService() as any;
+    service.enabled = true;
+    service.commandBusy = false;
+    service.handleWakeDetected = jest.fn(async () => {});
+    jest.spyOn(tts, 'isSpeaking').mockReturnValue(true);
+
+    service.handleBargeInDetected();
+
+    expect(service.handleWakeDetected).toHaveBeenCalledWith(expect.objectContaining({ name: 'barge_in' }));
   });
 });
 

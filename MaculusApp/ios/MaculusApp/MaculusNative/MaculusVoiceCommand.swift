@@ -19,6 +19,9 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private var wakeEnabled = false
   private var pausedForTts = false
   private var hasEventListeners = false
+  private var bargeAudioEngine: AVAudioEngine?
+  private var bargeLoudBufferCount = 0
+  private var bargeTriggered = false
 
   private var commandAudioEngine: AVAudioEngine?
   private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -48,6 +51,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
 
   deinit {
     NotificationCenter.default.removeObserver(self)
+    stopBargeInAudio()
     stopWakeAudio()
     finishCommand(result: nil)
   }
@@ -55,7 +59,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   @objc override static func requiresMainQueueSetup() -> Bool { false }
 
   override func supportedEvents() -> [String]! {
-    ["MaculusVoiceWakeDetected", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
+    ["MaculusVoiceWakeDetected", "MaculusVoiceBargeInDetected", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
   }
 
   override func startObserving() { hasEventListeners = true }
@@ -124,6 +128,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   ) {
     wakeEnabled = false
     pausedForTts = false
+    stopBargeInAudio()
     stopWakeAudio()
     finishCommand(result: nil)
     emitState("off")
@@ -208,6 +213,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     rejecter _: @escaping RCTPromiseRejectBlock
   ) {
     pausedForTts = true
+    stopBargeInAudio()
     stopWakeAudio()
     emitState(wakeEnabled ? "paused" : "off")
     resolve(nil)
@@ -219,6 +225,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   ) {
     DispatchQueue.main.async {
       self.pausedForTts = true
+      self.stopBargeInAudio()
       self.stopWakeAudio()
       self.finishCommand(result: nil)
       self.emitState(self.wakeEnabled ? "paused" : "off")
@@ -231,6 +238,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     rejecter reject: @escaping RCTPromiseRejectBlock
   ) {
     pausedForTts = false
+    stopBargeInAudio()
     guard wakeEnabled, commandPromise == nil else {
       resolve(nil)
       return
@@ -247,8 +255,40 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     }
   }
 
+  @objc func startBargeInMonitoring(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.main.async {
+      guard self.wakeEnabled, self.commandPromise == nil else {
+        resolve(nil)
+        return
+      }
+      do {
+        self.stopWakeAudio()
+        try self.startBargeInAudio()
+        self.emitState("paused")
+        resolve(nil)
+      } catch {
+        self.stopBargeInAudio()
+        reject("BARGE_IN_START_FAILED", error.localizedDescription, error)
+      }
+    }
+  }
+
+  @objc func stopBargeInMonitoring(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter _: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.main.async {
+      self.stopBargeInAudio()
+      resolve(nil)
+    }
+  }
+
   private func startWakeAudio() throws {
     if wakeAudioEngine?.isRunning == true { return }
+    stopBargeInAudio()
     try configureAudioSession()
     let engine = AVAudioEngine()
     let inputNode = engine.inputNode
@@ -271,6 +311,61 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     engine.stop()
     wakeAudioEngine = nil
     audioConverter = nil
+  }
+
+  private func startBargeInAudio() throws {
+    if bargeAudioEngine?.isRunning == true { return }
+    let session = AVAudioSession.sharedInstance()
+    try session.setCategory(
+      .playAndRecord,
+      mode: .voiceChat,
+      options: [.duckOthers, .allowBluetooth, .defaultToSpeaker]
+    )
+    try session.setActive(true, options: .notifyOthersOnDeactivation)
+    let engine = AVAudioEngine()
+    let inputNode = engine.inputNode
+    try inputNode.setVoiceProcessingEnabled(true)
+    let format = inputNode.outputFormat(forBus: 0)
+    guard format.sampleRate > 0, format.channelCount > 0 else {
+      throw MaculusNativeError.message("Microphone returned an invalid barge-in audio format")
+    }
+    bargeLoudBufferCount = 0
+    bargeTriggered = false
+    inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+      self?.consumeBargeIn(buffer: buffer)
+    }
+    engine.prepare()
+    try engine.start()
+    bargeAudioEngine = engine
+  }
+
+  private func stopBargeInAudio() {
+    guard let engine = bargeAudioEngine else { return }
+    engine.inputNode.removeTap(onBus: 0)
+    engine.stop()
+    bargeAudioEngine = nil
+    bargeLoudBufferCount = 0
+    bargeTriggered = false
+  }
+
+  private func consumeBargeIn(buffer: AVAudioPCMBuffer) {
+    guard !bargeTriggered,
+          let channel = buffer.floatChannelData?[0],
+          buffer.frameLength > 0 else { return }
+    let count = Int(buffer.frameLength)
+    var sum: Float = 0
+    for index in 0..<count {
+      let sample = channel[index]
+      sum += sample * sample
+    }
+    let rms = sqrt(sum / Float(count))
+    bargeLoudBufferCount = rms >= 0.045 ? bargeLoudBufferCount + 1 : 0
+    guard bargeLoudBufferCount >= 6 else { return }
+    bargeTriggered = true
+    DispatchQueue.main.async {
+      self.stopBargeInAudio()
+      self.emit("MaculusVoiceBargeInDetected", body: ["confidence": min(1, rms * 10)])
+    }
   }
 
   private func consume(buffer: AVAudioPCMBuffer) {
@@ -405,6 +500,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   }
 
   @objc private func applicationDidEnterBackground() {
+    stopBargeInAudio()
     stopWakeAudio()
     finishCommand(result: nil)
   }

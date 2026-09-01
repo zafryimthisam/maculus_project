@@ -399,11 +399,13 @@ export class TTSService {
   }
 
   private enqueueConversationResponse(item: SpeechItem): void {
-    this.queue = this.queue.filter(q => q.priority >= 1 || q.source === 'conversation');
+    // A conversational turn exclusively owns TTS. Discard every pending
+    // detector/sensor utterance except the priority-two <=40 cm emergency.
+    this.queue = this.queue.filter(q => q.priority >= 2 || q.source === 'conversation');
     if (
       this.speaking &&
       this.currentItem &&
-      this.currentItem.priority === 0 &&
+      this.currentItem.priority < 2 &&
       this.currentItem.source !== 'conversation'
     ) {
       this.interruptItem(item);

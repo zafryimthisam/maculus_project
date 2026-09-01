@@ -123,12 +123,36 @@ describe('MaculusNext vision-language descriptions', () => {
     );
 
     expect(response.vision?.source).toBe('vision-language');
-    expect(response.text).toContain('Paris');
+    expect(response.text).toBe('Paris is the capital of France.');
     expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
       imageBase64: 'jpeg-base64',
       prompt: expect.stringContaining('What is the capital of France?'),
     }));
+    expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining('Answer it directly from general knowledge'),
+    }));
     expect(textCompletion).not.toHaveBeenCalled();
+  });
+
+  it('includes recent multimodal conversation so follow-up questions retain context', async () => {
+    const service = readyService();
+    const vision = jest.spyOn(localLlmService, 'completeVision')
+      .mockResolvedValueOnce('A red chair is visible on the left.')
+      .mockResolvedValueOnce('It is red.');
+
+    await service.respondWithMetadata('What chair can you see?', scene(), healthySensor(), 'jpeg-base64', { visionOnly: true });
+    await service.respondWithMetadata('What color is it?', scene(), healthySensor(), 'jpeg-base64', { visionOnly: true });
+
+    expect(vision).toHaveBeenLastCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining('assistant: A red chair is visible on the left.'),
+    }));
+  });
+
+  it('grounds follow-up answers with the persistent user-requested guidance goal', () => {
+    const prompt = buildVisionPrompt('How far is it?', scene(), [], 'entrance');
+    expect(prompt).toContain('persistent visual guidance goal is entrance');
+    expect(prompt).toContain('never give movement directions');
+    expect(prompt).toContain('estimate exact distance');
   });
 
   it('does not substitute object-detector narration when spoken vision has no frame', async () => {

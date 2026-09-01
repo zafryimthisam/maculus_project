@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -26,6 +28,7 @@ import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.sqrt
 
 class MaculusVoiceCommandModule(
     private val reactContext: ReactApplicationContext
@@ -46,6 +49,10 @@ class MaculusVoiceCommandModule(
     private var latestCommandConfidence: Float? = null
     private var pendingWakeStartPromise: Promise? = null
     @Volatile private var wakeLoopId = 0L
+    private var bargeThread: Thread? = null
+    private var bargeAudioRecord: AudioRecord? = null
+    private val bargeRunning = AtomicBoolean(false)
+    @Volatile private var bargeLoopId = 0L
 
     init {
         reactContext.addLifecycleEventListener(this)
@@ -98,6 +105,7 @@ class MaculusVoiceCommandModule(
         mainHandler.post {
             wakeEnabled = false
             wakePausedForTts = false
+            stopBargeInLoop()
             stopWakeLoop()
             cancelCommandRecognition()
             emitState("off")
@@ -116,6 +124,7 @@ class MaculusVoiceCommandModule(
                 promise.reject("VOICE_PERMISSION_DENIED", "Microphone permission needed for voice commands")
                 return@post
             }
+            stopBargeInLoop()
             stopWakeLoop()
             startCommandRecognition(timeoutMs.coerceAtLeast(1000), promise)
         }
@@ -125,6 +134,7 @@ class MaculusVoiceCommandModule(
     fun pauseForTts(promise: Promise) {
         mainHandler.post {
             wakePausedForTts = true
+            stopBargeInLoop()
             stopWakeLoop()
             emitState(if (wakeEnabled) "paused" else "off")
             promise.resolve(null)
@@ -135,6 +145,7 @@ class MaculusVoiceCommandModule(
     fun interruptForEmergency(promise: Promise) {
         mainHandler.post {
             wakePausedForTts = true
+            stopBargeInLoop()
             stopWakeLoop()
             cancelCommandRecognition()
             emitState(if (wakeEnabled) "paused" else "off")
@@ -146,6 +157,7 @@ class MaculusVoiceCommandModule(
     fun resumeAfterTts(promise: Promise) {
         mainHandler.post {
             wakePausedForTts = false
+            stopBargeInLoop()
             if (wakeEnabled && commandPromise == null) {
                 try {
                     startWakeLoop()
@@ -212,12 +224,14 @@ class MaculusVoiceCommandModule(
     }
 
     override fun onHostPause() {
+        stopBargeInLoop()
         stopWakeLoop()
         cancelCommandRecognition()
     }
 
     override fun onHostDestroy() {
         wakeEnabled = false
+        stopBargeInLoop()
         stopWakeLoop()
         cancelCommandRecognition()
         wakeEngine?.close()
@@ -230,6 +244,7 @@ class MaculusVoiceCommandModule(
         if (wakeRunning.get() || !wakeEnabled || wakePausedForTts) {
             return
         }
+        stopBargeInLoop()
         val engine = ensureWakeEngine()
         val minBuffer = AudioRecord.getMinBufferSize(
             WAKE_SAMPLE_RATE,
@@ -340,6 +355,94 @@ class MaculusVoiceCommandModule(
         wakeThread = null
     }
 
+    @SuppressLint("MissingPermission")
+    private fun startBargeInLoop() {
+        if (bargeRunning.get()) { return }
+        val minBuffer = AudioRecord.getMinBufferSize(
+            WAKE_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(BARGE_READ_SIZE * 2)
+        val recorder = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            WAKE_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minBuffer
+        )
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            recorder.release()
+            throw IllegalStateException("Barge-in microphone could not be initialized")
+        }
+        val loopId = ++bargeLoopId
+        bargeAudioRecord = recorder
+        bargeRunning.set(true)
+        bargeThread = Thread({ runBargeInLoop(recorder, loopId) }, "MaculusBargeIn").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun runBargeInLoop(recorder: AudioRecord, loopId: Long) {
+        val echoCanceler = if (AcousticEchoCanceler.isAvailable()) {
+            AcousticEchoCanceler.create(recorder.audioSessionId)?.apply { enabled = true }
+        } else null
+        val noiseSuppressor = if (NoiseSuppressor.isAvailable()) {
+            NoiseSuppressor.create(recorder.audioSessionId)?.apply { enabled = true }
+        } else null
+        val buffer = ShortArray(BARGE_READ_SIZE)
+        var loudBuffers = 0
+        try {
+            recorder.startRecording()
+            while (bargeRunning.get() && bargeLoopId == loopId) {
+                val read = recorder.read(buffer, 0, buffer.size)
+                if (read <= 0) { continue }
+                var energy = 0.0
+                for (index in 0 until read) {
+                    val sample = buffer[index] / 32768.0
+                    energy += sample * sample
+                }
+                val rms = sqrt(energy / read)
+                loudBuffers = if (rms >= BARGE_RMS_THRESHOLD) loudBuffers + 1 else 0
+                if (loudBuffers >= BARGE_REQUIRED_BUFFERS) {
+                    mainHandler.post {
+                        if (bargeRunning.get() && bargeLoopId == loopId) {
+                            emit(EVENT_BARGE_IN_DETECTED, Arguments.createMap().apply {
+                                putDouble("confidence", (rms * 10).coerceAtMost(1.0))
+                            })
+                            stopBargeInLoop()
+                        }
+                    }
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Barge-in monitor failed", e)
+        } finally {
+            try {
+                if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) { recorder.stop() }
+            } catch (_: Exception) { }
+            echoCanceler?.release()
+            noiseSuppressor?.release()
+            try { recorder.release() } catch (_: Exception) { }
+            mainHandler.post {
+                if (bargeAudioRecord === recorder) { bargeAudioRecord = null }
+                if (bargeLoopId == loopId) { bargeRunning.set(false) }
+            }
+        }
+    }
+
+    private fun stopBargeInLoop() {
+        if (!bargeRunning.getAndSet(false)) {
+            bargeAudioRecord = null
+            bargeThread = null
+            return
+        }
+        try { bargeAudioRecord?.stop() } catch (_: Exception) { }
+        bargeAudioRecord = null
+        bargeThread = null
+    }
+
     private fun startCommandRecognition(timeoutMs: Int, promise: Promise) {
         cancelCommandRecognition()
         ensureRecognizer()
@@ -429,6 +532,38 @@ class MaculusVoiceCommandModule(
             latestCommandConfidence = confidences?.firstOrNull()
             pending?.resolve(latestCommandResult())
             clearLatestCommandResult()
+        }
+    }
+
+    @ReactMethod
+    fun startBargeInMonitoring(promise: Promise) {
+        mainHandler.post {
+            if (!hasRecordAudioPermission()) {
+                promise.reject("VOICE_PERMISSION_DENIED", "Microphone permission needed for barge in")
+                return@post
+            }
+            if (!wakeEnabled || commandPromise != null) {
+                promise.resolve(null)
+                return@post
+            }
+            try {
+                wakePausedForTts = true
+                stopWakeLoop()
+                startBargeInLoop()
+                emitState("paused")
+                promise.resolve(null)
+            } catch (e: Exception) {
+                stopBargeInLoop()
+                promise.reject("BARGE_IN_START_FAILED", e.message, e)
+            }
+        }
+    }
+
+    @ReactMethod
+    fun stopBargeInMonitoring(promise: Promise) {
+        mainHandler.post {
+            stopBargeInLoop()
+            promise.resolve(null)
         }
     }
 
@@ -574,11 +709,15 @@ class MaculusVoiceCommandModule(
         private const val WAKE_SAMPLE_RATE = 16000
         private const val WAKE_WINDOW_SAMPLES = 32000
         private const val WAKE_READ_SIZE = 1024
+        private const val BARGE_READ_SIZE = 512
+        private const val BARGE_RMS_THRESHOLD = 0.045
+        private const val BARGE_REQUIRED_BUFFERS = 6
         private const val WAKE_THRESHOLD = 0.5f
         private const val WAKE_DEBOUNCE_MS = 2000L
         private const val WAKE_PREDICT_INTERVAL_MS = 100L
         private const val WAKE_LABEL = "Hey LiveKit"
         private const val EVENT_WAKE_DETECTED = "MaculusVoiceWakeDetected"
+        private const val EVENT_BARGE_IN_DETECTED = "MaculusVoiceBargeInDetected"
         private const val EVENT_STATE = "MaculusVoiceCommandState"
         private const val EVENT_ERROR = "MaculusVoiceCommandError"
     }
