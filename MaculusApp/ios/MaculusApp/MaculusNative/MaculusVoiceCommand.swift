@@ -7,7 +7,7 @@ import UIKit
 @objc(MaculusVoiceCommand)
 final class MaculusVoiceCommand: RCTEventEmitter {
   private let wakeQueue = DispatchQueue(label: "com.maculus.wake", qos: .userInitiated)
-  private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+  private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
   private var wakeEngine: MaculusWakeWordEngine?
   private var wakeAudioEngine: AVAudioEngine?
   private var audioConverter: AVAudioConverter?
@@ -503,6 +503,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
 
   private func failCommand(error: Error) {
     guard commandPromise != nil || commandAudioEngine != nil else { return }
+    let nativeError = error as NSError
     commandTimeout?.cancel()
     commandTimeout = nil
     commandSilenceTimeout?.cancel()
@@ -520,7 +521,33 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     let promise = commandPromise
     commandPromise = nil
     latestCommandResult = nil
-    promise?.reject("VOICE_RECOGNITION_ERROR", error.localizedDescription, error)
+    if nativeError.domain == "kAFAssistantErrorDomain" &&
+       (nativeError.code == 1101 || nativeError.code == 1107) {
+      // Recreate the client after Apple's out-of-process recognizer connection
+      // is invalidated/interrupted so the bounded JS retry gets a fresh link.
+      speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    }
+    promise?.reject(
+      "VOICE_RECOGNITION_ERROR",
+      commandRecognitionErrorMessage(nativeError),
+      error
+    )
+  }
+
+  private func commandRecognitionErrorMessage(_ error: NSError) -> String {
+    guard error.domain == "kAFAssistantErrorDomain" else { return error.localizedDescription }
+    switch error.code {
+    case 1107:
+      return "Apple speech service connection was interrupted (iOS error 1107)"
+    case 1101:
+      return "Apple speech service connection was invalidated (iOS error 1101)"
+    case 1110:
+      return "Apple speech recognition did not detect spoken words (iOS error 1110)"
+    case 1700:
+      return "Apple speech recognition is not authorized (iOS error 1700)"
+    default:
+      return error.localizedDescription
+    }
   }
 
   private func configureAudioSession() throws {

@@ -143,6 +143,12 @@ camera frame to the private VLM. The card shows the exact recognized text plus
 the current capture, VLM handoff, answer, or failure diagnostic so device-only
 problems can be reported without guesswork.
 
+iOS briefly settles the shared audio route after the activation player finishes.
+If Apple's out-of-process speech connection is interrupted with error 1107,
+Maculus recreates the recognizer and reconnects once within the original command
+deadline. This recovery is restricted to that service interruption; empty or
+unrecognized captures are never retried.
+
 “Guide/lead/take me to …” creates a persistent private visual goal. Supported
 YOLO targets such as a chair, person, vehicle, bag, or place to sit are tracked
 across frames and announced only when their verified left/ahead/right position

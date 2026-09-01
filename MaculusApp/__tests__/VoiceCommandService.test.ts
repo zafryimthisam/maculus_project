@@ -184,6 +184,35 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     );
   });
 
+  it('reconnects once after Apple speech-process interruption 1107', async () => {
+    const service = new VoiceCommandService() as any;
+    const onTurn = jest.fn(async () => {});
+    const onDiagnostic = jest.fn();
+    service.enabled = true;
+    service.commandBusy = false;
+    service.forwardAllTranscripts = true;
+    service.onTurn = onTurn;
+    service.onDiagnostic = onDiagnostic;
+    jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
+    jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
+    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any)
+      .mockRejectedValueOnce(new Error(
+        'The operation couldn’t be completed. (kAFAssistantErrorDomain error 1107.)',
+      ))
+      .mockResolvedValueOnce({ text: 'What is in front of me?', confidence: 0.89 });
+
+    await service.handleWakeDetected({ name: 'followup' });
+
+    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(2);
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      'The iOS speech service was interrupted. Reconnecting once…',
+    );
+    expect(onTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ transcript: 'What is in front of me?' }),
+      null,
+    );
+  });
+
   it('surfaces partial native speech in the UI before final recognition', () => {
     const service = new VoiceCommandService() as any;
     const onTranscript = jest.fn();

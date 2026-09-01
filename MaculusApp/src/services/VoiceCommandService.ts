@@ -78,6 +78,7 @@ const MIN_CONFIDENCE = 0.35;
 // such as "Hey LiveKit, start Maculus" does not lose the first command word.
 // TTS is already stopped before this delay begins.
 const AUDIO_HANDOFF_MS = 120;
+const IOS_SPEECH_RECOVERY_MS = 250;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
@@ -331,6 +332,10 @@ export class VoiceCommandService {
       // Let the activation cue finish before command recognition takes over
       // the audio session. Otherwise the recognizer can make the cue inaudible.
       await soundCueService.playActivation();
+      // AVAudioPlayer completion and Apple's speech service do not hand the
+      // audio route over atomically. A short settle prevents transient 1107
+      // connection interruptions without extending the user's capture.
+      await wait(AUDIO_HANDOFF_MS);
     }
 
     if (!this.enabled || !MaculusVoiceCommand || this.safetyInterrupted) {
@@ -343,7 +348,20 @@ export class VoiceCommandService {
     try {
       // This is a ceiling for no-speech cases. Native endpointing completes
       // this single capture as soon as the user stops talking.
-      const result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
+      const commandDeadline = Date.now() + COMMAND_TIMEOUT_MS;
+      let result: VoiceCommandResult | null;
+      try {
+        result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
+      } catch (error) {
+        if (!isIosSpeechProcessInterruption(error)) {throw error;}
+        const remainingMs = commandDeadline - Date.now();
+        if (remainingMs < 1000 || !this.enabled || this.safetyInterrupted) {throw error;}
+        this.setDiagnostic('The iOS speech service was interrupted. Reconnecting once…');
+        await wait(IOS_SPEECH_RECOVERY_MS);
+        result = await MaculusVoiceCommand.listenForCommandOnce(
+          Math.max(1000, commandDeadline - Date.now()),
+        );
+      }
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled) {
         this.commandBusy = false;
@@ -653,6 +671,16 @@ function normalizeSpeech(text: string): string {
 
 function containsAny(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word));
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isIosSpeechProcessInterruption(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /kAFAssistantErrorDomain.*(?:error|code)\s*1107/i.test(message) ||
+    /speech service connection was interrupted.*1107/i.test(message);
 }
 
 function errorMessage(error: unknown): string {
