@@ -49,6 +49,12 @@ describe('TTSService guidance speech', () => {
     jest.useRealTimers();
   });
 
+  it('leaves the shared iOS audio session under voice-module control', async () => {
+    await createService();
+
+    expect(Tts.setDucking).toHaveBeenCalledWith(false);
+  });
+
   it('replaces pending continuous guidance instead of growing the queue', async () => {
     const service = await createService();
     service.speaking = true;

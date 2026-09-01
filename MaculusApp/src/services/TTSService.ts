@@ -104,11 +104,13 @@ export class TTSService {
       Tts.setDefaultRate(this.DEFAULT_RATE);
       Tts.setDefaultPitch(this.PROFILES.scene.pitch);
 
-      // iOS: stop on finish to release audio session. AVSpeech treats 0.5 as
-      // normal, so the 0.55 default reads slightly faster than the old 0.42
-      // without sounding robotic.
+      // MaculusVoiceCommand is the sole owner of iOS's shared AVAudioSession.
+      // react-native-tts ducking switches the session to playback and then
+      // deactivates it asynchronously on finish/cancel. That can race the next
+      // SFSpeechRecognizer task and interrupt its speech-process connection
+      // with kAFAssistantErrorDomain 1107.
       if (Platform.OS === 'ios') {
-        Tts.setDucking(true);
+        Tts.setDucking(false);
       }
 
       // Track listeners for cleanup

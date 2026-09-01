@@ -29,6 +29,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private var commandTimeout: DispatchWorkItem?
   private var commandSilenceTimeout: DispatchWorkItem?
   private var commandAudioEnded = false
+  private var commandGeneration: UInt = 0
   private var latestCommandResult: [String: Any]?
   private var commandPromise: (
     resolve: RCTPromiseResolveBlock,
@@ -173,13 +174,13 @@ final class MaculusVoiceCommand: RCTEventEmitter {
         self.recognitionRequest = request
         self.latestCommandResult = nil
         self.commandAudioEnded = false
-        engine.prepare()
-        try engine.start()
-
-        self.commandPromise = (resolve, reject)
-        self.emitState("command_listening")
-        self.recognitionTask = recognizer.recognitionTask(with: request) { result, error in
+        self.commandGeneration &+= 1
+        let generation = self.commandGeneration
+        self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
           DispatchQueue.main.async {
+            guard let self,
+                  self.commandGeneration == generation,
+                  self.commandPromise != nil else { return }
             if let result {
               let segments = result.bestTranscription.segments
               let confidence = segments.isEmpty
@@ -194,21 +195,37 @@ final class MaculusVoiceCommand: RCTEventEmitter {
                   "confidence": bridgedConfidence,
                   "isFinal": result.isFinal,
                 ])
-                if !result.isFinal { self.scheduleCommandEndAfterSpeech() }
+                if !result.isFinal { self.scheduleCommandEndAfterSpeech(generation: generation) }
               }
-              if result.isFinal { self.finishCommand(result: self.latestCommandResult) }
+              if result.isFinal {
+                // A final task is already complete. Cancelling it here can
+                // invalidate the speech daemon connection used by the next turn.
+                self.finishCommand(
+                  result: self.latestCommandResult,
+                  cancelRecognitionTask: false
+                )
+              }
             } else if let error {
               if self.latestCommandResult != nil {
-                self.finishCommand(result: self.latestCommandResult)
+                self.finishCommand(
+                  result: self.latestCommandResult,
+                  cancelRecognitionTask: false
+                )
               } else {
                 self.failCommand(error: error)
               }
             }
           }
         }
+        engine.prepare()
+        try engine.start()
+
+        self.commandPromise = (resolve, reject)
+        self.emitState("command_listening")
 
         let timeout = DispatchWorkItem { [weak self] in
-          guard let strongSelf = self else { return }
+          guard let strongSelf = self,
+                strongSelf.commandGeneration == generation else { return }
           strongSelf.finishCommand(result: strongSelf.latestCommandResult)
         }
         self.commandTimeout = timeout
@@ -336,7 +353,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
       mode: .voiceChat,
       options: [.duckOthers, .allowBluetooth, .defaultToSpeaker]
     )
-    try session.setActive(true, options: .notifyOthersOnDeactivation)
+    try session.setActive(true)
     let engine = AVAudioEngine()
     let inputNode = engine.inputNode
     try inputNode.setVoiceProcessingEnabled(true)
@@ -455,11 +472,14 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     return Array(UnsafeBufferPointer(start: channel, count: Int(converted.frameLength)))
   }
 
-  private func scheduleCommandEndAfterSpeech() {
-    guard commandPromise != nil, !commandAudioEnded else { return }
+  private func scheduleCommandEndAfterSpeech(generation: UInt) {
+    guard commandPromise != nil,
+          commandGeneration == generation,
+          !commandAudioEnded else { return }
     commandSilenceTimeout?.cancel()
     let silence = DispatchWorkItem { [weak self] in
-      self?.endCommandAudioAfterSpeech()
+      guard let self, self.commandGeneration == generation else { return }
+      self.endCommandAudioAfterSpeech()
     }
     commandSilenceTimeout = silence
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: silence)
@@ -479,21 +499,28 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     recognitionRequest?.endAudio()
   }
 
-  private func finishCommand(result: [String: Any]?) {
+  private func finishCommand(
+    result: [String: Any]?,
+    cancelRecognitionTask: Bool = true
+  ) {
     guard commandPromise != nil || commandAudioEngine != nil else { return }
+    // Invalidate callbacks from this task before ending/cancelling it. Speech
+    // can deliver a late callback; without this guard it can tear down the next
+    // command capture during the bounded 1107 recovery.
+    commandGeneration &+= 1
     commandTimeout?.cancel()
     commandTimeout = nil
     commandSilenceTimeout?.cancel()
     commandSilenceTimeout = nil
-    recognitionRequest?.endAudio()
-    recognitionTask?.cancel()
-    recognitionTask = nil
-    recognitionRequest = nil
     if let engine = commandAudioEngine {
       engine.inputNode.removeTap(onBus: 0)
       engine.stop()
     }
     commandAudioEngine = nil
+    recognitionRequest?.endAudio()
+    if cancelRecognitionTask { recognitionTask?.cancel() }
+    recognitionTask = nil
+    recognitionRequest = nil
     commandAudioEnded = false
     let promise = commandPromise
     commandPromise = nil
@@ -504,19 +531,21 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private func failCommand(error: Error) {
     guard commandPromise != nil || commandAudioEngine != nil else { return }
     let nativeError = error as NSError
+    commandGeneration &+= 1
     commandTimeout?.cancel()
     commandTimeout = nil
     commandSilenceTimeout?.cancel()
     commandSilenceTimeout = nil
-    recognitionRequest?.endAudio()
-    recognitionTask?.cancel()
-    recognitionTask = nil
-    recognitionRequest = nil
     if let engine = commandAudioEngine {
       engine.inputNode.removeTap(onBus: 0)
       engine.stop()
     }
     commandAudioEngine = nil
+    recognitionRequest?.endAudio()
+    // The task has already failed. Cancelling it again can enqueue another
+    // connection error after recovery has started.
+    recognitionTask = nil
+    recognitionRequest = nil
     commandAudioEnded = false
     let promise = commandPromise
     commandPromise = nil
@@ -557,7 +586,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
       mode: .measurement,
       options: [.duckOthers, .allowBluetooth, .defaultToSpeaker]
     )
-    try session.setActive(true, options: .notifyOthersOnDeactivation)
+    try session.setActive(true)
   }
 
   private func requestPermissions(completion: @escaping (Bool) -> Void) {
