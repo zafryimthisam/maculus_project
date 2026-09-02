@@ -133,25 +133,20 @@ immediately submits one uninterrupted priority-two stop alert. Missing-sensor
 speech is limited to one notice per session while status remains visible. The local detector and sensor
 remain the safety source; the VLM never decides whether a route is safe.
 
-Each activation opens one native speech capture; an empty result is not retried
-or stretched into a longer listening window. On iOS, partial recognition updates
-the Voice Interaction card while the user speaks, then 1.1 seconds without a new
-recognized phrase ends the live audio request so Speech can finalize it. The
-eight-second command timeout is only a no-speech ceiling. A non-empty final
-transcript immediately advances to `processing` and is passed with the current
-camera frame to the private VLM. The card shows the exact recognized text plus
-the current capture, VLM handoff, answer, or failure diagnostic so device-only
-problems can be reported without guesswork.
+Each activation opens one private PCM capture through `react-native-audio-api`.
+ExecuTorch runs Whisper Tiny English with FSMN voice-activity detection, streams
+partial text into the Voice Interaction card, and endpoints after 900 ms of
+silence. Input is normalized to 16 kHz mono on-device. The eight-second command
+timeout is only a no-speech ceiling; empty captures are never stretched or
+retried. A non-empty transcript immediately advances to `processing` and is
+passed with the current camera frame to the private VLM.
 
-iOS briefly settles the shared audio route after the activation player finishes.
-The native voice module is the sole owner of the app's shared audio session;
-react-native-tts ducking is disabled so a late TTS finish/cancel callback cannot
-deactivate a newly started recognition task. Command tasks are registered before
-the microphone engine starts, and generation guards discard late callbacks from
-an earlier task. If Apple's out-of-process speech connection is nevertheless
-interrupted with error 1107, Maculus recreates the recognizer and reconnects once
-within the original command deadline. This recovery is restricted to that
-service interruption; empty or unrecognized captures are never retried.
+The optimized speech model downloads once into app-private storage and the UI
+shows its progress and readiness. iOS briefly settles the shared audio route
+after the activation player finishes, while react-native-tts ducking remains
+disabled to avoid route churn. Apple Speech, its permission, and its
+out-of-process recognition service are not part of command capture, so iOS
+speech-daemon errors such as 1107 cannot occur in this path.
 
 “Guide/lead/take me to …” creates a persistent private visual goal. Supported
 YOLO targets such as a chair, person, vehicle, bag, or place to sit are tracked

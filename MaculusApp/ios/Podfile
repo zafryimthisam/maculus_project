@@ -1,8 +1,9 @@
-require_relative '../node_modules/react-native/scripts/react_native_pods'
-require_relative '../node_modules/@react-native-community/cli-platform-ios/native_modules'
+# Resolve through Node so hoisted React Native installations remain supported.
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve("react-native/scripts/react_native_pods.rb", {paths: [process.argv[1]]})', __dir__]).strip
 
-# Multimodal llama.rn uses JSI/TurboModules. React Native 0.75 supports the New
-# Architecture, and the flag must be identical during pod installation and the
+# ExecuTorch and multimodal llama.rn use JSI/TurboModules. React Native 0.81's
+# New Architecture flag must be identical during pod installation and the
 # Xcode build. Compile the audited llama.cpp source so LFM2.5-VL and Metal are
 # available without relying on a separately downloaded framework.
 ENV['RCT_NEW_ARCH_ENABLED'] = '1'
@@ -21,7 +22,8 @@ target 'MaculusApp' do
   config = use_native_modules!
 
   # App-local iOS parity layer: YOLO, depth, anonymous person ReID,
-  # wake-word/command capture, and the phone-camera fallback.
+  # wake-word/barge-in capture, and the phone-camera fallback. ExecuTorch owns
+  # command transcription through its auto-linked pods.
   pod 'TensorFlowLiteObjC', '2.17.0', :modular_headers => true
   pod 'onnxruntime-objc', '1.18.0', :modular_headers => true
   pod 'MaculusNative', :path => '..'

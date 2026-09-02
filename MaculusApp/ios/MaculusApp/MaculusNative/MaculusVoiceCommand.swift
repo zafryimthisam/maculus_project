@@ -1,13 +1,11 @@
 import AVFoundation
 import Foundation
 import React
-import Speech
 import UIKit
 
 @objc(MaculusVoiceCommand)
 final class MaculusVoiceCommand: RCTEventEmitter {
   private let wakeQueue = DispatchQueue(label: "com.maculus.wake", qos: .userInitiated)
-  private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
   private var wakeEngine: MaculusWakeWordEngine?
   private var wakeAudioEngine: AVAudioEngine?
   private var audioConverter: AVAudioConverter?
@@ -22,19 +20,6 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private var bargeAudioEngine: AVAudioEngine?
   private var bargeLoudBufferCount = 0
   private var bargeTriggered = false
-
-  private var commandAudioEngine: AVAudioEngine?
-  private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-  private var recognitionTask: SFSpeechRecognitionTask?
-  private var commandTimeout: DispatchWorkItem?
-  private var commandSilenceTimeout: DispatchWorkItem?
-  private var commandAudioEnded = false
-  private var commandGeneration: UInt = 0
-  private var latestCommandResult: [String: Any]?
-  private var commandPromise: (
-    resolve: RCTPromiseResolveBlock,
-    reject: RCTPromiseRejectBlock
-  )?
 
   override init() {
     super.init()
@@ -56,13 +41,12 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     NotificationCenter.default.removeObserver(self)
     stopBargeInAudio()
     stopWakeAudio()
-    finishCommand(result: nil)
   }
 
   @objc override static func requiresMainQueueSetup() -> Bool { false }
 
   override func supportedEvents() -> [String]! {
-    ["MaculusVoiceWakeDetected", "MaculusVoiceBargeInDetected", "MaculusVoiceCommandTranscript", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
+    ["MaculusVoiceWakeDetected", "MaculusVoiceBargeInDetected", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
   }
 
   override func startObserving() { hasEventListeners = true }
@@ -76,12 +60,11 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     let wakeAvailable = ["melspectrogram", "embedding_model", "hey_livekit"].allSatisfy {
       (try? MaculusResources.path($0, extension: "onnx")) != nil
     }
-    let commandAvailable = speechRecognizer?.isAvailable == true &&
-      speechRecognizer?.supportsOnDeviceRecognition == true
     resolve([
-      "available": wakeAvailable && commandAvailable,
+      "available": wakeAvailable,
       "wakeAvailable": wakeAvailable,
-      "commandAvailable": commandAvailable,
+      // Command transcription is provided by ExecuTorch Whisper in JavaScript.
+      "commandAvailable": true,
       "wakeWord": "Hey LiveKit",
     ])
   }
@@ -92,18 +75,10 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   ) {
     requestPermissions { granted in
       guard granted else {
-        self.emitError("Microphone and speech recognition permissions are needed", fatal: true)
+        self.emitError("Microphone permission is needed", fatal: true)
         reject(
           "VOICE_PERMISSION_DENIED",
-          "Microphone and speech recognition permissions are needed",
-          nil
-        )
-        return
-      }
-      guard self.speechRecognizer?.supportsOnDeviceRecognition == true else {
-        reject(
-          "VOICE_OFFLINE_UNAVAILABLE",
-          "On-device speech recognition is unavailable for English on this iPhone",
+          "Microphone permission is needed",
           nil
         )
         return
@@ -133,111 +108,8 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     pausedForTts = false
     stopBargeInAudio()
     stopWakeAudio()
-    finishCommand(result: nil)
     emitState("off")
     resolve(nil)
-  }
-
-  @objc func listenForCommandOnce(
-    _ timeoutMs: NSNumber,
-    resolver resolve: @escaping RCTPromiseResolveBlock,
-    rejecter reject: @escaping RCTPromiseRejectBlock
-  ) {
-    DispatchQueue.main.async {
-      do {
-        guard self.commandPromise == nil else {
-          throw MaculusNativeError.message("Speech recognizer is already listening")
-        }
-        guard let recognizer = self.speechRecognizer,
-              recognizer.isAvailable,
-              recognizer.supportsOnDeviceRecognition else {
-          throw MaculusNativeError.message("On-device speech recognition is unavailable")
-        }
-        self.stopWakeAudio()
-        try self.configureAudioSession()
-
-        let engine = AVAudioEngine()
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = true
-        request.taskHint = .dictation
-        request.contextualStrings = ["Hey LiveKit", "Maculus", "start guidance", "stop guidance", "describe scene"]
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-          throw MaculusNativeError.message("Microphone returned an invalid audio format")
-        }
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-          request.append(buffer)
-        }
-        self.commandAudioEngine = engine
-        self.recognitionRequest = request
-        self.latestCommandResult = nil
-        self.commandAudioEnded = false
-        self.commandGeneration &+= 1
-        let generation = self.commandGeneration
-        self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-          DispatchQueue.main.async {
-            guard let self,
-                  self.commandGeneration == generation,
-                  self.commandPromise != nil else { return }
-            if let result {
-              let segments = result.bestTranscription.segments
-              let confidence = segments.isEmpty
-                ? nil
-                : segments.reduce(Float(0)) { $0 + $1.confidence } / Float(segments.count)
-              let bridgedConfidence: Any = confidence.map { NSNumber(value: $0) } ?? NSNull()
-              let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
-              if !text.isEmpty {
-                self.latestCommandResult = ["text": text, "confidence": bridgedConfidence]
-                self.emit("MaculusVoiceCommandTranscript", body: [
-                  "text": text,
-                  "confidence": bridgedConfidence,
-                  "isFinal": result.isFinal,
-                ])
-                if !result.isFinal { self.scheduleCommandEndAfterSpeech(generation: generation) }
-              }
-              if result.isFinal {
-                // A final task is already complete. Cancelling it here can
-                // invalidate the speech daemon connection used by the next turn.
-                self.finishCommand(
-                  result: self.latestCommandResult,
-                  cancelRecognitionTask: false
-                )
-              }
-            } else if let error {
-              if self.latestCommandResult != nil {
-                self.finishCommand(
-                  result: self.latestCommandResult,
-                  cancelRecognitionTask: false
-                )
-              } else {
-                self.failCommand(error: error)
-              }
-            }
-          }
-        }
-        engine.prepare()
-        try engine.start()
-
-        self.commandPromise = (resolve, reject)
-        self.emitState("command_listening")
-
-        let timeout = DispatchWorkItem { [weak self] in
-          guard let strongSelf = self,
-                strongSelf.commandGeneration == generation else { return }
-          strongSelf.finishCommand(result: strongSelf.latestCommandResult)
-        }
-        self.commandTimeout = timeout
-        DispatchQueue.main.asyncAfter(
-          deadline: .now() + max(1, timeoutMs.doubleValue / 1000),
-          execute: timeout
-        )
-      } catch {
-        self.finishCommand(result: nil)
-        reject("VOICE_COMMAND_START_ERROR", error.localizedDescription, error)
-      }
-    }
   }
 
   @objc func pauseForTts(
@@ -259,7 +131,6 @@ final class MaculusVoiceCommand: RCTEventEmitter {
       self.pausedForTts = true
       self.stopBargeInAudio()
       self.stopWakeAudio()
-      self.finishCommand(result: nil)
       self.emitState(self.wakeEnabled ? "paused" : "off")
       resolve(nil)
     }
@@ -271,7 +142,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   ) {
     pausedForTts = false
     stopBargeInAudio()
-    guard wakeEnabled, commandPromise == nil else {
+    guard wakeEnabled else {
       resolve(nil)
       return
     }
@@ -292,7 +163,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     rejecter reject: @escaping RCTPromiseRejectBlock
   ) {
     DispatchQueue.main.async {
-      guard self.wakeEnabled, self.commandPromise == nil else {
+      guard self.wakeEnabled else {
         resolve(nil)
         return
       }
@@ -403,7 +274,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private func consume(buffer: AVAudioPCMBuffer) {
     guard let samples = convertedSamples(buffer: buffer), !samples.isEmpty else { return }
     wakeQueue.async {
-      guard self.wakeEnabled, !self.pausedForTts, self.commandPromise == nil else { return }
+      guard self.wakeEnabled, !self.pausedForTts else { return }
       self.wakeSamples.append(contentsOf: samples)
       if self.wakeSamples.count > 32_000 {
         self.wakeSamples.removeFirst(self.wakeSamples.count - 32_000)
@@ -472,113 +343,6 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     return Array(UnsafeBufferPointer(start: channel, count: Int(converted.frameLength)))
   }
 
-  private func scheduleCommandEndAfterSpeech(generation: UInt) {
-    guard commandPromise != nil,
-          commandGeneration == generation,
-          !commandAudioEnded else { return }
-    commandSilenceTimeout?.cancel()
-    let silence = DispatchWorkItem { [weak self] in
-      guard let self, self.commandGeneration == generation else { return }
-      self.endCommandAudioAfterSpeech()
-    }
-    commandSilenceTimeout = silence
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: silence)
-  }
-
-  private func endCommandAudioAfterSpeech() {
-    guard commandPromise != nil, latestCommandResult != nil, !commandAudioEnded else { return }
-    commandAudioEnded = true
-    commandSilenceTimeout = nil
-    if let engine = commandAudioEngine {
-      engine.inputNode.removeTap(onBus: 0)
-      engine.stop()
-      commandAudioEngine = nil
-    }
-    // Apple requires live-buffer requests to receive endAudio() before they
-    // can reliably deliver their final transcription.
-    recognitionRequest?.endAudio()
-  }
-
-  private func finishCommand(
-    result: [String: Any]?,
-    cancelRecognitionTask: Bool = true
-  ) {
-    guard commandPromise != nil || commandAudioEngine != nil else { return }
-    // Invalidate callbacks from this task before ending/cancelling it. Speech
-    // can deliver a late callback; without this guard it can tear down the next
-    // command capture during the bounded 1107 recovery.
-    commandGeneration &+= 1
-    commandTimeout?.cancel()
-    commandTimeout = nil
-    commandSilenceTimeout?.cancel()
-    commandSilenceTimeout = nil
-    if let engine = commandAudioEngine {
-      engine.inputNode.removeTap(onBus: 0)
-      engine.stop()
-    }
-    commandAudioEngine = nil
-    recognitionRequest?.endAudio()
-    if cancelRecognitionTask { recognitionTask?.cancel() }
-    recognitionTask = nil
-    recognitionRequest = nil
-    commandAudioEnded = false
-    let promise = commandPromise
-    commandPromise = nil
-    latestCommandResult = nil
-    promise?.resolve(result)
-  }
-
-  private func failCommand(error: Error) {
-    guard commandPromise != nil || commandAudioEngine != nil else { return }
-    let nativeError = error as NSError
-    commandGeneration &+= 1
-    commandTimeout?.cancel()
-    commandTimeout = nil
-    commandSilenceTimeout?.cancel()
-    commandSilenceTimeout = nil
-    if let engine = commandAudioEngine {
-      engine.inputNode.removeTap(onBus: 0)
-      engine.stop()
-    }
-    commandAudioEngine = nil
-    recognitionRequest?.endAudio()
-    // The task has already failed. Cancelling it again can enqueue another
-    // connection error after recovery has started.
-    recognitionTask = nil
-    recognitionRequest = nil
-    commandAudioEnded = false
-    let promise = commandPromise
-    commandPromise = nil
-    latestCommandResult = nil
-    if nativeError.domain == "kAFAssistantErrorDomain" &&
-       (nativeError.code == 1101 || nativeError.code == 1107) {
-      // Recreate the client after Apple's out-of-process recognizer connection
-      // is invalidated/interrupted so the bounded JS retry gets a fresh link.
-      speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    }
-    promise?.reject(
-      "VOICE_RECOGNITION_ERROR",
-      commandRecognitionErrorMessage(nativeError),
-      error
-    )
-  }
-
-  private func commandRecognitionErrorMessage(_ error: NSError) -> String {
-    guard error.domain == "kAFAssistantErrorDomain" else { return error.localizedDescription }
-    switch error.code {
-    case 1107:
-      return "Apple speech service connection was interrupted (iOS error 1107)"
-    case 1101:
-      return "Apple speech service connection was invalidated (iOS error 1101)"
-    case 1110:
-      return "Apple speech recognition did not detect spoken words (iOS error 1110)"
-    case 1700:
-      return "Apple speech recognition is not authorized (iOS error 1700)"
-    default:
-      return error.localizedDescription
-    }
-  }
-
   private func configureAudioSession() throws {
     let session = AVAudioSession.sharedInstance()
     try session.setCategory(
@@ -590,17 +354,11 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   }
 
   private func requestPermissions(completion: @escaping (Bool) -> Void) {
-    let requestSpeech: (Bool) -> Void = { microphoneGranted in
-      guard microphoneGranted else { completion(false); return }
-      SFSpeechRecognizer.requestAuthorization { status in
-        completion(status == .authorized)
-      }
-    }
     switch AVAudioSession.sharedInstance().recordPermission {
     case .granted:
-      requestSpeech(true)
+      completion(true)
     case .undetermined:
-      AVAudioSession.sharedInstance().requestRecordPermission(requestSpeech)
+      AVAudioSession.sharedInstance().requestRecordPermission(completion)
     default:
       completion(false)
     }
@@ -622,11 +380,10 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   @objc private func applicationDidEnterBackground() {
     stopBargeInAudio()
     stopWakeAudio()
-    finishCommand(result: nil)
   }
 
   @objc private func applicationWillEnterForeground() {
-    guard wakeEnabled, !pausedForTts, commandPromise == nil else { return }
+    guard wakeEnabled, !pausedForTts else { return }
     wakeQueue.async {
       do {
         try self.startWakeAudio()

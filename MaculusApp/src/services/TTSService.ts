@@ -104,11 +104,8 @@ export class TTSService {
       Tts.setDefaultRate(this.DEFAULT_RATE);
       Tts.setDefaultPitch(this.PROFILES.scene.pitch);
 
-      // MaculusVoiceCommand is the sole owner of iOS's shared AVAudioSession.
-      // react-native-tts ducking switches the session to playback and then
-      // deactivates it asynchronously on finish/cancel. That can race the next
-      // SFSpeechRecognizer task and interrupt its speech-process connection
-      // with kAFAssistantErrorDomain 1107.
+      // Keep the audio route stable between TTS, the native wake detector, and
+      // react-native-audio-api's local Whisper capture.
       if (Platform.OS === 'ios') {
         Tts.setDucking(false);
       }

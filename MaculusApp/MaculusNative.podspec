@@ -25,7 +25,7 @@ Pod::Spec.new do |spec|
     'src/models/lfm2.5-vl-1.6b-q4_k_m.provenance.json'
   ]
 
-  spec.frameworks = 'AVFoundation', 'Accelerate', 'CryptoKit', 'ImageIO', 'Network', 'Speech', 'UIKit'
+  spec.frameworks = 'AVFoundation', 'Accelerate', 'CryptoKit', 'ImageIO', 'Network', 'UIKit'
   spec.dependency 'React-Core'
   # The bundled YOLO model has signed INT8 I/O. TensorFlowLiteObjC exposes
   # that tensor type, whereas the Swift wrapper omits it.

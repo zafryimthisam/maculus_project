@@ -42,8 +42,6 @@
 	<string>Maculus processes the iPhone camera on this device to describe the visible scene and detect changes.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Maculus listens locally for the wake word and your guidance commands.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Maculus converts spoken guidance commands into text on this device.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>

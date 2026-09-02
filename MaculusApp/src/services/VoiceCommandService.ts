@@ -3,6 +3,7 @@ import { COMMAND_TIMEOUT_MS, WAKE_WORD_LABEL, WAKE_WORD_PARSER_TOKEN } from '../
 import { tts } from './TTSService';
 import { localLlmService } from './LocalLlmService';
 import { soundCueService } from './SoundCueService';
+import { whisperCommandService, type WhisperCommandResult } from './WhisperCommandService';
 import { ConversationTurn } from '../types';
 
 export type VoiceCommand =
@@ -26,11 +27,6 @@ export type VoiceCommandStatus =
   | 'unavailable'
   | 'error';
 
-export type VoiceCommandResult = {
-  text: string;
-  confidence?: number | null;
-};
-
 type VoiceAvailability = {
   available: boolean;
   wakeAvailable?: boolean;
@@ -48,7 +44,6 @@ type VoiceCommandNativeModule = {
   isAvailable(): Promise<VoiceAvailability>;
   startWakeListening(): Promise<{ started: boolean; wakeWord?: string }>;
   stopVoiceControl(): Promise<void>;
-  listenForCommandOnce(timeoutMs: number): Promise<VoiceCommandResult | null>;
   pauseForTts(): Promise<void>;
   resumeAfterTts(): Promise<void>;
   interruptForEmergency(): Promise<void>;
@@ -78,7 +73,6 @@ const MIN_CONFIDENCE = 0.35;
 // such as "Hey LiveKit, start Maculus" does not lose the first command word.
 // TTS is already stopped before this delay begins.
 const AUDIO_HANDOFF_MS = 120;
-const IOS_SPEECH_RECOVERY_MS = 250;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
@@ -255,6 +249,12 @@ export class VoiceCommandService {
     this.onStatus = onStatus;
 
     try {
+      if (!whisperCommandService.isReady() && !await whisperCommandService.initialize()) {
+        this.setDiagnostic(whisperCommandService.getState().message);
+        this.setStatus('unavailable');
+        this.enabled = false;
+        return false;
+      }
       const availability = await MaculusVoiceCommand.isAvailable();
       if (!availability.available) {
         this.setStatus('unavailable');
@@ -265,7 +265,6 @@ export class VoiceCommandService {
       this.emitter = new NativeEventEmitter(MaculusVoiceCommand as any);
       this.subscriptions = [
         this.emitter.addListener('MaculusVoiceWakeDetected', this.handleWakeDetected),
-        this.emitter.addListener('MaculusVoiceCommandTranscript', this.handlePartialTranscript),
         this.emitter.addListener('MaculusVoiceCommandState', this.handleState),
         this.emitter.addListener('MaculusVoiceCommandError', this.handleError),
       ];
@@ -299,6 +298,7 @@ export class VoiceCommandService {
     this.safetyInterrupted = true;
     this.commandBusy = false;
     this.clearRecoveryTimer();
+    whisperCommandService.interrupt();
     this.setStatus(this.enabled ? 'paused' : 'off');
     await soundCueService.stopAll();
     if (MaculusVoiceCommand) {
@@ -332,9 +332,8 @@ export class VoiceCommandService {
       // Let the activation cue finish before command recognition takes over
       // the audio session. Otherwise the recognizer can make the cue inaudible.
       await soundCueService.playActivation();
-      // AVAudioPlayer completion and Apple's speech service do not hand the
-      // audio route over atomically. A short settle prevents transient 1107
-      // connection interruptions without extending the user's capture.
+      // AVAudioPlayer and the PCM recorder do not hand the audio route over
+      // atomically, so leave a short settle before opening Whisper capture.
       await wait(AUDIO_HANDOFF_MS);
     }
 
@@ -346,22 +345,12 @@ export class VoiceCommandService {
     this.setStatus('command_listening');
     this.setDiagnostic('Listening for your request. Speak after the activation sound.');
     try {
-      // This is a ceiling for no-speech cases. Native endpointing completes
-      // this single capture as soon as the user stops talking.
-      const commandDeadline = Date.now() + COMMAND_TIMEOUT_MS;
-      let result: VoiceCommandResult | null;
-      try {
-        result = await MaculusVoiceCommand.listenForCommandOnce(COMMAND_TIMEOUT_MS);
-      } catch (error) {
-        if (!isIosSpeechProcessInterruption(error)) {throw error;}
-        const remainingMs = commandDeadline - Date.now();
-        if (remainingMs < 1000 || !this.enabled || this.safetyInterrupted) {throw error;}
-        this.setDiagnostic('The iOS speech service was interrupted. Reconnecting once…');
-        await wait(IOS_SPEECH_RECOVERY_MS);
-        result = await MaculusVoiceCommand.listenForCommandOnce(
-          Math.max(1000, commandDeadline - Date.now()),
-        );
-      }
+      // Whisper and FSMN VAD run locally through ExecuTorch. No Apple speech
+      // daemon or network connection participates in command recognition.
+      const result: WhisperCommandResult | null = await whisperCommandService.listenForCommandOnce(
+        COMMAND_TIMEOUT_MS,
+        text => this.handlePartialTranscript({text, isFinal: false}),
+      );
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled) {
         this.commandBusy = false;
@@ -414,7 +403,7 @@ export class VoiceCommandService {
     } catch (e) {
       console.warn('[Voice] Command listen failed:', e);
       this.setStatus('error');
-      this.setDiagnostic(`Voice recognition failed: ${errorMessage(e)}`);
+      this.setDiagnostic(`Private voice recognition failed: ${errorMessage(e)}`);
     } finally {
       this.commandBusy = false;
       this.safetyInterrupted = false;
@@ -561,6 +550,7 @@ export class VoiceCommandService {
       return;
     }
     this.clearRecoveryTimer();
+    whisperCommandService.interrupt();
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = null;
       this.restartWakeListening();
@@ -576,6 +566,7 @@ export class VoiceCommandService {
 
   private stopLocal(): void {
     this.clearRecoveryTimer();
+    whisperCommandService.interrupt();
     this.enabled = false;
     this.commandBusy = false;
     this.alwaysListening = false;
@@ -677,15 +668,9 @@ function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function isIosSpeechProcessInterruption(error: unknown): boolean {
-  const message = errorMessage(error);
-  return /kAFAssistantErrorDomain.*(?:error|code)\s*1107/i.test(message) ||
-    /speech service connection was interrupted.*1107/i.test(message);
-}
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {return error.message;}
-  return typeof error === 'string' && error ? error : 'Unknown speech-recognition error.';
+  return typeof error === 'string' && error ? error : 'Unknown private speech-recognition error.';
 }
 
 export const voiceCommandService = new VoiceCommandService();

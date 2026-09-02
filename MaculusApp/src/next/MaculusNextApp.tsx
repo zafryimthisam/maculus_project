@@ -2,7 +2,6 @@ import React from 'react';
 import {
   ActivityIndicator,
   Alert,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -11,7 +10,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { DetectionPreview } from '../components/DetectionPreview';
+import { whisperCommandService } from '../services/WhisperCommandService';
 import { useMaculusRuntime } from './useMaculusRuntime';
 
 export default function MaculusNextApp(): React.JSX.Element {
@@ -30,6 +31,7 @@ export default function MaculusNextApp(): React.JSX.Element {
   } = useMaculusRuntime();
   const [piAddress, setPiAddress] = React.useState('');
   const [piConnecting, setPiConnecting] = React.useState(false);
+  const [whisperState, setWhisperState] = React.useState(whisperCommandService.getState());
   const active = state.phase !== 'idle' && state.phase !== 'error';
   const busy = state.phase === 'starting' || state.phase === 'stopping';
   const interactionBusy = state.descriptionInProgress || [
@@ -40,6 +42,10 @@ export default function MaculusNextApp(): React.JSX.Element {
   const modelPercent = state.model.totalBytes > 0
     ? Math.min(100, Math.round(state.model.downloadedBytes * 100 / state.model.totalBytes))
     : 0;
+
+  React.useEffect(() => {
+    return whisperCommandService.subscribe(setWhisperState);
+  }, []);
 
   React.useEffect(() => {
     if (state.piConnection === 'connected' && state.piUrl) {
@@ -76,9 +82,10 @@ export default function MaculusNextApp(): React.JSX.Element {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="light-content" backgroundColor="#07111f" />
-      <ScrollView contentContainerStyle={styles.content}>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+        <StatusBar barStyle="light-content" backgroundColor="#07111f" />
+        <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.eyebrow}>PRIVATE ON-DEVICE GUIDE</Text>
         <Text style={styles.title} accessibilityRole="header">Maculus Next</Text>
         <Text style={styles.subtitle}>{state.message}</Text>
@@ -244,8 +251,31 @@ export default function MaculusNextApp(): React.JSX.Element {
           />
           <StatusItem label="Maculus Pi" value={piConnectionTitle(state.piConnection)} />
           <StatusItem label="Voice" value={voiceStatusTitle(state.voiceStatus)} />
+          <StatusItem label="Private speech" value={whisperStatusTitle(whisperState)} />
           <StatusItem label="Local AI" value={state.conversationReady ? 'Camera VLM ready' : 'Vision AI not ready'} />
           <StatusItem label="Vision" value={state.fps > 0 ? `${state.fps} FPS` : state.visionBackend} />
+        </View>
+
+        <View style={styles.whisperCard} accessibilityLiveRegion="polite">
+          <Text style={styles.cardLabel}>PRIVATE SPEECH · EXECUTORCH</Text>
+          <Text style={styles.modelTitle}>Whisper Tiny English + FSMN VAD</Text>
+          <Text style={styles.modelBody}>{whisperState.message}</Text>
+          {whisperState.state === 'downloading' && (
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {width: `${Math.round(whisperState.downloadProgress * 100)}%`},
+                ]}
+              />
+            </View>
+          )}
+          <Text style={styles.modelFootnote}>
+            No Apple Speech service · no voice upload · downloaded once
+          </Text>
+          {whisperState.state === 'error' && (
+            <ActionButton label="Retry private voice setup" onPress={() => whisperCommandService.initialize()} />
+          )}
         </View>
 
 
@@ -279,8 +309,9 @@ export default function MaculusNextApp(): React.JSX.Element {
         <Text style={styles.disclaimer}>
           Maculus is an assistive aid, not a replacement for a cane, guide dog, or orientation and mobility training.
         </Text>
-      </ScrollView>
-    </SafeAreaView>
+        </ScrollView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -338,6 +369,14 @@ function voiceStatusTitle(status: string): string {
   if (status === 'unavailable') {return 'Voice unavailable';}
   if (status === 'error') {return 'Voice needs attention';}
   return 'Voice off';
+}
+
+function whisperStatusTitle(state: {state: string; downloadProgress: number}): string {
+  if (state.state === 'ready') {return 'Whisper ready';}
+  if (state.state === 'listening') {return 'Whisper listening';}
+  if (state.state === 'downloading') {return `${Math.round(state.downloadProgress * 100)}% installed`;}
+  if (state.state === 'error') {return 'Setup needed';}
+  return 'Preparing';
 }
 
 function piConnectionTitle(connection: string): string {
@@ -434,6 +473,9 @@ const styles = StyleSheet.create({
   statusLabel: { color: '#8fa2ba', fontSize: 13, fontWeight: '700' },
   statusValue: { color: '#ffffff', fontSize: 16, fontWeight: '800', marginTop: 4, textTransform: 'capitalize' },
   modelCard: { backgroundColor: '#13243a', borderRadius: 18, borderWidth: 1, borderColor: '#36506d', padding: 19, marginTop: 18, gap: 8 },
+  whisperCard: { backgroundColor: '#102a2a', borderRadius: 18, borderWidth: 1, borderColor: '#2f8277', padding: 19, marginTop: 18, gap: 8 },
+  progressTrack: { height: 7, borderRadius: 999, backgroundColor: '#173c3a', overflow: 'hidden', marginVertical: 4 },
+  progressFill: { height: '100%', borderRadius: 999, backgroundColor: '#66d9c7' },
   modelTitle: { color: '#ffffff', fontSize: 20, fontWeight: '800' },
   modelBody: { color: '#e4ebf5', fontSize: 16, lineHeight: 23 },
   modelFootnote: { color: '#8fe4d7', fontSize: 13, lineHeight: 19, marginBottom: 4 },

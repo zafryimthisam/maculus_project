@@ -80,7 +80,7 @@ Copy-Item .\yolo11s_saved_model\yolo11s_full_integer_quant.tflite C:\Users\mimza
   accept square, multiple-of-32 inputs from 320 through 640 and require output
   shape `[1, 84, anchors]`.
 - Android packages this directory directly. The iOS `MaculusNative` CocoaPod copies the same tracked model into the app bundle, avoiding duplicate model binaries in Git.
-- The native detection floor remains 0.30. Speech still requires temporal
+- The native detection floor remains 0.30. Spoken guidance still requires temporal
   confirmation, so isolated low-confidence detections are not narrated.
 
 ## Accuracy validation

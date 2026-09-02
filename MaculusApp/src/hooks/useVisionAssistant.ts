@@ -1238,22 +1238,9 @@ export function useVisionAssistant() {
       {
         alwaysListening: true,
         onTurnComplete: async () => {
-          // After a turn completes, re-arm the voice capture for the
-          // next follow-up. We delegate to the live service for the
-          // exact behavior, but a default re-arm is to call
-          // listenForCommandOnce again (i.e. the wake word is not
-          // required during the follow-up window).
+          // After a turn completes, permit one direct Whisper follow-up. The
+          // voice service handles microphone ownership and wake re-arming.
           voiceCommandService.openFollowupWindow();
-          // Restart listening by calling restartWakeListening (which
-          // restarts the wake loop) AND then immediately starting
-          // command capture again. The follow-up window will be open.
-          // We achieve this by simply calling the same start path
-          // through the existing flow: the iOS side already has the
-          // ASR engine paused after listenForCommandOnce returns, so
-          // we don't need to do anything explicit here — the next
-          // wake event will retrigger the cycle. Instead, we manually
-          // re-prime the recognizer by re-calling listenForCommandOnce
-          // via the wake-side API.
         },
       },
     );

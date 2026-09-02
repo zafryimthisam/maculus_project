@@ -13,7 +13,7 @@ class MaculusKeepAwakeModule(
 
     @ReactMethod
     fun setEnabled(enabled: Boolean, promise: Promise) {
-        val activity = currentActivity
+        val activity = reactApplicationContext.currentActivity
         if (activity == null) {
             promise.reject("KEEP_AWAKE_NO_ACTIVITY", "No active screen is available")
             return

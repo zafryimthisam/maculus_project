@@ -128,7 +128,7 @@ class MaculusDeviceCameraModule(
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
-        permissions: Array<out String>,
+        permissions: Array<String>,
         grantResults: IntArray
     ): Boolean {
         if (requestCode != REQUEST_CAMERA_PERMISSION) return false
@@ -160,7 +160,7 @@ class MaculusDeviceCameraModule(
     }
 
     private fun bindCamera(promise: Promise) {
-        val activity = currentActivity
+        val activity = reactApplicationContext.currentActivity
         if (activity !is LifecycleOwner) {
             promise.reject("DEVICE_CAMERA_NO_ACTIVITY", "No lifecycle-aware activity is available")
             return
@@ -225,7 +225,7 @@ class MaculusDeviceCameraModule(
     }
 
     private fun requestCameraPermission(promise: Promise) {
-        val activity = currentActivity
+        val activity = reactApplicationContext.currentActivity
         if (activity !is PermissionAwareActivity) {
             promise.reject("DEVICE_CAMERA_NO_ACTIVITY", "Cannot request camera permission")
             return

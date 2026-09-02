@@ -64,11 +64,11 @@ class MaculusVoiceCommandModule(
     fun isAvailable(promise: Promise) {
         try {
             val wakeAvailable = hasWakeAssets()
-            val commandAvailable = SpeechRecognizer.isRecognitionAvailable(reactContext)
             promise.resolve(Arguments.createMap().apply {
-                putBoolean("available", wakeAvailable && commandAvailable)
+                putBoolean("available", wakeAvailable)
                 putBoolean("wakeAvailable", wakeAvailable)
-                putBoolean("commandAvailable", commandAvailable)
+                // Command transcription is provided by ExecuTorch Whisper.
+                putBoolean("commandAvailable", true)
                 putString("wakeWord", WAKE_LABEL)
             })
         } catch (e: Exception) {
@@ -190,7 +190,7 @@ class MaculusVoiceCommandModule(
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
-        permissions: Array<out String>,
+        permissions: Array<String>,
         grantResults: IntArray
     ): Boolean {
         if (requestCode != REQUEST_RECORD_AUDIO) {
@@ -630,7 +630,7 @@ class MaculusVoiceCommandModule(
     }
 
     private fun requestRecordAudioPermission(promise: Promise) {
-        val activity = currentActivity
+        val activity = reactApplicationContext.currentActivity
         if (activity !is PermissionAwareActivity) {
             promise.reject("VOICE_NO_ACTIVITY", "Cannot request microphone permission")
             return

@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import {
-  SafeAreaView,
   StyleSheet,
   TextInput,
   View,
@@ -11,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useVisionAssistant } from './src/hooks/useVisionAssistant';
 import { AccessibleButton } from './src/components/AccessibleButton';
 import { StatusPanel } from './src/components/StatusPanel';
@@ -125,8 +125,9 @@ export default function App() {
     : 'Private vision and conversation model not downloaded';
 
   return (
-    <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.flex}
       >
@@ -315,8 +316,9 @@ export default function App() {
             </Text>
           )}
         </ScrollView>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 

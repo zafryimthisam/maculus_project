@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import <React/RCTBundleURLProvider.h>
+#import <ReactAppDependencyProvider/RCTAppDependencyProvider.h>
 
 @implementation AppDelegate
 
@@ -7,6 +8,7 @@
 {
   self.moduleName = @"MaculusApp";
   self.initialProps = @{};
+  self.dependencyProvider = [RCTAppDependencyProvider new];
   return [super application:application didFinishLaunchingWithOptions:launchOptions];
 }
 

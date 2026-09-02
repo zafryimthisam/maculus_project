@@ -1,6 +1,47 @@
 /* eslint-env jest */
 import { NativeModules } from 'react-native';
 
+jest.mock('react-native-executorch', () => ({
+  models: {
+    speech_to_text: { whisper_tiny_en: jest.fn(() => ({modelName: 'whisper-tiny-en'})) },
+    vad: { fsmn_vad: jest.fn(() => ({modelName: 'fsmn-vad'})) },
+  },
+  SpeechToTextModule: class MockSpeechToTextModule {
+    static fromModelName = jest.fn().mockResolvedValue(new MockSpeechToTextModule());
+    stream = jest.fn(() => ({
+      [Symbol.asyncIterator]: () => ({next: () => Promise.resolve({done: true})}),
+    }));
+    streamInsert = jest.fn();
+    streamStop = jest.fn();
+    delete = jest.fn();
+  },
+  initExecutorch: jest.fn(),
+}));
+
+jest.mock('react-native-executorch-bare-resource-fetcher', () => ({
+  BareResourceFetcher: {},
+}), {virtual: true});
+
+jest.mock('react-native-audio-api', () => ({
+  AudioManager: {
+    checkRecordingPermissions: jest.fn().mockResolvedValue('Granted'),
+    requestRecordingPermissions: jest.fn().mockResolvedValue('Granted'),
+  },
+  AudioRecorder: class MockAudioRecorder {
+    onAudioReady = jest.fn();
+    clearOnAudioReady = jest.fn();
+    onError = jest.fn();
+    clearOnError = jest.fn();
+    start = jest.fn().mockResolvedValue({status: 'success'});
+    stop = jest.fn().mockResolvedValue({status: 'success'});
+    isRecording = jest.fn().mockReturnValue(false);
+  },
+}));
+
+jest.mock('react-native-safe-area-context', () =>
+  require('react-native-safe-area-context/jest/mock').default,
+);
+
 // Mock react-native-background-timer
 jest.mock('react-native-background-timer', () => ({
   setInterval: jest.fn((cb, time) => setInterval(cb, time)),
@@ -92,7 +133,7 @@ NativeModules.MaculusReId = {
   ),
 };
 
-// Mock wake-word and one-shot voice command module.
+// Mock the native wake-word module. Command transcription is ExecuTorch-owned.
 NativeModules.MaculusVoiceCommand = {
   isAvailable: jest.fn().mockResolvedValue({
     available: true,
@@ -102,7 +143,6 @@ NativeModules.MaculusVoiceCommand = {
   }),
   startWakeListening: jest.fn().mockResolvedValue({ started: true, wakeWord: 'Hey LiveKit' }),
   stopVoiceControl: jest.fn().mockResolvedValue(undefined),
-  listenForCommandOnce: jest.fn().mockResolvedValue(null),
   pauseForTts: jest.fn().mockResolvedValue(undefined),
   interruptForEmergency: jest.fn().mockResolvedValue(undefined),
   resumeAfterTts: jest.fn().mockResolvedValue(undefined),

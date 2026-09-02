@@ -59,9 +59,6 @@ RCT_EXTERN_METHOD(startWakeListening:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(stopVoiceControl:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
-RCT_EXTERN_METHOD(listenForCommandOnce:(nonnull NSNumber *)timeoutMs
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(pauseForTts:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(interruptForEmergency:(RCTPromiseResolveBlock)resolve

@@ -96,7 +96,7 @@ class MaculusReIdModule(reactContext: ReactApplicationContext) :
             for (i in 0 until detectionIndices.size()) {
                 val detectionIndex = detectionIndices.getInt(i)
                 if (detectionIndex < 0 || detectionIndex >= detections.size()) continue
-                val detection = detections.getMap(detectionIndex)
+                val detection = detections.getMap(detectionIndex) ?: continue
                 val crop = cropPerson(bitmap, detection)
                 val scaled = Bitmap.createScaledBitmap(crop, inputWidth, inputHeight, true)
                 if (crop !== bitmap) crop.recycle()

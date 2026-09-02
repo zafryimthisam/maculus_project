@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { NativeModules } from 'react-native';
 import { tts } from '../src/services/TTSService';
+import { whisperCommandService } from '../src/services/WhisperCommandService';
 import {
   executeVoiceCommand,
   parseVoiceCommand,
@@ -73,7 +74,7 @@ describe('VoiceCommandService parser', () => {
   });
 });
 
-describe('VoiceCommandService clean Siri-style interruption', () => {
+describe('VoiceCommandService private Whisper capture', () => {
   beforeEach(() => {jest.clearAllMocks();});
   afterEach(() => {jest.restoreAllMocks();});
 
@@ -109,9 +110,9 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     service.onTurn = jest.fn();
     jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
-    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any).mockResolvedValueOnce({
+    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce').mockResolvedValueOnce({
       text: 'describe scene',
-      confidence: 0.9,
+      confidence: null,
     });
     let finishCue!: () => void;
     (NativeModules.MaculusSoundCue.playActivation as jest.Mock).mockImplementationOnce(
@@ -122,15 +123,15 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     for (let step = 0; step < 8; step += 1) {await Promise.resolve();}
 
     expect(NativeModules.MaculusSoundCue.playActivation).toHaveBeenCalledTimes(1);
-    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).not.toHaveBeenCalled();
+    expect(listen).not.toHaveBeenCalled();
 
     finishCue();
     await capture;
 
-    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
+    expect(listen).toHaveBeenCalledTimes(1);
   });
 
-  it('processes one native capture as soon as its transcript is finalized', async () => {
+  it('processes one Whisper capture as soon as its transcript is finalized', async () => {
     const service = new VoiceCommandService() as any;
     const onTurn = jest.fn(async () => {});
     const onStatus = jest.fn();
@@ -145,12 +146,12 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     service.onDiagnostic = onDiagnostic;
     jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
-    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any)
-      .mockResolvedValueOnce({ text: 'What color is the chair?', confidence: 0.91 });
+    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce')
+      .mockResolvedValueOnce({ text: 'What color is the chair?', confidence: null });
 
     await service.handleWakeDetected({ name: 'followup' });
 
-    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
+    expect(listen).toHaveBeenCalledTimes(1);
     expect(onStatus).toHaveBeenCalledWith('processing');
     expect(onTranscript).toHaveBeenCalledWith('What color is the chair?');
     expect(onDiagnostic).toHaveBeenCalledWith(
@@ -162,7 +163,7 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     );
   });
 
-  it('does not extend listening by retrying an empty native capture', async () => {
+  it('does not extend listening by retrying an empty Whisper capture', async () => {
     const service = new VoiceCommandService() as any;
     const onTurn = jest.fn();
     const onDiagnostic = jest.fn();
@@ -173,18 +174,18 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     service.onDiagnostic = onDiagnostic;
     jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
-    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any).mockResolvedValueOnce(null);
+    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce').mockResolvedValueOnce(null);
 
     await service.handleWakeDetected({ name: 'followup' });
 
-    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(1);
+    expect(listen).toHaveBeenCalledTimes(1);
     expect(onTurn).not.toHaveBeenCalled();
     expect(onDiagnostic).toHaveBeenCalledWith(
       'No spoken words were recognized. Say “Hey LiveKit,” wait for the sound, then speak.',
     );
   });
 
-  it('reconnects once after Apple speech-process interruption 1107', async () => {
+  it('surfaces an ExecuTorch failure without entering an Apple-service retry loop', async () => {
     const service = new VoiceCommandService() as any;
     const onTurn = jest.fn(async () => {});
     const onDiagnostic = jest.fn();
@@ -195,25 +196,19 @@ describe('VoiceCommandService clean Siri-style interruption', () => {
     service.onDiagnostic = onDiagnostic;
     jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
-    (NativeModules.MaculusVoiceCommand.listenForCommandOnce as any)
-      .mockRejectedValueOnce(new Error(
-        'The operation couldn’t be completed. (kAFAssistantErrorDomain error 1107.)',
-      ))
-      .mockResolvedValueOnce({ text: 'What is in front of me?', confidence: 0.89 });
+    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce')
+      .mockRejectedValueOnce(new Error('ExecuTorch stream stopped unexpectedly.'));
 
     await service.handleWakeDetected({ name: 'followup' });
 
-    expect(NativeModules.MaculusVoiceCommand.listenForCommandOnce).toHaveBeenCalledTimes(2);
+    expect(listen).toHaveBeenCalledTimes(1);
     expect(onDiagnostic).toHaveBeenCalledWith(
-      'The iOS speech service was interrupted. Reconnecting once…',
+      'Private voice recognition failed: ExecuTorch stream stopped unexpectedly.',
     );
-    expect(onTurn).toHaveBeenCalledWith(
-      expect.objectContaining({ transcript: 'What is in front of me?' }),
-      null,
-    );
+    expect(onTurn).not.toHaveBeenCalled();
   });
 
-  it('surfaces partial native speech in the UI before final recognition', () => {
+  it('surfaces partial Whisper speech in the UI before final recognition', () => {
     const service = new VoiceCommandService() as any;
     const onTranscript = jest.fn();
     const onDiagnostic = jest.fn();

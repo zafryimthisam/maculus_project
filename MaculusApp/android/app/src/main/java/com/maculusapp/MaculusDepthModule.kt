@@ -130,7 +130,7 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
 
             val objectDepths = Arguments.createArray()
             for (i in 0 until detections.size()) {
-                val d = detections.getMap(i)
+                val d = detections.getMap(i) ?: continue
                 val x1 = d.getDoubleOrDefault("x1", d.getDoubleOrDefault("cx", 0.5) - d.getDoubleOrDefault("w", 0.0) / 2.0)
                 val y1 = d.getDoubleOrDefault("y1", d.getDoubleOrDefault("cy", 0.5) - d.getDoubleOrDefault("h", 0.0) / 2.0)
                 val x2 = d.getDoubleOrDefault("x2", d.getDoubleOrDefault("cx", 0.5) + d.getDoubleOrDefault("w", 0.0) / 2.0)
