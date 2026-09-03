@@ -1,7 +1,7 @@
 #import "AppDelegate.h"
 #import <React/RCTBundleURLProvider.h>
 #import <ReactAppDependencyProvider/RCTAppDependencyProvider.h>
-#import <ReactJSC/RCTJscInstanceFactory.h>
+#import <React-jsc/RCTJscInstanceFactory.h>
 
 @implementation AppDelegate
 
