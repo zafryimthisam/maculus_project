@@ -22,3 +22,42 @@ diff --git a/node_modules/react-native-audio-api/src/api.ts b/node_modules/react
 -export { default as Audio } from './Audio';
 -export { default as AudioControls } from './Audio/controls/AudioControls';
  export type { MediaElementAudioSourceOptions } from './core/MediaElementAudioSourceNode';
+diff --git a/node_modules/react-native-audio-api/src/AudioAPIModule/AudioAPIModule.ts b/node_modules/react-native-audio-api/src/AudioAPIModule/AudioAPIModule.ts
+--- a/node_modules/react-native-audio-api/src/AudioAPIModule/AudioAPIModule.ts
++++ b/node_modules/react-native-audio-api/src/AudioAPIModule/AudioAPIModule.ts
+@@ -7,2 +7 @@ import type {
+ import { AudioApiError } from '../errors';
+-import semverGte from 'semver/functions/gte';
+@@ -17,7 +16,2 @@ class AudioAPIModule implements IAudioAPIModule {
+   constructor() {
+-    // Important! Verify and import worklets first
+-    // otherwise the native module installation might crash
+-    // if react-native-worklets is not imported before audio-api
+-    this.#verifyWorklets();
+-
+     if (this.#verifyInstallation()) {
+@@ -36,24 +30 @@ class AudioAPIModule implements IAudioAPIModule {
+-  #verifyWorklets(): boolean {
+-    try {
+-      const workletsPackage = require('react-native-worklets');
+-      const workletsPackageJson = require('react-native-worklets/package.json');
+-      this.#workletsVersion = workletsPackageJson.version;
+-      this.#workletsAvailable_ = true;
+-
+-      this.#canUseWorklets_ = semverGte(
+-        this.#workletsVersion,
+-        AudioAPIModule.MIN_WORKLETS_VERSION
+-      );
+-
+-      if (this.#canUseWorklets_) {
+-        this.#workletsModule_ = workletsPackage;
+-      }
+-
+-      return this.#canUseWorklets_;
+-    } catch {
+-      this.#canUseWorklets_ = false;
+-      return false;
+-    }
+-  }
+-
+   #verifyInstallation(): boolean {

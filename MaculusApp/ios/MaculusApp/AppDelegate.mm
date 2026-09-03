@@ -1,6 +1,7 @@
 #import "AppDelegate.h"
 #import <React/RCTBundleURLProvider.h>
 #import <ReactAppDependencyProvider/RCTAppDependencyProvider.h>
+#import <ReactJSC/RCTJscInstanceFactory.h>
 
 @implementation AppDelegate
 
@@ -24,6 +25,11 @@
 #else
   return [[NSBundle mainBundle] URLForResource:@"main" withExtension:@"jsbundle"];
 #endif
+}
+
+- (JSRuntimeFactoryRef)createJSRuntimeFactory
+{
+  return jsrt_create_jsc_factory();
 }
 
 @end

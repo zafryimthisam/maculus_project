@@ -9,6 +9,13 @@ require Pod::Executable.execute_command('node', ['-p',
 ENV['RCT_NEW_ARCH_ENABLED'] = '1'
 ENV['RNLLAMA_BUILD_FROM_SOURCE'] = '1'
 
+# The Hermes binary bundled with React Native 0.81 crashes while initializing
+# on physical devices running iOS 27 beta. Keep Android on Hermes, but use the
+# supported community JavaScriptCore runtime for iOS until that upstream
+# compatibility issue is fixed.
+ENV['USE_THIRD_PARTY_JSC'] = '1'
+ENV['USE_HERMES'] = '0'
+
 # Whisper consumes live microphone PCM and does not use Audio API's optional
 # file/stream decoding layer. Disabling FFmpeg avoids shipping four unused
 # frameworks and keeps them out of the final iOS linker invocation.
@@ -36,7 +43,8 @@ target 'MaculusApp' do
   use_react_native!(
     :path => config[:reactNativePath],
     :app_path => "#{Pod::Config.instance.installation_root}/..",
-    :new_arch_enabled => true
+    :new_arch_enabled => true,
+    :hermes_enabled => false
   )
 
   target 'MaculusAppTests' do

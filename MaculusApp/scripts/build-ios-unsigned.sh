@@ -75,6 +75,8 @@ cd "$APP_ROOT"
 export RNLLAMA_BUILD_FROM_SOURCE=1
 export RNLLAMA_SKIP_POSTINSTALL=1
 export RCT_NEW_ARCH_ENABLED=1
+export USE_THIRD_PARTY_JSC=1
+export USE_HERMES=0
 
 # Record clean tracked project files before CocoaPods gets a chance to rewrite
 # them. The cleanup trap later restores only files that were clean here, so a
@@ -179,6 +181,8 @@ xcodebuild \
   CODE_SIGNING_REQUIRED=NO \
   DEVELOPMENT_TEAM="" \
   RCT_NEW_ARCH_ENABLED=1 \
+  USE_THIRD_PARTY_JSC=1 \
+  USE_HERMES=0 \
   COMPILER_INDEX_STORE_ENABLE=NO \
   build 2>&1 | tee "$BUILD_LOG"
 XCODE_STATUS=${PIPESTATUS[0]}
@@ -195,6 +199,8 @@ fi
 
 APP="$(find "$DERIVED_DATA/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" -print -quit)"
 [[ -d "$APP" ]] || fail "Build succeeded but no Release iPhoneOS .app was found."
+[[ ! -d "$APP/Frameworks/hermes.framework" ]] ||
+  fail "Built app still contains Hermes instead of the iOS 27-safe JavaScriptCore runtime."
 
 for model_name in \
   yolo11s.tflite \
