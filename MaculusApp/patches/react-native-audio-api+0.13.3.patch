@@ -1,0 +1,15 @@
+diff --git a/node_modules/react-native-audio-api/android/build.gradle b/node_modules/react-native-audio-api/android/build.gradle
+--- a/node_modules/react-native-audio-api/android/build.gradle
++++ b/node_modules/react-native-audio-api/android/build.gradle
+@@ -223,6 +223,11 @@ android {
+   externalNativeBuild {
+     cmake {
+       path "CMakeLists.txt"
++      // Keep generated object paths below Ninja's Windows path limit.
++      if (System.getProperty("os.name").toLowerCase().contains("windows")) {
++        def projectHash = Integer.toHexString(rootProject.projectDir.absolutePath.hashCode())
++        buildStagingDirectory file("${System.getProperty('java.io.tmpdir')}/rnaa-${projectHash}")
++      }
+     }
+   }
+ 
