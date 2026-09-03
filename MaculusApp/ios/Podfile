@@ -54,5 +54,21 @@ target 'MaculusApp' do
         build_configuration.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '18.2'
       end
     end
+
+    # fmt 11.0.2 (pinned by React Native 0.81) enables a consteval path that
+    # Apple Clang 21 in Xcode 26.4 rejects. Disable that path for Apple Clang;
+    # newer fmt releases contain the equivalent upstream compiler fix.
+    fmt_base = File.join(installer.sandbox.root, 'fmt', 'include', 'fmt', 'base.h')
+    if File.exist?(fmt_base)
+      fmt_source = File.read(fmt_base)
+      old_apple_guard = '#elif defined(__apple_build_version__) && __apple_build_version__ < 14000029L'
+      fixed_apple_guard = '#elif defined(__apple_build_version__)'
+
+      if fmt_source.include?(old_apple_guard)
+        File.chmod(0644, fmt_base)
+        File.write(fmt_base, fmt_source.sub(old_apple_guard, fixed_apple_guard))
+        Pod::UI.puts 'Applied the Xcode 26 fmt consteval compatibility fix'.green
+      end
+    end
   end
 end
