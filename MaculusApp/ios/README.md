@@ -47,5 +47,7 @@ To build the current checkout without fetching GitHub:
 bash MaculusApp/scripts/build-ios-unsigned.sh --no-sync
 ```
 
+The script keeps an incremental Xcode cache under `ios/build` and uses four
+compiler jobs by default, which is suitable for the 12 GB development VM.
 Environment overrides are `MACULUS_BRANCH`, `MACULUS_REMOTE`,
-`MACULUS_XCODE_JOBS`, and `MACULUS_OUTPUT_DIR`.
+`MACULUS_XCODE_JOBS`, `MACULUS_DERIVED_DATA`, and `MACULUS_OUTPUT_DIR`.

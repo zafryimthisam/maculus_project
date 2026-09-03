@@ -26,22 +26,23 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-	  <!-- Do not change NSAllowsArbitraryLoads to true, or you will risk app rejection! -->
 		<key>NSAllowsArbitraryLoads</key>
 		<false/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Maculus connects to your Raspberry Pi for the ultrasonic distance sensor and Pi camera.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_http._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Maculus processes the iPhone camera on this device to describe the visible scene and detect changes.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Maculus connects to your Raspberry Pi for the ultrasonic distance sensor and Pi camera.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Maculus listens locally for the wake word and your guidance commands.</string>
+	<key>RCTNewArchEnabled</key>
+	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>
