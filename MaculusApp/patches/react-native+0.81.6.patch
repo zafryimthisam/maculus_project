@@ -34,20 +34,13 @@ diff --git a/node_modules/react-native/Libraries/AppDelegate/RCTAppSetupUtils.mm
 diff --git a/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm b/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm
 --- a/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm
 +++ b/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm
-@@ -12,3 +12,5 @@
--#if USE_THIRD_PARTY_JSC != 1
-+#if USE_THIRD_PARTY_JSC == 1
-+#import <ReactJSC/RCTJscInstanceFactory.h>
-+#else
- #import <React/RCTHermesInstanceFactory.h>
- #endif
-@@ -44,6 +46,8 @@
+@@ -44,6 +44,9 @@
  - (JSRuntimeFactoryRef)createJSRuntimeFactory
  {
--#if USE_THIRD_PARTY_JSC != 1
-+#if USE_THIRD_PARTY_JSC == 1
-+  return jsrt_create_jsc_factory();
-+#else
+ #if USE_THIRD_PARTY_JSC != 1
    return jsrt_create_hermes_factory();
++#else
++  // Third-party engines are supplied by the application's delegate override.
++  return nullptr;
  #endif
  }
