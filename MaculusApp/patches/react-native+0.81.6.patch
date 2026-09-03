@@ -13,4 +13,4 @@ diff --git a/node_modules/react-native/scripts/cocoapods/jsengine.rb b/node_modu
 -  return "-DUSE_THIRD_PARTY_JSC=1"
 +  # RCTCxxBridge treats an undefined USE_HERMES as Hermes enabled. Define it
 +  # explicitly so third-party JSC builds do not import Hermes-only headers.
-+  return "-DUSE_THIRD_PARTY_JSC=1 -DUSE_HERMES=0"
++  return " -DUSE_THIRD_PARTY_JSC=1 -DUSE_HERMES=0"
