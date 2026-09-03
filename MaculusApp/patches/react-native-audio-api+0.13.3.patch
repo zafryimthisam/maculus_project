@@ -13,3 +13,12 @@ diff --git a/node_modules/react-native-audio-api/android/build.gradle b/node_mod
      }
    }
  
+diff --git a/node_modules/react-native-audio-api/src/api.ts b/node_modules/react-native-audio-api/src/api.ts
+--- a/node_modules/react-native-audio-api/src/api.ts
++++ b/node_modules/react-native-audio-api/src/api.ts
+@@ -38,5 +38 @@ export * from './types';
+-// React components (Audio tag)
+-export * from './Audio';
+-export { default as Audio } from './Audio';
+-export { default as AudioControls } from './Audio/controls/AudioControls';
+ export type { MediaElementAudioSourceOptions } from './core/MediaElementAudioSourceNode';
