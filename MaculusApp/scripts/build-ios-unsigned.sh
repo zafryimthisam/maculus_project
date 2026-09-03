@@ -105,16 +105,16 @@ cleanup_generated_project() {
 }
 trap cleanup_generated_project EXIT
 
-PACKAGE_LOCK_HASH="$(shasum -a 256 package-lock.json | awk '{print $1}')"
+PACKAGE_INPUT_HASH="$(shasum -a 256 package-lock.json patches/*.patch | shasum -a 256 | awk '{print $1}')"
 PACKAGE_INSTALL_STAMP="node_modules/.maculus-package-lock.sha256"
 if [[ ! -d node_modules/react-native ]] ||
   [[ ! -f "$PACKAGE_INSTALL_STAMP" ]] ||
-  [[ "$(<"$PACKAGE_INSTALL_STAMP")" != "$PACKAGE_LOCK_HASH" ]]; then
+  [[ "$(<"$PACKAGE_INSTALL_STAMP")" != "$PACKAGE_INPUT_HASH" ]]; then
   log "Installing JavaScript dependencies"
   npm ci --no-audit --no-fund
-  printf '%s\n' "$PACKAGE_LOCK_HASH" > "$PACKAGE_INSTALL_STAMP"
+  printf '%s\n' "$PACKAGE_INPUT_HASH" > "$PACKAGE_INSTALL_STAMP"
 else
-  log "JavaScript dependencies already match package-lock.json"
+  log "JavaScript dependencies and local package patches are current"
 fi
 
 log "Installing CocoaPods dependencies and the local iOS vision modules"

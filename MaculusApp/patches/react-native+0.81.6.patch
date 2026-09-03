@@ -1,0 +1,8 @@
+diff --git a/node_modules/react-native/ReactCommon/react/utils/React-utils.podspec b/node_modules/react-native/ReactCommon/react/utils/React-utils.podspec
+--- a/node_modules/react-native/ReactCommon/react/utils/React-utils.podspec
++++ b/node_modules/react-native/ReactCommon/react/utils/React-utils.podspec
+@@ -50,1 +50,3 @@ Pod::Spec.new do |s|
+-  depend_on_js_engine(s)
++  # React-jsc already links the engine into the app. Adding it here creates a
++  # React-jsc -> jsitooling -> runtimeexecutor -> utils -> React-jsc cycle.
++  s.dependency "hermes-engine" if use_hermes()
