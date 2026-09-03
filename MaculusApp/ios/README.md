@@ -12,9 +12,9 @@ Native iOS coverage includes:
 - signed-INT8 YOLO11s object detection through TensorFlow Lite;
 - Depth Anything relative-nearness inference through ONNX Runtime;
 - anonymous OSNet person appearance embeddings through ONNX Runtime;
-- the Hey LiveKit wake word plus on-device Apple command transcription;
+- the Hey LiveKit wake word plus private on-device ExecuTorch Whisper command transcription;
 - a lifecycle-safe rear iPhone camera fallback when the Pi camera is missing;
-- camera, microphone, speech, Bonjour, and local-network permission strings.
+- camera, microphone, Bonjour, and local-network permission strings.
 
 ## Development build
 
