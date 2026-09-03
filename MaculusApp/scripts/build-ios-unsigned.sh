@@ -177,6 +177,8 @@ trap cleanup EXIT
 
 log "Building unsigned Maculus for a physical iPhone with scheme '$SCHEME'"
 
+# CocoaPods accepts USE_HERMES=0, but react-native-xcode.sh only skips
+# Hermes bytecode compilation when the build setting is literally "false".
 set +e
 xcodebuild \
   -workspace "$WORKSPACE" \
@@ -191,7 +193,7 @@ xcodebuild \
   DEVELOPMENT_TEAM="" \
   RCT_NEW_ARCH_ENABLED=1 \
   USE_THIRD_PARTY_JSC=1 \
-  USE_HERMES=0 \
+  USE_HERMES=false \
   COMPILER_INDEX_STORE_ENABLE=NO \
   build 2>&1 | tee "$BUILD_LOG"
 XCODE_STATUS=${PIPESTATUS[0]}
