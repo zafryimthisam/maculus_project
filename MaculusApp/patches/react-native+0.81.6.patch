@@ -6,3 +6,11 @@ diff --git a/node_modules/react-native/ReactCommon/react/utils/React-utils.podsp
 +  # React-jsc already links the engine into the app. Adding it here creates a
 +  # React-jsc -> jsitooling -> runtimeexecutor -> utils -> React-jsc cycle.
 +  s.dependency "hermes-engine" if use_hermes()
+diff --git a/node_modules/react-native/scripts/cocoapods/jsengine.rb b/node_modules/react-native/scripts/cocoapods/jsengine.rb
+--- a/node_modules/react-native/scripts/cocoapods/jsengine.rb
++++ b/node_modules/react-native/scripts/cocoapods/jsengine.rb
+@@ -37,1 +37,3 @@ def use_third_party_jsc_flags
+-  return "-DUSE_THIRD_PARTY_JSC=1"
++  # RCTCxxBridge treats an undefined USE_HERMES as Hermes enabled. Define it
++  # explicitly so third-party JSC builds do not import Hermes-only headers.
++  return "-DUSE_THIRD_PARTY_JSC=1 -DUSE_HERMES=0"
