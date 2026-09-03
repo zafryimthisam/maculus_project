@@ -14,3 +14,40 @@ diff --git a/node_modules/react-native/scripts/cocoapods/jsengine.rb b/node_modu
 +  # RCTCxxBridge treats an undefined USE_HERMES as Hermes enabled. Define it
 +  # explicitly so third-party JSC builds do not import Hermes-only headers.
 +  return " -DUSE_THIRD_PARTY_JSC=1 -DUSE_HERMES=0"
+diff --git a/node_modules/react-native/Libraries/AppDelegate/RCTAppSetupUtils.mm b/node_modules/react-native/Libraries/AppDelegate/RCTAppSetupUtils.mm
+--- a/node_modules/react-native/Libraries/AppDelegate/RCTAppSetupUtils.mm
++++ b/node_modules/react-native/Libraries/AppDelegate/RCTAppSetupUtils.mm
+@@ -148,4 +148,6 @@ RCTAppSetupDefaultJsExecutorFactory(
+ #if USE_THIRD_PARTY_JSC != 1
+   return std::make_unique<facebook::react::HermesExecutorFactory>(
+       facebook::react::RCTJSIExecutorRuntimeInstaller(runtimeInstallerLambda));
++#else
++  return nullptr;
+ #endif
+@@ -166,4 +168,6 @@ RCTAppSetupJsExecutorFactoryForOldArch(
+ #if USE_THIRD_PARTY_JSC != 1
+   return std::make_unique<facebook::react::HermesExecutorFactory>(
+       facebook::react::RCTJSIExecutorRuntimeInstaller(runtimeInstallerLambda));
++#else
++  return nullptr;
+ #endif
+diff --git a/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm b/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm
+--- a/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm
++++ b/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNativeFactoryDelegate.mm
+@@ -12,3 +12,5 @@
+-#if USE_THIRD_PARTY_JSC != 1
++#if USE_THIRD_PARTY_JSC == 1
++#import <ReactJSC/RCTJscInstanceFactory.h>
++#else
+ #import <React/RCTHermesInstanceFactory.h>
+ #endif
+@@ -44,6 +46,8 @@
+ - (JSRuntimeFactoryRef)createJSRuntimeFactory
+ {
+-#if USE_THIRD_PARTY_JSC != 1
++#if USE_THIRD_PARTY_JSC == 1
++  return jsrt_create_jsc_factory();
++#else
+   return jsrt_create_hermes_factory();
+ #endif
+ }
