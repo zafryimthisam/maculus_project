@@ -44,3 +44,11 @@ diff --git a/node_modules/react-native/Libraries/AppDelegate/RCTDefaultReactNati
 +  return nullptr;
  #endif
  }
+diff --git a/node_modules/react-native/scripts/react_native_pods.rb b/node_modules/react-native/scripts/react_native_pods.rb
+--- a/node_modules/react-native/scripts/react_native_pods.rb
++++ b/node_modules/react-native/scripts/react_native_pods.rb
+@@ -76,1 +76,3 @@ def use_react_native! (
+-  hermes_enabled= true
++  # Respect the selected community JSC engine instead of forcing Hermes back
++  # into the pod graph after USE_THIRD_PARTY_JSC has opted out of it.
++  hermes_enabled = use_hermes()

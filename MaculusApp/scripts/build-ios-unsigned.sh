@@ -158,6 +158,15 @@ mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 DERIVED_DATA="${MACULUS_DERIVED_DATA:-$APP_ROOT/ios/build/unsigned-derived-data}"
 mkdir -p "$DERIVED_DATA"
 touch "$DERIVED_DATA/.metadata_never_index"
+
+# An incremental engine switch can leave the formerly embedded Hermes binary
+# inside the existing app product even after CocoaPods removes it from the new
+# link graph. Remove only that derived artifact before Xcode recreates the app.
+STALE_HERMES_FRAMEWORK="$DERIVED_DATA/Build/Products/Release-iphoneos/MaculusApp.app/Frameworks/hermes.framework"
+if [[ -d "$STALE_HERMES_FRAMEWORK" ]]; then
+  rm -rf "$STALE_HERMES_FRAMEWORK"
+fi
+
 IPA_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/maculus-ios-ipa.XXXXXX")"
 
 cleanup() {
