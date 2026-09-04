@@ -13,6 +13,7 @@ jest.mock('react-native-executorch', () => ({
     }));
     streamInsert = jest.fn();
     streamStop = jest.fn();
+    transcribe = jest.fn().mockResolvedValue({text: ''});
     delete = jest.fn();
   },
   initExecutorch: jest.fn(),
@@ -23,6 +24,7 @@ jest.mock('react-native-executorch-bare-resource-fetcher', () => ({
 }), {virtual: true});
 
 jest.mock('react-native-audio-api', () => ({
+  decodeAudioData: jest.fn(),
   AudioManager: {
     checkRecordingPermissions: jest.fn().mockResolvedValue('Granted'),
     requestRecordingPermissions: jest.fn().mockResolvedValue('Granted'),

@@ -359,7 +359,9 @@ export class VoiceCommandService {
 
       if (!result?.text) {
         console.log('[Voice] No command transcript returned');
-        this.setDiagnostic('No spoken words were recognized. Say “Hey LiveKit,” wait for the sound, then speak.');
+        this.setDiagnostic(whisperCommandService.getState().capture
+          ? whisperCommandService.getState().message
+          : 'No spoken words were recognized. Say “Hey LiveKit,” wait for the sound, then speak.');
         this.reserveConversationWindow(EMPTY_CAPTURE_QUIET_MS);
         if (!this.safetyInterrupted) {Vibration.vibrate([0, 45, 60, 45]);}
         return;

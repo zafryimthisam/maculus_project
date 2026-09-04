@@ -33,7 +33,8 @@ export default function MaculusNextApp(): React.JSX.Element {
   const [piConnecting, setPiConnecting] = React.useState(false);
   const [whisperState, setWhisperState] = React.useState(whisperCommandService.getState());
   const active = state.phase !== 'idle' && state.phase !== 'error';
-  const busy = state.phase === 'starting' || state.phase === 'stopping';
+  const busy = state.phase === 'starting' || state.phase === 'stopping' ||
+    (!active && whisperState.state === 'processing');
   const interactionBusy = state.descriptionInProgress || [
     'wake_detected',
     'command_listening',
@@ -100,12 +101,16 @@ export default function MaculusNextApp(): React.JSX.Element {
             <View style={styles.interactionText}>
               <Text style={styles.cardLabel}>VOICE INTERACTION</Text>
               <Text style={styles.interactionValue}>
-                {state.descriptionInProgress ? 'Processing your request' : voiceStatusTitle(state.voiceStatus)}
+                {state.descriptionInProgress ? 'Processing your request' :
+                  whisperState.state === 'processing' ? 'Transcribing your speech' : voiceStatusTitle(state.voiceStatus)}
               </Text>
               <Text style={styles.transcriptText}>
                 Heard: {state.lastUserTranscript ? `“${state.lastUserTranscript}”` : 'Nothing yet'}
               </Text>
               <Text style={styles.diagnosticText}>{state.voiceDiagnostic}</Text>
+              {['listening', 'processing'].includes(whisperState.state) && (
+                <Text style={styles.diagnosticText}>{whisperState.message}</Text>
+              )}
             </View>
           </View>
         )}
@@ -273,6 +278,29 @@ export default function MaculusNextApp(): React.JSX.Element {
           <Text style={styles.modelFootnote}>
             No Apple Speech service · no voice upload · downloaded once
           </Text>
+          {whisperState.capture && (
+            <Text style={styles.diagnosticText}>
+              Last capture: {whisperState.capture.seconds.toFixed(1)}s · {whisperState.capture.buffers} buffers
+              {' · '}{whisperState.capture.sourceSampleRate} Hz callback audio
+              {whisperState.capture.usedFallback ? ` · no-VAD retry ${whisperState.capture.processingMs}ms` : ''}
+            </Text>
+          )}
+          <ActionButton
+            label="Test Whisper model"
+            disabled={active || whisperState.state !== 'ready'}
+            onPress={() => whisperCommandService.runSelfTest().catch(error =>
+              Alert.alert('Whisper test unavailable', error.message))}
+          />
+          <Text style={styles.modelFootnote}>
+            Stop Maculus to test bundled speech separately from the microphone.
+          </Text>
+          {whisperState.selfTest && (
+            <Text style={styles.diagnosticText} selectable>
+              Model test: {whisperState.selfTest.passed ? 'PASS' : 'FAIL'}
+              {' · '}{whisperState.selfTest.processingMs}ms
+              {'\n'}{whisperState.selfTest.text || 'No transcript returned'}
+            </Text>
+          )}
           {whisperState.state === 'error' && (
             <ActionButton label="Retry private voice setup" onPress={() => whisperCommandService.initialize()} />
           )}
@@ -374,6 +402,7 @@ function voiceStatusTitle(status: string): string {
 function whisperStatusTitle(state: {state: string; downloadProgress: number}): string {
   if (state.state === 'ready') {return 'Whisper ready';}
   if (state.state === 'listening') {return 'Whisper listening';}
+  if (state.state === 'processing') {return 'Whisper processing';}
   if (state.state === 'downloading') {return `${Math.round(state.downloadProgress * 100)}% installed`;}
   if (state.state === 'error') {return 'Setup needed';}
   return 'Preparing';
