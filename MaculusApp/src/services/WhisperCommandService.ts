@@ -1,7 +1,6 @@
 import {
   models,
   SpeechToTextModule,
-  type TranscriptionResult,
 } from 'react-native-executorch';
 import { AudioManager, AudioRecorder } from 'react-native-audio-api';
 import { Platform } from 'react-native';
@@ -116,6 +115,7 @@ export class WhisperCommandService {
     let stopped = false;
     let sawSpeechAt = 0;
     let lastSpeechAt = 0;
+    let committedText = '';
     let finalText = '';
     let streamFailure: unknown;
     let releaseStop: (() => void) | null = null;
@@ -135,7 +135,14 @@ export class WhisperCommandService {
           vadDetectionMargin: ENDPOINT_SILENCE_MS,
           timeout: 100,
         })) {
-          finalText = combineTranscription(result.committed, result.nonCommitted);
+          const committed = result.committed.text || '';
+          const provisional = result.nonCommitted.text || '';
+          // ExecuTorch emits committed deltas, not the full transcript. Only
+          // the provisional tail is replaced. Empty final flushes must not
+          // erase words already recognized during this capture.
+          if (!committed.trim() && !provisional.trim()) {continue;}
+          committedText = combineTranscription(committedText, committed);
+          finalText = combineTranscription(committedText, provisional);
           if (finalText) {onPartial?.(finalText);}
         }
       } catch (error) {
@@ -236,10 +243,10 @@ export class WhisperCommandService {
 }
 
 function combineTranscription(
-  committed: TranscriptionResult,
-  nonCommitted: TranscriptionResult,
+  committed: string,
+  nonCommitted: string,
 ): string {
-  return `${committed.text || ''} ${nonCommitted.text || ''}`.replace(/\s+/g, ' ').trim();
+  return `${committed} ${nonCommitted}`.replace(/\s+/g, ' ').trim();
 }
 
 function resampleTo16k(input: Float32Array, sourceRate: number): Float32Array {

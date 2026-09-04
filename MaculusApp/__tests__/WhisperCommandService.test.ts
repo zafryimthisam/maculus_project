@@ -16,6 +16,19 @@ describe('Whisper microphone handoff', () => {
   const originalOS = Platform.OS;
   let service: WhisperCommandService;
   let recording: boolean;
+  let stream: jest.Mock;
+  let stopStream: jest.Mock;
+
+  const update = (committed = '', nonCommitted = '') => ({
+    committed: {text: committed},
+    nonCommitted: {text: nonCommitted},
+  });
+
+  function queueTranscriptions(...updates: ReturnType<typeof update>[]) {
+    stream.mockImplementationOnce(async function* () {
+      for (const result of updates) {yield result;}
+    });
+  }
   const recorder = {
     onAudioReady: jest.fn(),
     clearOnAudioReady: jest.fn(),
@@ -34,6 +47,8 @@ describe('Whisper microphone handoff', () => {
     // Keep the ExecuTorch model mock's factory implementation from jest.setup.
     const {SpeechToTextModule} = require('react-native-executorch');
     const module = new SpeechToTextModule();
+    stream = module.stream;
+    stopStream = module.streamStop;
     module.stream.mockReturnValue({
       [Symbol.asyncIterator]: () => ({next: async () => ({done: true})}),
     });
@@ -116,5 +131,85 @@ describe('Whisper microphone handoff', () => {
     expect(AudioManager.setAudioSessionOptions).not.toHaveBeenCalled();
     expect(AudioManager.setAudioSessionActivity).not.toHaveBeenCalled();
     expect(recorder.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps recognized words when the final stream update is empty', async () => {
+    queueTranscriptions(
+      update('', 'What is around me?'),
+      update('What is around me?'),
+      update(),
+    );
+    const onPartial = jest.fn();
+    await expect(service.listenForCommandOnce(1000, onPartial)).resolves.toEqual({
+      text: 'What is around me?', confidence: null,
+    });
+    expect(onPartial).toHaveBeenLastCalledWith('What is around me?');
+    expect(onPartial).not.toHaveBeenCalledWith('');
+  });
+
+  it('accumulates committed deltas across speech segments', async () => {
+    queueTranscriptions(
+      update('', 'What is around me?'),
+      update('What is around me?'),
+      update('', 'Describe the door.'),
+      update('Describe the door.'),
+      update(),
+    );
+    await expect(service.listenForCommandOnce(1000)).resolves.toEqual({
+      text: 'What is around me? Describe the door.', confidence: null,
+    });
+  });
+
+  it('replaces provisional words without duplicating them when committed', async () => {
+    queueTranscriptions(
+      update('Please', 'describe the floor'),
+      update('', 'describe the door'),
+      update('describe the door.'),
+    );
+    const onPartial = jest.fn();
+    await expect(service.listenForCommandOnce(1000, onPartial)).resolves.toEqual({
+      text: 'Please describe the door.', confidence: null,
+    });
+    expect(onPartial.mock.calls.map(([text]) => text)).toEqual([
+      'Please describe the floor', 'Please describe the door', 'Please describe the door.',
+    ]);
+  });
+
+  it('preserves the latest provisional text across empty updates', async () => {
+    queueTranscriptions(update('', 'Turn left.'), update('', ' \n '));
+    await expect(service.listenForCommandOnce(1000)).resolves.toEqual({
+      text: 'Turn left.', confidence: null,
+    });
+  });
+
+  it('preserves intentional repetition in committed deltas', async () => {
+    queueTranscriptions(update('go'), update('go'), update('stop'));
+    await expect(service.listenForCommandOnce(1000)).resolves.toEqual({
+      text: 'go go stop', confidence: null,
+    });
+  });
+
+  it('waits for the final committed tail after stopping the recorder', async () => {
+    let finishStream!: () => void;
+    const stopped = new Promise<void>(resolve => {finishStream = resolve;});
+    stopStream.mockImplementationOnce(finishStream);
+    stream.mockImplementationOnce(async function* () {
+      yield update('Please');
+      await stopped;
+      yield update('stop guidance.');
+    });
+    await expect(service.listenForCommandOnce(1000)).resolves.toEqual({
+      text: 'Please stop guidance.', confidence: null,
+    });
+    expect(stopStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not leak previous words into a later silent capture', async () => {
+    queueTranscriptions(update('Start guidance.'));
+    await expect(service.listenForCommandOnce(1000)).resolves.toEqual({
+      text: 'Start guidance.', confidence: null,
+    });
+    queueTranscriptions(update(), update(' \n ', '  '));
+    await expect(service.listenForCommandOnce(1000)).resolves.toBeNull();
   });
 });
