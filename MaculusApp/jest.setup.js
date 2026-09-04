@@ -26,9 +26,11 @@ jest.mock('react-native-audio-api', () => ({
   AudioManager: {
     checkRecordingPermissions: jest.fn().mockResolvedValue('Granted'),
     requestRecordingPermissions: jest.fn().mockResolvedValue('Granted'),
+    setAudioSessionOptions: jest.fn(),
+    setAudioSessionActivity: jest.fn().mockResolvedValue(undefined),
   },
   AudioRecorder: class MockAudioRecorder {
-    onAudioReady = jest.fn();
+    onAudioReady = jest.fn().mockReturnValue({status: 'success'});
     clearOnAudioReady = jest.fn();
     onError = jest.fn();
     clearOnError = jest.fn();

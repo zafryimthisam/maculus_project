@@ -4,6 +4,7 @@ import {
   type TranscriptionResult,
 } from 'react-native-executorch';
 import { AudioManager, AudioRecorder } from 'react-native-audio-api';
+import { Platform } from 'react-native';
 
 export type WhisperCommandState = {
   state: 'starting' | 'downloading' | 'ready' | 'listening' | 'error';
@@ -97,6 +98,19 @@ export class WhisperCommandService {
       ? permission
       : await AudioManager.requestRecordingPermissions();
     if (granted !== 'Granted') {throw new Error('Microphone permission is required for voice commands.');}
+
+    if (Platform.OS === 'ios') {
+      // Audio API defaults to playback-only and reasserts its own session when
+      // starting the engine, overriding the native wake listener's settings.
+      // Configure it on every handoff, after the activation cue has finished.
+      AudioManager.setAudioSessionOptions({
+        iosCategory: 'playAndRecord',
+        iosMode: 'measurement',
+        iosOptions: ['defaultToSpeaker', 'allowBluetoothHFP', 'duckOthers'],
+        iosAllowHaptics: true,
+      });
+      await AudioManager.setAudioSessionActivity(true);
+    }
 
     const recorder = new AudioRecorder();
     let stopped = false;
