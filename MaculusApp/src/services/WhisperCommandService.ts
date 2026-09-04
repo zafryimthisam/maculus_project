@@ -2,7 +2,7 @@ import {
   models,
   SpeechToTextModule,
 } from 'react-native-executorch';
-import { AudioManager, AudioRecorder, decodeAudioData } from 'react-native-audio-api';
+import { AudioManager, AudioRecorder, decodeAudioData, type AudioBuffer } from 'react-native-audio-api';
 import { Platform } from 'react-native';
 
 export type WhisperCommandState = {
@@ -198,11 +198,11 @@ export class WhisperCommandService {
         if (stopped) {return;}
         try {
           if (buffer.sampleRate <= 0) {throw new Error('Microphone returned an invalid sample rate.');}
-          const input = buffer.getChannelData(0);
+          const input = copyMonoSamples(buffer);
           if (input.length === 0) {return;}
           // Native buffers can be reused after a callback. Own this bounded
           // copy so the no-VAD retry sees the original microphone samples.
-          const samples = new Float32Array(resampleTo16k(input, buffer.sampleRate));
+          const samples = resampleTo16k(input, buffer.sampleRate);
           if (samples.some(sample => !Number.isFinite(sample))) {
             throw new Error('Microphone returned invalid audio samples.');
           }
@@ -326,7 +326,7 @@ export class WhisperCommandService {
       message: 'Testing Whisper with bundled speech. No microphone or network is used…'});
     try {
       const audio = await decodeAudioData(require('../assets/whisper-self-test.wav'), TARGET_SAMPLE_RATE);
-      const waveform = new Float32Array(audio.getChannelData(0).subarray(0, TARGET_SAMPLE_RATE * 8));
+      const waveform = copyMonoSamples(audio, TARGET_SAMPLE_RATE * 8);
       const result = await this.module.transcribe(waveform);
       const text = result.text?.trim() || '';
       const matched = ['fellow', 'americans', 'country'].filter(word => text.toLowerCase().includes(word));
@@ -366,6 +366,22 @@ export class WhisperCommandService {
 
 function audioLevel(rms: number): string {
   return (20 * Math.log10(Math.max(rms, 0.000001))).toFixed(0);
+}
+
+function copyMonoSamples(
+  buffer: Pick<AudioBuffer, 'length' | 'copyFromChannel'>,
+  maxSamples: number = buffer.length,
+): Float32Array {
+  // getChannelData() constructs jsi::ArrayBuffer(MutableBuffer), which the
+  // community JSC 0.2.0 adapter leaves unimplemented. A JS-owned destination
+  // uses its supported ArrayBuffer data/size accessors instead. Keep the
+  // destination a full array (not a view with an offset) for Audio API 0.13.3.
+  if (!Number.isSafeInteger(buffer.length) || buffer.length < 0) {
+    throw new Error('Audio buffer returned an invalid sample count.');
+  }
+  const samples = new Float32Array(Math.min(buffer.length, maxSamples));
+  if (samples.length > 0) {buffer.copyFromChannel(samples, 0);}
+  return samples;
 }
 
 function combineTranscription(

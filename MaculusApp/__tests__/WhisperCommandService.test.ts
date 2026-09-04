@@ -31,10 +31,22 @@ describe('Whisper microphone handoff', () => {
       for (const result of updates) {yield result;}
     });
   }
+  function nativeAudio(samples: Float32Array, sampleRate = 16000) {
+    return {
+      length: samples.length,
+      sampleRate,
+      // Match the JSC adapter's unsupported native-backed ArrayBuffer path.
+      getChannelData: jest.fn(() => {throw new Error('Exception in HostFunction: Not implemented');}),
+      copyFromChannel: jest.fn((destination: Float32Array, channel: number) => {
+        expect(channel).toBe(0);
+        destination.set(samples.subarray(0, destination.length));
+      }),
+    };
+  }
   function feedAudio(samples: Float32Array, sampleRate = 16000) {
     const calls = recorder.onAudioReady.mock.calls;
     const callback = calls[calls.length - 1][1];
-    callback({buffer: {sampleRate, getChannelData: () => samples}});
+    callback({buffer: nativeAudio(samples, sampleRate)});
   }
 
   function captureAudio(samples: Float32Array, sampleRate = 16000) {
@@ -319,15 +331,16 @@ describe('Whisper microphone handoff', () => {
   });
 
   it('runs a known-speech self-test without opening the microphone', async () => {
-    jest.mocked(decodeAudioData).mockResolvedValueOnce({
-      getChannelData: () => new Float32Array(16000 * 11).fill(0.03),
-    } as any);
+    const audio = nativeAudio(new Float32Array(16000 * 11).fill(0.03));
+    jest.mocked(decodeAudioData).mockResolvedValueOnce(audio as any);
     transcribe.mockResolvedValueOnce({text: 'And so my fellow Americans, ask not what your country can do for you.'});
     await service.runSelfTest();
     expect(service.getState().selfTest?.passed).toBe(true);
     expect(transcribe.mock.calls[0][0].length).toBe(16000 * 8);
     expect(AudioRecorder).not.toHaveBeenCalled();
     expect(AudioManager.checkRecordingPermissions).not.toHaveBeenCalled();
+    expect(audio.getChannelData).not.toHaveBeenCalled();
+    expect(audio.copyFromChannel).toHaveBeenCalledTimes(1);
   });
 
   it('reports self-test decoding failures without marking the model unloaded', async () => {
@@ -344,7 +357,7 @@ describe('Whisper microphone handoff', () => {
     const testing = service.runSelfTest();
     await expect(service.listenForCommandOnce(1000)).rejects.toThrow('already listening or processing');
     await expect(service.runSelfTest()).rejects.toThrow('Stop voice capture');
-    finishDecode({getChannelData: () => new Float32Array(32000)});
+    finishDecode(nativeAudio(new Float32Array(32000)));
     await testing;
     await expect(service.listenForCommandOnce(1000)).resolves.toBeNull();
   });

@@ -41,6 +41,17 @@ the last callback during stop.
 
 ## Device verification still required
 
+### JavaScriptCore sample-access compatibility
+
+The subsequent `Exception in HostFunction: Not implemented` was traced to
+Audio API's `AudioBufferHostObject::getChannelData`, which constructs a native-
+backed JSI ArrayBuffer. The community JavaScriptCore 0.2.0 adapter's
+`JSCRuntime::createArrayBuffer(MutableBuffer)` throws that exact exception.
+Live and self-test audio now use `copyFromChannel` into full JS-owned arrays.
+This uses JSC's implemented buffer read/write accessors, avoids a native
+runtime patch, and retains independent ownership of the microphone samples.
+Tests make `getChannelData` throw to exercise this compatibility boundary.
+
 The earlier device log proves PlayAndRecord starts with mono 48 kHz input and a
 16 kHz converter, not that PCM reaches JS or that the model decodes speech.
 The previous transcript-accumulation fix is covered by tests, but did not fix
