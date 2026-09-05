@@ -183,5 +183,5 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   previewUpdatedAt: null,
   lastSpokenText: '',
   message: 'Ready to start',
-  privacyMessage: 'Camera, speech, scene memory, and conversation stay on this device.',
+  privacyMessage: 'Camera, speech, scene memory, conversation, and saved person names stay on this device.',
 };

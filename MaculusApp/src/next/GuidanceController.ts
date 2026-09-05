@@ -14,6 +14,7 @@ export class GuidanceController {
   private lastSpokenAt = 0;
   private lastNotice = '';
   private targetName = '';
+  private targetIdentityId: number | null = null;
   private needsVisualSelection = false;
   private identityUncertain = false;
   private selectionDeclined = false;
@@ -28,6 +29,7 @@ export class GuidanceController {
     this.lastSpokenAt = 0;
     this.lastNotice = '';
     this.targetName = '';
+    this.targetIdentityId = null;
     this.needsVisualSelection = false;
     this.identityUncertain = false;
     this.selectionDeclined = false;
@@ -59,7 +61,8 @@ export class GuidanceController {
     const entity = this.candidates(scene, !allowMoved).find(candidate => candidate.id === id);
     if (!entity) {return false;}
     this.targetId = id;
-    this.targetName = entity.label === 'person' ? 'The selected person' : `The ${entity.label}`;
+    this.targetIdentityId = entity.identityId ?? null;
+    this.targetName = entity.label === 'person' ? (entity.alias || 'The selected person') : `The ${entity.label}`;
     this.status = 'tracking';
     this.lastSeenAt = entity.lastSeenAt;
     this.lastZone = null;
@@ -95,9 +98,8 @@ export class GuidanceController {
 
   observe(scene: NextSceneSnapshot, now: number): void {
     if (this.targetId === null) {return;}
-    const target = scene.visibleEntities.find(e => e.id === this.targetId && now - e.lastSeenAt <= 1200);
+    const target = this.resolveTarget(scene, now);
     if (target) {
-      if (target.lastSeenAt - this.lastSeenAt > 5000) {this.identityUncertain = true;}
       if (!this.identityUncertain) {this.lastSeenAt = target.lastSeenAt;}
     }
     if (!target || this.identityUncertain) {this.status = 'lost';}
@@ -129,14 +131,13 @@ export class GuidanceController {
         return this.notice(text, now);
       }
     }
-    const target = fresh.find(entity => entity.id === this.targetId);
+    const target = this.resolveTarget({ ...scene, visibleEntities: fresh }, now);
     if (!target) {
       if (now - this.lastSeenAt < 1200) {return null;}
       this.status = 'lost';
       return this.notice(`${this.targetName} is out of view. Tracking paused.`, now, 'left');
     }
-    // After a long disappearance even a reused geometry ID is insufficient evidence.
-    if (this.identityUncertain || target.lastSeenAt - this.lastSeenAt > 5000) {
+    if (this.identityUncertain) {
       this.status = 'lost';
       return this.notice(`I can't confirm this is the same target. Ask me to find it again.`, now, 'left');
     }
@@ -149,6 +150,17 @@ export class GuidanceController {
     this.lastZone = target.zone;
     const text = `${this.targetName}${recovered ? ' is back in view' : initial ? ' is' : ' is now'} ${position(target)}.${initial ? ' I’ll keep track of it.' : ''}`;
     return this.notice(text, now, 'moved', true);
+  }
+
+  private resolveTarget(scene: NextSceneSnapshot, now: number): NextSceneEntity | undefined {
+    let target = scene.visibleEntities.find(entity => entity.id === this.targetId && now - entity.lastSeenAt <= 1200);
+    if (!target && this.targetIdentityId !== null) {
+      target = scene.visibleEntities.find(entity =>
+        entity.identityId === this.targetIdentityId && now - entity.lastSeenAt <= 1200,
+      );
+      if (target) {this.targetId = target.id;}
+    }
+    return target;
   }
 
   private notice(text: string, now: number, kind: SceneChange['kind'] = 'entered', repeat = false): SceneChange | null {

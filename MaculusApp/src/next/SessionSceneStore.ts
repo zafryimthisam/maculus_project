@@ -5,8 +5,9 @@ import {
   SceneChange,
   SceneObservation,
 } from './domain';
+import { KnownPersonProfile, normalizePersonName } from '../services/KnownPersonService';
 
-type Identity = { id: number; alias: string; embedding?: number[]; samples: number };
+type Identity = { id: number; alias: string; embedding?: number[]; samples: number; persistent: boolean };
 type InternalTrack = NextSceneEntity & {
   hits: number;
   misses: number;
@@ -21,6 +22,7 @@ type InternalTrack = NextSceneEntity & {
   lastDetectionCx: number;
   lastDetectionCy: number;
   embedding?: number[];
+  lastEmbedding?: number[];
   wasInPath: boolean;
 };
 
@@ -36,6 +38,7 @@ const NEW_TRACK_SCORE = 0.5;
 const OCCLUSION_AFTER_MS = 1200;
 const OCCLUSION_AFTER_MISSES = 3;
 const ACTIVE_MATCH_MS = 5000;
+const OBJECT_REACQUIRE_MS = 30 * 60 * 1000;
 const CAMERA_MOTION_MIN_DELTA = 0.025;
 const CAMERA_MOTION_MAX_RESIDUAL = 0.03;
 const CAMERA_MOTION_SUPPRESS_MS = 1200;
@@ -43,6 +46,7 @@ const MOVEMENT_THRESHOLD = 0.18;
 const MOVEMENT_CONFIRM_FRAMES = 3;
 const PATH_CONFIRM_FRAMES = 3;
 const PERSON_REID_SIMILARITY = 0.82;
+const KNOWN_PERSON_REID_SIMILARITY = 0.86;
 const MAX_SESSION_TRACKS = 256;
 const DEFAULT_ALIASES = [
   'Alex', 'Sam', 'Jordan', 'Casey', 'Taylor', 'Robin', 'Morgan', 'Jamie',
@@ -63,6 +67,7 @@ export class SessionSceneStore {
   private cameraOffsetX = 0;
   private cameraMotionSuppressUntil = 0;
   private aliases: string[];
+  private knownPeople: KnownPersonProfile[] = [];
 
   constructor(aliases: string[] = shuffled(DEFAULT_ALIASES)) {
     this.aliases = aliases.length > 0 ? [...aliases] : [...DEFAULT_ALIASES];
@@ -81,6 +86,64 @@ export class SessionSceneStore {
     this.pendingPathFrames = 0;
     this.cameraOffsetX = 0;
     this.cameraMotionSuppressUntil = 0;
+    this.restoreKnownPeople();
+  }
+
+  setKnownPeople(profiles: KnownPersonProfile[]): void {
+    this.knownPeople = profiles.map(profile => ({ ...profile, embedding: normalize(profile.embedding) }));
+    this.identities.clear();
+    this.nextIdentityId = 1;
+    this.restoreKnownPeople();
+  }
+
+  rememberNearestPerson(nameValue: string, now: number = Date.now()):
+    { status: 'remembered'; profile: KnownPersonProfile; replaced: boolean } |
+    { status: 'no-person' | 'ambiguous' | 'no-embedding' | 'invalid-name' } {
+    const name = normalizePersonName(nameValue);
+    if (!name) {return { status: 'invalid-name' };}
+    const candidates = this.visibleConfirmed()
+      .filter(track => track.label === 'person' && now - track.lastSeenAt <= 1500 &&
+        track.cx >= 0.32 && track.cx <= 0.68 && (track.nearScore >= 0.5 || track.h >= 0.5))
+      .sort((a, b) => personEnrollmentScore(b) - personEnrollmentScore(a));
+    if (!candidates.length) {return { status: 'no-person' };}
+    if (candidates[1] && personEnrollmentScore(candidates[0]) - personEnrollmentScore(candidates[1]) < 0.12) {
+      return { status: 'ambiguous' };
+    }
+    const track = candidates[0];
+    if (!track.lastEmbedding) {return { status: 'no-embedding' };}
+    const key = name.toLocaleLowerCase();
+    const replaced = [...this.identities.values()].some(identity =>
+      identity.persistent && identity.alias.toLocaleLowerCase() === key,
+    );
+    let identity = track.identityId ? this.identities.get(track.identityId) : undefined;
+    for (const [id, existing] of this.identities) {
+      if (existing.persistent && existing.alias.toLocaleLowerCase() === key && id !== identity?.id) {
+        this.identities.delete(id);
+        for (const other of this.tracks.values()) {
+          if (other.identityId === id) {
+            other.identityId = undefined;
+            other.alias = this.nextAlias();
+          }
+        }
+      }
+    }
+    if (!identity) {
+      identity = { id: this.nextIdentityId++, alias: name, embedding: track.lastEmbedding, samples: 1, persistent: true };
+      this.identities.set(identity.id, identity);
+    }
+    identity.alias = name;
+    // Explicit enrollment replaces rather than blends. This lets the user
+    // repair a mistaken saved identity with the person currently in front.
+    identity.embedding = normalize(track.lastEmbedding);
+    identity.samples = Math.max(1, track.hits);
+    identity.persistent = true;
+    track.identityId = identity.id;
+    for (const other of this.tracks.values()) {
+      if (other.identityId === identity.id) {other.alias = name;}
+    }
+    const profile = { name, embedding: [...identity.embedding], samples: identity.samples, updatedAt: now };
+    this.knownPeople = [profile, ...this.knownPeople.filter(item => item.name.toLocaleLowerCase() !== key)];
+    return { status: 'remembered', profile, replaced };
   }
 
   update(observation: SceneObservation): NextSceneSnapshot {
@@ -213,12 +276,19 @@ export class SessionSceneStore {
       const similarity = detection.label === 'person' && embedding && track.embedding
         ? cosineSimilarity(embedding, track.embedding)
         : null;
-      if (age > ACTIVE_MATCH_MS && (similarity === null || similarity < PERSON_REID_SIMILARITY)) {continue;}
+      const longObjectReacquire = detection.label !== 'person' && track.confirmed &&
+        track.visibility === 'occluded' && age <= OBJECT_REACQUIRE_MS;
+      if (age > ACTIVE_MATCH_MS && !longObjectReacquire &&
+          (similarity === null || similarity < PERSON_REID_SIMILARITY)) {continue;}
       const centerDistance = Math.hypot(detection.cx - track.cx, detection.cy - track.cy);
       const overlap = iou(detection, track);
       if (similarity !== null && similarity < 0.55) {continue;}
-      if (similarity === null && overlap < 0.06 && centerDistance > 0.28) {continue;}
-      const score = overlap * 2 + Math.max(0, 1 - centerDistance * 2.5) + (similarity ?? 0) * 2.5;
+      if (!longObjectReacquire && similarity === null && overlap < 0.06 && centerDistance > 0.28) {continue;}
+      const shape = boxShapeSimilarity(detection, track);
+      if (longObjectReacquire && shape < 0.58) {continue;}
+      const score = longObjectReacquire
+        ? shape * 2 + Math.max(0, 1 - centerDistance) * 0.35
+        : overlap * 2 + Math.max(0, 1 - centerDistance * 2.5) + (similarity ?? 0) * 2.5 + 2;
       if (score > bestScore) {
         runnerUpScore = bestScore;
         bestScore = score;
@@ -265,6 +335,7 @@ export class SessionSceneStore {
       lastDetectionCx: detection.cx,
       lastDetectionCy: detection.cy,
       embedding,
+      lastEmbedding: embedding,
       wasInPath: inPath,
     };
     this.tracks.set(track.id, track);
@@ -326,6 +397,7 @@ export class SessionSceneStore {
     track.confirmed = track.hits >= (track.label === 'person' ? 3 : 2);
 
     if (embedding && track.label === 'person') {
+      track.lastEmbedding = embedding;
       track.embedding = track.embedding ? blend(track.embedding, embedding) : embedding;
       const identity = track.identityId ? this.identities.get(track.identityId) : this.resolveIdentity(embedding);
       if (identity) {
@@ -393,21 +465,27 @@ export class SessionSceneStore {
     if (embedding) {
       let best: Identity | null = null;
       let bestSimilarity = PERSON_REID_SIMILARITY;
+      let runnerUpSimilarity = -1;
       for (const identity of this.identities.values()) {
         if (!identity.embedding) {continue;}
         const similarity = cosineSimilarity(embedding, identity.embedding);
-        if (similarity > bestSimilarity) {
+        const threshold = identity.persistent ? KNOWN_PERSON_REID_SIMILARITY : PERSON_REID_SIMILARITY;
+        if (similarity >= threshold && similarity > bestSimilarity) {
+          runnerUpSimilarity = bestSimilarity;
           bestSimilarity = similarity;
           best = identity;
+        } else if (similarity > runnerUpSimilarity) {
+          runnerUpSimilarity = similarity;
         }
       }
-      if (best) {return best;}
+      if (best && bestSimilarity - runnerUpSimilarity >= 0.025) {return best;}
     }
     const identity: Identity = {
       id: this.nextIdentityId++,
       alias: this.nextAlias(),
       embedding,
       samples: embedding ? 1 : 0,
+      persistent: false,
     };
     this.identities.set(identity.id, identity);
     return identity;
@@ -477,8 +555,18 @@ export class SessionSceneStore {
       if (this.tracks.size <= MAX_SESSION_TRACKS) {break;}
       this.tracks.delete(track.id);
       if (track.identityId && ![...this.tracks.values()].some(other => other.identityId === track.identityId)) {
-        this.identities.delete(track.identityId);
+        const identity = this.identities.get(track.identityId);
+        if (!identity?.persistent) {this.identities.delete(track.identityId);}
       }
+    }
+  }
+
+  private restoreKnownPeople(): void {
+    for (const profile of this.knownPeople) {
+      this.identities.set(this.nextIdentityId, {
+        id: this.nextIdentityId++, alias: profile.name, embedding: normalize(profile.embedding),
+        samples: profile.samples, persistent: true,
+      });
     }
   }
 }
@@ -534,6 +622,20 @@ function isInPath(box: Pick<Detection, 'cx' | 'w' | 'cy' | 'h'>): boolean {
 
 function visualNear(entity: Pick<NextSceneEntity, 'nearScore' | 'h'>): boolean {
   return entity.nearScore >= 0.7 || entity.h >= 0.55;
+}
+
+function personEnrollmentScore(track: InternalTrack): number {
+  return track.nearScore + track.w * track.h - Math.abs(track.cx - 0.5) * 1.5 + Number(track.inPath) * 0.2;
+}
+
+function boxShapeSimilarity(a: Pick<Detection, 'w' | 'h'>, b: Pick<NextSceneEntity, 'w' | 'h'>): number {
+  const aspectA = a.w / Math.max(0.01, a.h);
+  const aspectB = b.w / Math.max(0.01, b.h);
+  const areaA = Math.max(0.001, a.w * a.h);
+  const areaB = Math.max(0.001, b.w * b.h);
+  const aspect = Math.min(aspectA, aspectB) / Math.max(aspectA, aspectB);
+  const area = Math.min(areaA, areaB) / Math.max(areaA, areaB);
+  return aspect * 0.6 + area * 0.4;
 }
 
 function iou(a: Pick<Detection, 'cx' | 'cy' | 'w' | 'h'>, b: Pick<NextSceneEntity, 'cx' | 'cy' | 'w' | 'h'>): number {

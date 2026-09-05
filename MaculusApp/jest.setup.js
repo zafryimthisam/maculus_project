@@ -1,6 +1,12 @@
 /* eslint-env jest */
 import { NativeModules } from 'react-native';
 
+jest.mock('@dr.pogodin/react-native-fs', () => ({
+  DocumentDirectoryPath: '/mock-documents',
+  readFile: jest.fn().mockRejectedValue(Object.assign(new Error('missing'), {code: 'ENOENT'})),
+  writeFile: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock('react-native-executorch', () => ({
   models: {
     speech_to_text: { whisper_tiny_en: jest.fn(() => ({modelName: 'whisper-tiny-en'})) },

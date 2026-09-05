@@ -1,6 +1,7 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import {
   detectorLabelsForGoal,
+  extractRememberPersonName,
   extractGuidanceGoal,
   MaculusRuntime,
 } from '../src/next/MaculusRuntime';
@@ -164,6 +165,15 @@ describe('MaculusNext runtime emergency AI interruption', () => {
     expect(extractGuidanceGoal('Take me towards a place to sit')).toBe('place to sit');
     expect(detectorLabelsForGoal('place to sit')).toEqual(['chair', 'bench', 'couch']);
     expect(detectorLabelsForGoal('entrance')).toEqual([]);
+  });
+
+  it.each([
+    ['Hey LiveKit remember this person as Zafry', 'Zafry'],
+    ['remember him as zafry please', 'Zafry'],
+    ['save this person named Mary Jane', 'Mary Jane'],
+    ['her name is Ana', 'Ana'],
+  ])('extracts a natural remembered-person request: %s', (text, name) => {
+    expect(extractRememberPersonName(text)).toBe(name);
   });
 });
 

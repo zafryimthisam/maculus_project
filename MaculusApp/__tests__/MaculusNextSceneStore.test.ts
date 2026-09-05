@@ -89,6 +89,65 @@ describe('MaculusNext SessionSceneStore', () => {
     expect(hidden.entities[0]).toMatchObject({ label: 'chair', visibility: 'occluded', confirmed: true });
   });
 
+  it('reacquires a unique chair after a long camera-away cycle', () => {
+    const store = new SessionSceneStore(['Alex']);
+    store.update({ frameKey: 'chair-a', timestamp: 100, detections: [detection('chair', 0.2)] });
+    const seen = store.update({ frameKey: 'chair-b', timestamp: 200, detections: [detection('chair', 0.2)] });
+    const id = seen.visibleEntities[0].id;
+    store.update({ frameKey: 'away', timestamp: 3000, detections: [] });
+    const returned = store.update({ frameKey: 'back', timestamp: 45000, detections: [detection('chair', 0.78)] });
+    expect(returned.visibleEntities[0]).toMatchObject({ id, label: 'chair', visibility: 'visible' });
+  });
+
+  it('does not choose between equally plausible old chairs after a long gap', () => {
+    const store = new SessionSceneStore(['Alex']);
+    store.update({ frameKey: 'chairs-a', timestamp: 100, detections: [detection('chair', 0.2), detection('chair', 0.8)] });
+    store.update({ frameKey: 'chairs-b', timestamp: 200, detections: [detection('chair', 0.2), detection('chair', 0.8)] });
+    const oldIds = store.getSnapshot(200).visibleEntities.map(item => item.id);
+    store.update({ frameKey: 'chairs-away', timestamp: 3000, detections: [] });
+    const returned = store.update({ frameKey: 'one-chair-back', timestamp: 45000, detections: [detection('chair', 0.5)] });
+    expect(oldIds).not.toContain(returned.entities[0].id);
+  });
+
+  it('keeps a named ReID profile across reset and replaces its old enrollment', () => {
+    const store = new SessionSceneStore(['Alex', 'Sam']);
+    store.setKnownPeople([{ name: 'Zafry', embedding: [1, 0, 0], samples: 3, updatedAt: 1 }]);
+    for (let frame = 1; frame <= 3; frame += 1) {
+      store.update({
+        frameKey: `known:${frame}`, timestamp: frame * 100,
+        detections: [detection('person', 0.5)],
+        personEmbeddings: [{ detectionIndex: 0, embedding: [0.99, 0.01, 0] }],
+      });
+    }
+    expect(store.getSnapshot(300).visibleEntities[0].alias).toBe('Zafry');
+    const replacement = store.rememberNearestPerson('Zafry', 300);
+    expect(replacement).toMatchObject({ status: 'remembered', replaced: true });
+    store.reset();
+    for (let frame = 1; frame <= 3; frame += 1) {
+      store.update({
+        frameKey: `new-session:${frame}`, timestamp: 1000 + frame * 100,
+        detections: [detection('person', 0.5)],
+        personEmbeddings: [{ detectionIndex: 0, embedding: [0.99, 0.01, 0] }],
+      });
+    }
+    expect(store.getSnapshot(1300).visibleEntities[0].alias).toBe('Zafry');
+  });
+
+  it('replaces a wrong saved embedding with the current raw ReID observation', () => {
+    const store = new SessionSceneStore(['Alex']);
+    store.setKnownPeople([{ name: 'Zafry', embedding: [1, 0, 0], samples: 3, updatedAt: 1 }]);
+    for (let frame = 1; frame <= 3; frame += 1) {
+      store.update({
+        frameKey: `actual:${frame}`, timestamp: frame * 100,
+        detections: [detection('person', 0.5)],
+        personEmbeddings: [{ detectionIndex: 0, embedding: [0, 1, 0] }],
+      });
+    }
+    const result = store.rememberNearestPerson('Zafry', 300);
+    expect(result).toMatchObject({ status: 'remembered', replaced: true });
+    if (result.status === 'remembered') {expect(result.profile.embedding).toEqual([0, 1, 0]);}
+  });
+
   it('keeps a confirmed box through brief detector dropouts without track churn', () => {
     const store = new SessionSceneStore(['Alex']);
     store.update({ frameKey: 'chair-1', timestamp: 100, detections: [detection('chair', 0.25)] });

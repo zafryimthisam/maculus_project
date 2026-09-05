@@ -71,7 +71,7 @@ describe('Persistent target guidance', () => {
     expect(guide.next(next, 16000)).toBeNull();
     expect(guide.targetId).toBe(1);
   });
-  it('recovers short occlusions but refuses reused IDs after a long gap', () => {
+  it('recovers the same persistent track after both short and long occlusions', () => {
     const guide = new GuidanceController();
     guide.start('chair');
     guide.next(scene([entity(1)]), 10000);
@@ -80,10 +80,13 @@ describe('Persistent target guidance', () => {
     const recovered = scene([entity(1, 'chair', 'left', 14000)], 14000);
     guide.observe(recovered, 14000);
     expect(guide.next(recovered, 14000)?.text).toContain('back in view');
-    const uncertain = scene([entity(1, 'chair', 'left', 24000)], 24000);
-    guide.observe(uncertain, 24000);
-    expect(guide.next(uncertain, 24000)?.text).toContain("can't confirm");
-    expect(guide.status).toBe('lost');
+    const missing = scene([], 22000);
+    guide.observe(missing, 22000);
+    guide.next(missing, 22000);
+    const persistent = scene([entity(1, 'chair', 'right', 24000)], 24000);
+    guide.observe(persistent, 24000);
+    expect(guide.next(persistent, 24000)?.text).toContain('back in view');
+    expect(guide.status).toBe('tracking');
   });
   it('keeps tracking observations fresh through a long AI answer without consuming cues', () => {
     const guide = new GuidanceController();

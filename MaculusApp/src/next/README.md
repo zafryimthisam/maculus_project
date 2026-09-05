@@ -12,8 +12,9 @@ MaculusNext is the clean runtime and the default application entry registered by
   guidance. Ambient object narration is suppressed while a conversational
   answer is speaking. Emergency sensor speech interrupts lower-priority output.
 - `SessionSceneStore` owns temporal scene state, duplicate-frame rejection,
-  object occlusion and random person aliases. Its memory is erased on session
-  stop.
+  object occlusion and person ReID. Temporary scene geometry and unnamed aliases
+  are erased on session stop. Explicitly named person embeddings are stored in
+  app-private on-device storage and loaded into the next session.
 - `ConversationService` uses the optional LFM2.5-VL-1.6B model for detailed
   on-demand descriptions of a recent frame. It grounds the prompt with tracked
   objects, rejects generated mobility instructions, and falls back to the
@@ -94,7 +95,10 @@ Natural visual requests such as “find a place to sit” use the same recent ca
 frame and ask the VLM to report whether a likely match is visible and where it
 appears in the image. Anonymous person names supplied by `SessionSceneStore` are
 merged into the answer if the VLM omits them, so names remain stable for the
-session without claiming a real identity.
+session without claiming a real identity. Saying “remember this person as Zafry”,
+“remember him as Zafry”, or similar wording explicitly enrolls the single near,
+centered person using OSNet ReID. Reusing a saved name replaces its previous
+embedding, allowing a mistaken enrollment to be corrected.
 
 Every non-control spoken utterance is sent to the camera-aware VLM, including a
 phrase that the fast parser recognizes as “describe scene.” Detector snapshots
@@ -157,6 +161,13 @@ presented as continuously detector-tracked. Monocular vision and a forward
 ultrasonic sensor cannot verify route length or object-specific metres, so the
 runtime continues to reject invented exact distances and unverified “walk” or
 “path is safe” instructions.
+
+Confirmed object tracks remain in session memory for camera-away/camera-back
+reacquisition. A unique compatible object can regain its original track ID for
+up to thirty minutes; similar competing objects are treated as ambiguous instead
+of silently taking ownership of the goal. OSNet is person-specific, so object
+reacquisition uses detector class and box-shape history rather than pretending a
+person model can identify chairs.
 
 ## Sensor response contract
 

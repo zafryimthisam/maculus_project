@@ -1,9 +1,11 @@
-# Temporary person ReID model
+# On-device person ReID model
 
-Maculus uses `person_reid_osnet_x0_25.onnx` only to keep anonymous person
-tracks stable during one live-guidance session. It analyzes full-body clothing
-and appearance crops; it is not face recognition, and embeddings are never
-written to storage.
+Maculus uses `person_reid_osnet_x0_25.onnx` to keep person tracks stable and to
+recognize names the user explicitly asks it to remember. It analyzes full-body
+clothing and appearance crops; it is not face recognition. Unnamed embeddings
+remain session-only. Explicitly enrolled, normalized embeddings and their names
+are written to app-private on-device storage and can be replaced by enrolling the
+same name again.
 
 - Architecture: OSNet x0.25, 512-D feature output, 256×128 RGB input
 - Checkpoint: `osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth`

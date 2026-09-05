@@ -19,8 +19,10 @@ requests with appearance constraints still need visual review. “The other one�
 “the one on the left”, and “look again” refine the active request.
 
 Tracking preserves that instance, reports direction changes, and periodically
-refreshes its position. A missing or uncertain target pauses tracking; another
-object is not automatically substituted. Switching cameras invalidates an existing
+refreshes its position. A missing target pauses tracking and automatically resumes
+when the same retained session track returns. Unique objects can be reacquired
+after a camera-away/camera-back cycle using class and box-shape history; ambiguous
+similar objects are not silently substituted. Switching cameras invalidates an existing
 lock. Say “I'm seated”, “found it”, or “stop tracking” to end the goal. Repeating
 guidance uses the current observation. Tracking never declares arrival based on
 bounding-box size.
@@ -55,8 +57,9 @@ keeps its 250 ms interval during analysis. These intervals exclude inference tim
 
 ## Memory and model lifecycle
 
-Startup retains the detector and speech stack, not all optional vision models.
-Detailed vision loads on request; OSNet loads only for a person-tracking goal.
+Startup retains the detector, speech stack, and OSNet ReID, so every visible
+person can keep a stable session identity and match an explicitly saved name.
+Detailed vision still loads only on request.
 Optional monocular depth is no longer automatically loaded in MaculusNext;
 geometry-based near scores and the independent ultrasonic safety channel remain.
 The VLM uses a 256-token logical batch, 64-token physical microbatch, and a
@@ -72,6 +75,14 @@ temporary camera/inference objects, and old occluded person tracks and their
 unused embeddings now participate in the session memory cap.
 These address allocation pressure found in the code; they are not a measured
 guarantee against iOS memory termination on every device.
+
+An explicit phrase such as “remember this person as Zafry”, “remember him as
+Zafry”, or “save this person named Zafry” stores the near, centered person's
+normalized OSNet embedding in app-private storage. The name survives sessions.
+Enrolling the same name again replaces the prior embedding instead of blending
+it, which provides a spoken correction path for mistaken enrollment. If two near
+people are similarly plausible, enrollment is refused and the user is asked to
+face one person.
 
 ## Manual iPhone checks
 

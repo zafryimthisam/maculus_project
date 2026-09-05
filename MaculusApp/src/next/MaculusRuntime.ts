@@ -15,6 +15,7 @@ import { deviceMotionService } from '../services/DeviceMotionService';
 import { keepAwakeService } from '../services/KeepAwakeService';
 import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { reIdService } from '../services/ReIdService';
+import { knownPersonService, normalizePersonName } from '../services/KnownPersonService';
 import { soundCueService } from '../services/SoundCueService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
 import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
@@ -28,7 +29,7 @@ import {
 import { SafetyCoordinator } from './SafetyCoordinator';
 import { SessionSceneStore } from './SessionSceneStore';
 import { SpeechCoordinator } from './SpeechCoordinator';
-import { AmbientGuide, detectorLabelsForGoal, extractGuidanceGoal, GuidanceController } from './GuidanceController';
+import { AmbientGuide, extractGuidanceGoal, GuidanceController } from './GuidanceController';
 export { extractGuidanceGoal, detectorLabelsForGoal } from './GuidanceController';
 
 type RuntimeListener = (state: NextRuntimeState) => void;
@@ -184,6 +185,7 @@ export class MaculusRuntime {
       this.piDiscoveryLoop(generation)
         .catch(error => console.warn('[MaculusNext] Pi discovery failed:', error));
       this.prepareModelAssets().catch(error => console.warn('[MaculusNext] Model status failed:', error));
+      const identityReady = Promise.all([knownPersonService.load(), reIdService.loadModel()]);
       let detectorReady = false;
       let deviceCameraReady = false;
       let visionBackend = 'unavailable';
@@ -201,6 +203,8 @@ export class MaculusRuntime {
       } catch (error: any) {
         console.warn('[MaculusNext] Phone fallback camera startup failed:', error?.message || error);
       }
+      const [knownPeople] = await identityReady;
+      this.scene.setKnownPeople(knownPeople);
       if (!this.running || generation !== this.generation) {
         await this.cleanupServices();
         return;
@@ -269,7 +273,7 @@ export class MaculusRuntime {
 
   async stop(): Promise<void> {
     if (!this.running && this.state.phase === 'idle') {return;}
-    this.update({ phase: 'stopping', message: 'Ending session and clearing private memory…' });
+    this.update({ phase: 'stopping', message: 'Ending session and clearing temporary scene memory…' });
     this.running = false;
     this.generation += 1;
     this.assistantGeneration += 1;
@@ -734,8 +738,7 @@ export class MaculusRuntime {
     detections: Detection[],
     now: number,
   ): Promise<PersonEmbedding[]> => {
-    if (!reIdService.isReady() && this.activeGuidanceGoal &&
-        detectorLabelsForGoal(this.activeGuidanceGoal).includes('person')) {
+    if (!reIdService.isReady()) {
       await reIdService.loadModel();
     }
     if (!reIdService.isReady() || now - this.lastReIdAt < REID_INTERVAL_MS) {return [];}
@@ -750,8 +753,8 @@ export class MaculusRuntime {
   };
 
   private initializeOptionalModels = async (generation: number): Promise<void> => {
-    // Keep YOLO + Whisper resident. Load the VLM on request and Re-ID only
-    // for a person goal; optional monocular depth must not crowd out voice/vision.
+    // Keep YOLO, Whisper, and Re-ID resident. Load the VLM on request; optional
+    // monocular depth must not crowd out voice/vision.
     await this.prepareModelAssets();
     if (!this.running || generation !== this.generation) {
       await this.conversation.destroy();
@@ -800,6 +803,39 @@ export class MaculusRuntime {
       return;
     }
     const text = turn.transcript.trim().replace(/’/g, "'");
+    const rememberName = extractRememberPersonName(text);
+    if (rememberName) {
+      const result = this.scene.rememberNearestPerson(rememberName, Date.now());
+      if (result.status === 'remembered') {
+        try {
+          await knownPersonService.replace(result.profile);
+          this.publishScene(this.scene.getSnapshot(), this.state.fps);
+          this.speech.speakConversation(
+            result.replaced
+              ? `Okay. I replaced the previous ${result.profile.name} and will remember this person as ${result.profile.name}.`
+              : `Okay. I’ll remember this person as ${result.profile.name}.`,
+            `remember-person:${turn.timestamp}`,
+          );
+        } catch (error: any) {
+          console.warn('[KnownPeople] Could not save identity:', error?.message || error);
+          this.speech.speakConversation(
+            'I recognized the person, but could not save the name on this device.',
+            `remember-person:${turn.timestamp}`,
+          );
+        }
+      } else {
+        const feedback = result.status === 'no-person'
+          ? 'I need one person standing near and directly ahead before I can remember a name.'
+          : result.status === 'ambiguous'
+          ? 'I see more than one nearby person ahead. Please face the person you want me to remember and try again.'
+          : result.status === 'no-embedding'
+          ? 'I can see the person, but I need another moment for a reliable identity reading. Please try again.'
+          : 'I did not catch a valid name. Please say, remember this person as, followed by the name.';
+        this.speech.speakConversation(feedback, `remember-person:${turn.timestamp}`);
+      }
+      this.update({ voiceDiagnostic: 'The remembered-person request was handled locally with on-device ReID.' });
+      return;
+    }
     if (this.activeGuidanceGoal && /^(?:(?:okay|ok|yes)[,.]?\s*)?(?:I(?:'m| am) (?:seated|sitting|done)|I(?:'ve| have) (?:found it|arrived)|found it|we(?:'re| are) there|stop tracking|stop following|cancel(?: that)?|never mind|that's enough)[.!?]*$/i.test(text)) {
       this.handleFastCommand('cancel_goal');
       return;
@@ -1009,6 +1045,20 @@ export class MaculusRuntime {
     this.state = { ...this.state, ...patch };
     this.listeners.forEach(listener => listener(this.state));
   }
+}
+
+export function extractRememberPersonName(transcript: string): string | null {
+  const normalized = transcript.replace(/[’]/g, "'").replace(/\s+/g, ' ').trim();
+  const patterns = [
+    /\b(?:remember|save|store|learn)\s+(?:this\s+)?(?:person|man|woman|guy|him|her|them)\s+(?:as|called|named|is)\s+(.+?)[.!?]*$/i,
+    /\b(?:remember|save|store)\s+(?:the\s+)?(?:name\s+)?(.+?)\s+(?:for|as)\s+(?:this\s+)?(?:person|man|woman|guy|him|her|them)[.!?]*$/i,
+    /\b(?:his|her|their|this person's)\s+name\s+is\s+(.+?)[.!?]*$/i,
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (match) {return normalizePersonName(match[1].replace(/\s+please$/i, ''));}
+  }
+  return null;
 }
 
 function capturedFrameKey(frame: CapturedFrame): string {
