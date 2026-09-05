@@ -188,11 +188,13 @@ export class AmbientGuide {
   private announced = new Map<number, number>();
   private lastSpokenAt = 0;
   private lastPathWarningAt = 0;
+  private recentCues: number[] = [];
 
-  reset(): void {this.announced.clear(); this.lastSpokenAt = 0; this.lastPathWarningAt = 0;}
+  reset(): void {
+    this.announced.clear(); this.lastSpokenAt = 0; this.lastPathWarningAt = 0; this.recentCues = [];
+  }
 
   next(scene: NextSceneSnapshot, now: number, goalActive: boolean = false): SceneChange | null {
-    if (now - this.lastSpokenAt < 3000) {return null;}
     const visible = scene.visibleEntities.filter(e => now - e.lastSeenAt <= 1200);
     if (scene.pathBlocked && visible.some(e => e.inPath) && now - this.lastPathWarningAt > 12000) {
       this.lastSpokenAt = now;
@@ -200,20 +202,29 @@ export class AmbientGuide {
       return { key: `path:${now}`, kind: 'path-blocked', text: 'Possible obstacle ahead. Pause.', timestamp: now, speak: true };
     }
     if (goalActive) {return null;}
+    this.recentCues = this.recentCues.filter(at => now - at < 30000);
+    if (now - this.lastSpokenAt < 6000 || this.recentCues.length >= 2) {return null;}
     const candidates = visible.filter(e => !this.announced.has(e.id))
-      .sort((a, b) => Number(b.inPath) - Number(a.inPath) || b.confidence - a.confidence);
+      .sort((a, b) => ambientImportance(b) - ambientImportance(a));
     if (candidates.length) {
-      // Two objects per cue keeps a busy outdoor scene understandable.
-      const chosen = candidates.slice(0, 2);
-      chosen.forEach(e => this.announced.set(e.id, now));
+      // Summarize this scene once; do not drain the rest as a spoken inventory.
+      const chosen = candidates.filter((e, index) =>
+        candidates.findIndex(other => other.label === e.label && other.zone === e.zone) === index).slice(0, 2);
+      visible.forEach(e => this.announced.set(e.id, now));
       this.lastSpokenAt = now;
+      this.recentCues.push(now);
       const text = chosen.map(e => `${e.label === 'person' ? 'Person' : e.label[0].toUpperCase() + e.label.slice(1)} ${position(e)}`).join('. ') + '.';
       return { key: `sighting:${chosen.map(e => e.id).join(':')}`, kind: 'entered', text, timestamp: now, speak: true };
     }
     const movement = scene.changes.find(c => c.kind === 'moved' && c.speak && visible.some(e => e.id === c.entityId));
-    if (movement) {this.lastSpokenAt = now; return movement;}
+    if (movement) {this.lastSpokenAt = now; this.recentCues.push(now); return movement;}
     // Bound memory in long outdoor sessions; recently seen IDs retain their deduplication.
     for (const [id, at] of this.announced) {if (now - at > 120000 && !visible.some(e => e.id === id)) {this.announced.delete(id);}}
     return null;
   }
+}
+
+function ambientImportance(entity: NextSceneEntity): number {
+  const landmark = /^(person|car|bus|truck|bicycle|motorcycle|bench|chair|couch)$/.test(entity.label);
+  return Number(entity.inPath) * 4 + Number(landmark) * 2 + entity.w * entity.h + entity.confidence * 0.1;
 }

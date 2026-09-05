@@ -27,11 +27,18 @@ Once tracking starts, the automatic follow-up capture is skipped so guidance can
 resume; use “Hey LiveKit” to ask another question. Clarifications retain follow-up
 capture. Emergency sensor speech keeps its interruption priority.
 
-Ambient guidance announces first sightings of stationary side objects as well as
-people and central objects, up to two objects per cue. It retains unseen-to-the-user
-sightings until the speaker is available and recomputes their positions then.
+Ambient guidance summarizes up to two useful objects when the speaker is free,
+prioritizing central objects, people, vehicles, and seating over incidental clutter.
+The remaining objects in that snapshot are not queued as a spoken inventory.
+Ordinary narration is limited to two cues per 30 seconds, at least six seconds apart;
+obstacle alerts and active target guidance are exempt from this ambient limit.
 Unchanged objects are not continually narrated. Sensor availability and anonymous
 person-label explanations are no longer appended to every visual answer.
+
+Vision inference has a 60-second timeout, with a 72-token budget for ordinary
+answers (128 for structured target selection). During ordinary AI descriptions,
+the detector yields 750 ms between passes to reduce CPU contention; goal tracking
+keeps its 250 ms interval during analysis. These intervals exclude inference time.
 
 ## Manual iPhone checks
 

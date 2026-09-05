@@ -34,8 +34,8 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(result.text).not.toContain('anonymous session name');
     expect(result.text).not.toContain('ultrasonic sensor');
     expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
-      maxTokens: 96,
-      timeoutMs: 30000,
+      maxTokens: 72,
+      timeoutMs: 60000,
     }));
   });
 

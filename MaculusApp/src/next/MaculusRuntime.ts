@@ -619,7 +619,9 @@ export class MaculusRuntime {
         this.speech.speakSystem('Camera guidance stopped. Obstacle sensor monitoring continues.', 1, 'camera-stopped');
         break;
       }
-      await delay(this.state.descriptionInProgress ? 250 : VISION_IDLE_MS);
+      // Give the CPU vision encoder more room during ordinary descriptions.
+      // A selected/searching goal retains the faster tracking cadence.
+      await delay(this.state.descriptionInProgress ? (this.activeGuidanceGoal ? 250 : 750) : VISION_IDLE_MS);
     }
   };
 

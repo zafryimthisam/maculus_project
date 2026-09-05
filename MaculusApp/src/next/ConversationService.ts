@@ -126,8 +126,8 @@ export class ConversationService {
             targetId: { type: 'integer', enum: [0, ...candidates.map(e => e.id)] },
           }, required: ['answer', 'targetId'], additionalProperties: false,
         } : undefined,
-        maxTokens: selection ? 128 : 96,
-        timeoutMs: 30000,
+        maxTokens: selection ? 128 : 72,
+        timeoutMs: 60000,
       });
       let answer = response;
       let targetId: number | undefined;

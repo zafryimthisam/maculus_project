@@ -120,15 +120,29 @@ describe('Persistent target guidance', () => {
 });
 
 describe('Outdoor ambient guidance', () => {
-  it('announces stationary side objects, and retains remaining sightings until the speaker is free', () => {
+  it('summarizes two useful stationary objects without listing the rest afterward', () => {
     const guide = new AmbientGuide();
     const objects = [entity(1, 'car'), entity(2, 'bench', 'right'), entity(3, 'bicycle')];
     const first = guide.next(scene(objects), 10000);
     expect(first?.text).toContain('Car to your left');
     expect(first?.text).toContain('Bench to your right');
-    const updated = objects.map(e => ({ ...e, lastSeenAt: 14000 }));
-    expect(guide.next(scene(updated, 14000), 14000)?.text).toContain('Bicycle');
-    expect(guide.next(scene(updated, 14000), 14000)).toBeNull();
+    const updated = objects.map(e => ({ ...e, lastSeenAt: 18000 }));
+    expect(guide.next(scene(updated, 18000), 18000)).toBeNull();
+  });
+  it('caps ordinary narration at two cues per 30 seconds without suppressing an obstacle', () => {
+    const guide = new AmbientGuide();
+    expect(guide.next(scene([entity(1)]), 10000)).not.toBeNull();
+    expect(guide.next(scene([entity(2, 'bench', 'right', 18000)], 18000), 18000)).not.toBeNull();
+    expect(guide.next(scene([entity(3, 'bottle', 'left', 26000)], 26000), 26000)).toBeNull();
+    const obstacle = { ...entity(4, 'car', 'ahead', 27000), inPath: true };
+    expect(guide.next({ ...scene([obstacle], 27000), pathBlocked: true }, 27000)?.kind).toBe('path-blocked');
+  });
+  it('prioritizes a person and a landmark over small incidental objects', () => {
+    const guide = new AmbientGuide();
+    const result = guide.next(scene([entity(1, 'bottle'), entity(2, 'cup'), entity(3, 'person'), entity(4, 'bench')]), 10000);
+    expect(result?.text).toContain('Person');
+    expect(result?.text).toContain('Bench');
+    expect(result?.text).not.toContain('Bottle');
   });
   it('uses the current position after a delayed announcement and drops stale sightings', () => {
     const guide = new AmbientGuide();
