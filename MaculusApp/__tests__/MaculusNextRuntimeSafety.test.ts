@@ -170,6 +170,9 @@ describe('MaculusNext runtime emergency AI interruption', () => {
   it.each([
     ['Hey LiveKit remember this person as Zafry', 'Zafry'],
     ['remember him as zafry please', 'Zafry'],
+    ['remember him as a free', 'A Free'],
+    ['remember him as Z A F R Y', 'Zafry'],
+    ['remember her as spelled M A R Y', 'Mary'],
     ['save this person named Mary Jane', 'Mary Jane'],
     ['her name is Ana', 'Ana'],
   ])('extracts a natural remembered-person request: %s', (text, name) => {

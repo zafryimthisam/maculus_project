@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Platform, NativeModules, DeviceEventEmitter } from 'react-native';
 import { AudioManager, AudioRecorder, decodeAudioData } from 'react-native-audio-api';
 import { WhisperCommandService } from '../src/services/WhisperCommandService';
 
@@ -103,6 +103,24 @@ describe('Whisper microphone handoff', () => {
   });
 
   afterEach(() => {Platform.OS = originalOS;});
+
+  it('feeds wake pre-roll and live PCM into Whisper without opening another microphone', async () => {
+    queueTranscriptions(update('Hey LiveKit what is this scene'));
+    NativeModules.MaculusVoiceCommand.startCommandAudio = jest.fn(async () => {
+      DeviceEventEmitter.emit('MaculusVoiceCommandAudio', {samples: Array(32000).fill(0.2)});
+      DeviceEventEmitter.emit('MaculusVoiceCommandAudio', {samples: Array(1600).fill(0.1)});
+      (service as any).cancelCapture();
+    });
+    NativeModules.MaculusVoiceCommand.stopCommandAudio = jest.fn().mockResolvedValue(undefined);
+    const result = await service.listenForCommandOnce(1000, undefined, true);
+    expect(result?.text).toBe('what is this scene');
+    expect(service.getState().capture?.buffers).toBe(2);
+    expect(AudioRecorder).not.toHaveBeenCalled();
+    expect(AudioManager.setAudioSessionActivity).not.toHaveBeenCalled();
+    expect(NativeModules.MaculusVoiceCommand.stopCommandAudio).toHaveBeenCalledTimes(1);
+    DeviceEventEmitter.emit('MaculusVoiceCommandAudio', {samples: Array(1600).fill(0.1)});
+    expect(service.getState().capture?.buffers).toBe(2);
+  });
 
   it('configures an input-capable session and awaits activation before creating the recorder', async () => {
     let finishActivation!: () => void;

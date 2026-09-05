@@ -15,7 +15,7 @@ import { deviceMotionService } from '../services/DeviceMotionService';
 import { keepAwakeService } from '../services/KeepAwakeService';
 import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { reIdService } from '../services/ReIdService';
-import { knownPersonService, normalizePersonName } from '../services/KnownPersonService';
+import { knownPersonService, normalizePersonName, parseSpelledPersonName } from '../services/KnownPersonService';
 import { soundCueService } from '../services/SoundCueService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
 import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
@@ -185,7 +185,11 @@ export class MaculusRuntime {
       this.piDiscoveryLoop(generation)
         .catch(error => console.warn('[MaculusNext] Pi discovery failed:', error));
       this.prepareModelAssets().catch(error => console.warn('[MaculusNext] Model status failed:', error));
-      const identityReady = Promise.all([knownPersonService.load(), reIdService.loadModel()]);
+      const identityReady = Promise.all([knownPersonService.load().catch(error => {
+        console.warn('[KnownPeople] Saved identities unavailable:', error);
+        this.update({voiceDiagnostic: 'Saved identities could not be loaded. Existing files have been preserved.'});
+        return [];
+      }), reIdService.loadModel()]);
       let detectorReady = false;
       let deviceCameraReady = false;
       let visionBackend = 'unavailable';
@@ -808,16 +812,19 @@ export class MaculusRuntime {
       const result = this.scene.rememberNearestPerson(rememberName, Date.now());
       if (result.status === 'remembered') {
         try {
-          await knownPersonService.replace(result.profile);
+          await knownPersonService.replace(result.profile, result.previousName);
           this.publishScene(this.scene.getSnapshot(), this.state.fps);
           this.speech.speakConversation(
             result.replaced
-              ? `Okay. I replaced the previous ${result.profile.name} and will remember this person as ${result.profile.name}.`
-              : `Okay. I’ll remember this person as ${result.profile.name}.`,
+              ? `Okay. I updated ${result.profile.name}, spelled ${result.profile.name.toUpperCase().split('').join(', ')}. The name is saved for future sessions.`
+              : `Okay. I’ll remember this person as ${result.profile.name}, spelled ${result.profile.name.toUpperCase().split('').join(', ')}. The name is saved for future sessions.`,
             `remember-person:${turn.timestamp}`,
           );
         } catch (error: any) {
           console.warn('[KnownPeople] Could not save identity:', error?.message || error);
+          this.scene.setKnownPeople(knownPersonService.getProfiles());
+          this.guide.invalidate();
+          this.publishScene(this.scene.getSnapshot(), this.state.fps);
           this.speech.speakConversation(
             'I recognized the person, but could not save the name on this device.',
             `remember-person:${turn.timestamp}`,
@@ -834,6 +841,13 @@ export class MaculusRuntime {
         this.speech.speakConversation(feedback, `remember-person:${turn.timestamp}`);
       }
       this.update({ voiceDiagnostic: 'The remembered-person request was handled locally with on-device ReID.' });
+      return;
+    }
+    if (/\b(?:remember|save|store|learn)\s+(?:this\s+)?(?:person|man|woman|guy|him|her|them)\b/i.test(text)) {
+      this.speech.speakConversation(
+        'Please say remember this person as, followed by the name one letter at a time.',
+        `remember-person:${turn.timestamp}`,
+      );
       return;
     }
     if (this.activeGuidanceGoal && /^(?:(?:okay|ok|yes)[,.]?\s*)?(?:I(?:'m| am) (?:seated|sitting|done)|I(?:'ve| have) (?:found it|arrived)|found it|we(?:'re| are) there|stop tracking|stop following|cancel(?: that)?|never mind|that's enough)[.!?]*$/i.test(text)) {
@@ -1056,7 +1070,12 @@ export function extractRememberPersonName(transcript: string): string | null {
   ];
   for (const pattern of patterns) {
     const match = normalized.match(pattern);
-    if (match) {return normalizePersonName(match[1].replace(/\s+please$/i, ''));}
+    if (match) {
+      const name = match[1].replace(/\s+please$/i, '').trim();
+      const spelled = parseSpelledPersonName(name);
+      if (/^spelled\s+/i.test(name) && !spelled) {return null;}
+      return spelled || normalizePersonName(name);
+    }
   }
   return null;
 }

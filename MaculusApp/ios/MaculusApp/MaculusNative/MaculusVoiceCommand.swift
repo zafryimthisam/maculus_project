@@ -12,6 +12,10 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   private var converterSourceRate: Double = 0
   private var converterSourceChannels: AVAudioChannelCount = 0
   private var wakeSamples: [Float] = []
+  private var commandAudioPending = false
+  private var commandAudioStreaming = false
+  private var commandAudioStartedAt: TimeInterval = 0
+  private var commandSamples: [Float] = []
   private var lastPredictionAt: TimeInterval = 0
   private var lastWakeAt: TimeInterval = 0
   private var wakeEnabled = false
@@ -46,7 +50,7 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   @objc override static func requiresMainQueueSetup() -> Bool { false }
 
   override func supportedEvents() -> [String]! {
-    ["MaculusVoiceWakeDetected", "MaculusVoiceBargeInDetected", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
+    ["MaculusVoiceCommandAudio", "MaculusVoiceWakeDetected", "MaculusVoiceBargeInDetected", "MaculusVoiceCommandState", "MaculusVoiceCommandError"]
   }
 
   override func startObserving() { hasEventListeners = true }
@@ -189,6 +193,32 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     }
   }
 
+  @objc func startCommandAudio(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    wakeQueue.async {
+      guard self.commandAudioPending, self.wakeAudioEngine?.isRunning == true else {
+        reject("COMMAND_AUDIO_EXPIRED", "Wake audio is no longer available", nil)
+        return
+      }
+      self.commandAudioStreaming = true
+      self.emit("MaculusVoiceCommandAudio", body: ["samples": self.commandSamples])
+      self.commandSamples.removeAll(keepingCapacity: true)
+      resolve(nil)
+    }
+  }
+
+  @objc func stopCommandAudio(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter _: @escaping RCTPromiseRejectBlock
+  ) {
+    wakeQueue.async {
+      self.stopWakeAudio()
+      resolve(nil)
+    }
+  }
+
   private func startWakeAudio() throws {
     if wakeAudioEngine?.isRunning == true { return }
     stopBargeInAudio()
@@ -209,6 +239,9 @@ final class MaculusVoiceCommand: RCTEventEmitter {
   }
 
   private func stopWakeAudio() {
+    commandAudioPending = false
+    commandAudioStreaming = false
+    commandSamples.removeAll(keepingCapacity: true)
     guard let engine = wakeAudioEngine else { return }
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()
@@ -275,6 +308,18 @@ final class MaculusVoiceCommand: RCTEventEmitter {
     guard let samples = convertedSamples(buffer: buffer), !samples.isEmpty else { return }
     wakeQueue.async {
       guard self.wakeEnabled, !self.pausedForTts else { return }
+      if self.commandAudioPending {
+        if Date().timeIntervalSince1970 - self.commandAudioStartedAt > 30 {
+          self.stopWakeAudio()
+          return
+        }
+        if self.commandAudioStreaming {
+          self.emit("MaculusVoiceCommandAudio", body: ["samples": samples])
+        } else if self.commandSamples.count + samples.count <= 480_000 {
+          self.commandSamples.append(contentsOf: samples)
+        }
+        return
+      }
       self.wakeSamples.append(contentsOf: samples)
       if self.wakeSamples.count > 32_000 {
         self.wakeSamples.removeFirst(self.wakeSamples.count - 32_000)
@@ -287,10 +332,13 @@ final class MaculusVoiceCommand: RCTEventEmitter {
       do {
         if let detection = try self.wakeEngine?.predict(samples: self.wakeSamples) {
           self.lastWakeAt = now
-          self.stopWakeAudio()
+          self.commandAudioPending = true
+          self.commandAudioStartedAt = now
+          self.commandSamples = self.wakeSamples
           self.emitState("wake_detected")
           self.emit("MaculusVoiceWakeDetected", body: [
             "name": detection.name,
+            "bufferedAudio": true,
             "label": "Hey LiveKit",
             "confidence": detection.confidence,
           ])

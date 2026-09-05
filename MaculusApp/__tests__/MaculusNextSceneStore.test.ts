@@ -51,6 +51,35 @@ describe('MaculusNext SessionSceneStore', () => {
     expect(reacquired.visibleEntities[0].alias).toBe('Alex');
   });
 
+  it('recognizes saved people when embeddings arrive after an anonymous track', () => {
+    const store = new SessionSceneStore(['Alex', 'Sam']);
+    store.setKnownPeople([{name: 'Zafry', embedding: [1, 0, 0], samples: 3, updatedAt: 1}]);
+    store.update({frameKey: 'no-embedding', timestamp: 100, detections: [detection('person', 0.5)]});
+    for (let frame = 2; frame <= 3; frame++) {
+      store.update({frameKey: `delayed-${frame}`, timestamp: frame * 100, detections: [detection('person', 0.5)],
+        personEmbeddings: [{detectionIndex: 0, embedding: [1, 0, 0]}]});
+    }
+    expect(store.getSnapshot(300).visibleEntities[0].alias).toBe('Zafry');
+    store.update({frameKey: 'away', timestamp: 3000, detections: []});
+    store.update({frameKey: 'return-without-embedding', timestamp: 10000, detections: [detection('person', 0.8)]});
+    for (let frame = 1; frame <= 3; frame++) {
+      store.update({frameKey: `return-${frame}`, timestamp: 10000 + frame * 100, detections: [detection('person', 0.8)],
+        personEmbeddings: [{detectionIndex: 0, embedding: [1, 0, 0]}]});
+    }
+    expect(store.getSnapshot(10300).visibleEntities.filter(item => item.alias === 'Zafry')).toHaveLength(1);
+  });
+
+  it('does not give two simultaneous people the same saved identity', () => {
+    const store = new SessionSceneStore(['Alex', 'Sam']);
+    store.setKnownPeople([{name: 'Zafry', embedding: [1, 0, 0], samples: 3, updatedAt: 1}]);
+    for (let frame = 1; frame <= 3; frame++) {
+      store.update({frameKey: `two-${frame}`, timestamp: frame * 100,
+        detections: [detection('person', 0.2), detection('person', 0.8)],
+        personEmbeddings: [{detectionIndex: 0, embedding: [1, 0, 0]}, {detectionIndex: 1, embedding: [1, 0, 0]}]});
+    }
+    expect(store.getSnapshot(300).visibleEntities.filter(item => item.alias === 'Zafry')).toHaveLength(1);
+  });
+
   it('preserves original detection indices after confidence filtering', () => {
     const store = new SessionSceneStore(['Jordan', 'Casey']);
     const lowScoreChair = detection('chair', 0.2, 0.2);
@@ -89,14 +118,15 @@ describe('MaculusNext SessionSceneStore', () => {
     expect(hidden.entities[0]).toMatchObject({ label: 'chair', visibility: 'occluded', confirmed: true });
   });
 
-  it('reacquires a unique chair after a long camera-away cycle', () => {
+  it('does not assume a distant similar chair is the old locked chair', () => {
     const store = new SessionSceneStore(['Alex']);
     store.update({ frameKey: 'chair-a', timestamp: 100, detections: [detection('chair', 0.2)] });
     const seen = store.update({ frameKey: 'chair-b', timestamp: 200, detections: [detection('chair', 0.2)] });
     const id = seen.visibleEntities[0].id;
     store.update({ frameKey: 'away', timestamp: 3000, detections: [] });
     const returned = store.update({ frameKey: 'back', timestamp: 45000, detections: [detection('chair', 0.78)] });
-    expect(returned.visibleEntities[0]).toMatchObject({ id, label: 'chair', visibility: 'visible' });
+    expect(returned.entities.find(item => item.id === id)?.visibility).toBe('occluded');
+    expect(returned.visibleEntities).toHaveLength(0);
   });
 
   it('does not choose between equally plausible old chairs after a long gap', () => {

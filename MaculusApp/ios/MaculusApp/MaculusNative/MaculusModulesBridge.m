@@ -53,6 +53,10 @@ RCT_EXTERN_METHOD(setEnabled:(BOOL)enabled
 @end
 
 @interface RCT_EXTERN_MODULE(MaculusVoiceCommand, RCTEventEmitter)
+RCT_EXTERN_METHOD(startCommandAudio:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(stopCommandAudio:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(isAvailable:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(startWakeListening:(RCTPromiseResolveBlock)resolve

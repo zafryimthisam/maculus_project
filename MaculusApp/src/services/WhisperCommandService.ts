@@ -3,7 +3,7 @@ import {
   SpeechToTextModule,
 } from 'react-native-executorch';
 import { AudioManager, AudioRecorder, decodeAudioData, type AudioBuffer } from 'react-native-audio-api';
-import { Platform } from 'react-native';
+import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 
 export type WhisperCommandState = {
   state: 'starting' | 'downloading' | 'ready' | 'listening' | 'processing' | 'error';
@@ -39,8 +39,8 @@ const MIN_AUDIBLE_RMS = 0.0005;
 
 /**
  * Owns the downloaded ExecuTorch Whisper model and one microphone capture at a
- * time. The native wake-word detector remains tiny and always-on; this service
- * takes the microphone only after the wake word, then releases it immediately.
+ * time. Wake activations consume buffered PCM from the existing native microphone.
+ * Direct follow-up captures use AudioRecorder. Both sources stop before decoding retries.
  */
 export class WhisperCommandService {
   private module: SpeechToTextModule | null = null;
@@ -99,12 +99,13 @@ export class WhisperCommandService {
   async listenForCommandOnce(
     timeoutMs: number,
     onPartial?: (text: string) => void,
+    bufferedAudio = false,
   ): Promise<WhisperCommandResult | null> {
     if (this.busy) {throw new Error('Whisper is already listening or processing.');}
     this.busy = true;
     const cancellationId = this.cancellationId;
     try {
-      const result = await this.captureCommand(timeoutMs, onPartial, cancellationId);
+      const result = await this.captureCommand(timeoutMs, onPartial, cancellationId, bufferedAudio);
       return cancellationId === this.cancellationId ? result : null;
     } finally {
       this.busy = false;
@@ -115,6 +116,7 @@ export class WhisperCommandService {
     timeoutMs: number,
     onPartial: ((text: string) => void) | undefined,
     cancellationId: number,
+    bufferedAudio: boolean,
   ): Promise<WhisperCommandResult | null> {
     const module = this.module;
     if (!module) {
@@ -131,7 +133,7 @@ export class WhisperCommandService {
     if (granted !== 'Granted') {throw new Error('Microphone permission is required for voice commands.');}
     if (cancellationId !== this.cancellationId) {return null;}
 
-    if (Platform.OS === 'ios') {
+    if (Platform.OS === 'ios' && !bufferedAudio) {
       // Audio API defaults to playback-only and reasserts its own session when
       // starting the engine, overriding the native wake listener's settings.
       // Configure it on every handoff, after the activation cue has finished.
@@ -145,7 +147,7 @@ export class WhisperCommandService {
     }
     if (cancellationId !== this.cancellationId) {return null;}
 
-    const recorder = new AudioRecorder();
+    const recorder = bufferedAudio ? null : new AudioRecorder();
     const chunks: Float32Array[] = [];
     let sampleCount = 0;
     let lastMeterUpdate = 0;
@@ -192,9 +194,7 @@ export class WhisperCommandService {
       }
     })();
 
-    const audioCallbackResult = recorder.onAudioReady(
-      {sampleRate: TARGET_SAMPLE_RATE, bufferLength: BUFFER_LENGTH, channelCount: 1},
-      ({buffer}) => {
+    const acceptAudio = (buffer: Pick<AudioBuffer, 'length' | 'copyFromChannel' | 'sampleRate'>) => {
         if (stopped) {return;}
         try {
           if (buffer.sampleRate <= 0) {throw new Error('Microphone returned an invalid sample rate.');}
@@ -235,7 +235,17 @@ export class WhisperCommandService {
           requestStop();
           return;
         }
-      },
+      };
+    const nativeAudio = NativeModules.MaculusVoiceCommand;
+    const audioSubscription = bufferedAudio
+      ? new NativeEventEmitter(nativeAudio).addListener('MaculusVoiceCommandAudio', (event: {samples: number[]}) => {
+        const samples = Float32Array.from(event.samples);
+        acceptAudio({length: samples.length, sampleRate: TARGET_SAMPLE_RATE,
+          copyFromChannel: destination => {destination.set(samples);}});
+      }) : null;
+    const audioCallbackResult = bufferedAudio ? {status: 'success' as const} : recorder!.onAudioReady(
+      {sampleRate: TARGET_SAMPLE_RATE, bufferLength: BUFFER_LENGTH, channelCount: 1},
+      ({buffer}) => acceptAudio(buffer),
     );
     if (audioCallbackResult.status === 'error') {
       this.cancelCapture = null;
@@ -248,7 +258,7 @@ export class WhisperCommandService {
       });
       throw new Error(audioCallbackResult.message);
     }
-    recorder.onError(error => {
+    recorder?.onError(error => {
       streamFailure = new Error(error.message);
       requestStop();
     });
@@ -259,16 +269,20 @@ export class WhisperCommandService {
       // stream exists before the first PCM chunk reaches streamInsert().
       await Promise.resolve();
       if (cancellationId !== this.cancellationId) {return null;}
-      const startResult = await recorder.start();
-      if (startResult.status === 'error') {
-        throw new Error(startResult.message);
+      if (bufferedAudio) {
+        await nativeAudio.startCommandAudio();
+      } else {
+        const startResult = await recorder!.start();
+        if (startResult.status === 'error') {throw new Error(startResult.message);}
       }
       await stopSignal;
     } finally {
       clearTimeout(timeout);
-      recorder.clearOnAudioReady();
-      recorder.clearOnError();
-      if (recorder.isRecording()) {await recorder.stop().catch(() => undefined);}
+      audioSubscription?.remove();
+      if (bufferedAudio) {await nativeAudio.stopCommandAudio().catch(() => undefined);}
+      recorder?.clearOnAudioReady();
+      recorder?.clearOnError();
+      if (recorder?.isRecording()) {await recorder.stop().catch(() => undefined);}
       this.setState({...this.currentState, state: 'processing', message: 'Finishing private transcription…'});
       module.streamStop();
       await streamTask.catch(() => undefined);
@@ -305,7 +319,10 @@ export class WhisperCommandService {
           message: 'Whisper is ready. Speech stays on this device.'});
       }
     }
-    const text = finalText.trim();
+    // Buffered capture includes the wake phrase so its command suffix is never clipped.
+    const wakePrefix = bufferedAudio ? /^[\s\S]*?\blive\s*kit\b[,.!? ]*/i
+      : /^(?:(?:hey|hi|okay|ok)[, ]+)?live\s*kit\b[,.!? ]*/i;
+    const text = finalText.trim().replace(wakePrefix, '').trim();
     const detail = capture.buffers === 0
       ? 'No microphone samples reached Whisper. The audio engine opened, but its input callback delivered nothing.'
       : capture.peakRms < MIN_AUDIBLE_RMS

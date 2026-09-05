@@ -188,3 +188,34 @@ describe('Outdoor ambient guidance', () => {
     expect(guide.next(scene([obstacle], 24000), 24000, true)).toBeNull();
   });
 });
+
+
+describe('Locked chair arrival', () => {
+  const nearChair = (at: number) => ({...entity(1, 'chair', 'ahead', at), h: 0.7, nearScore: 0.85, inPath: true});
+
+  it('gives one cautious arrival cue after distinct stable observations', () => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    guide.select(1, scene([nearChair(10000)]));
+    for (const at of [10000, 10500, 11000]) {guide.observe(scene([nearChair(at)], at), at);}
+    const cue = guide.next(scene([nearChair(11000)], 11000), 11000);
+    expect(cue?.text).toContain('Stop and locate the seat with your hand');
+    expect(cue?.text).toContain('empty and stable');
+    expect(guide.next(scene([nearChair(14000)], 14000), 14000)?.text || '').not.toContain('locate the seat');
+  });
+
+  it.each(['stale', 'other-obstacle', 'uncertain', 'duplicate'])('suppresses arrival for %s observations', reason => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    guide.select(1, scene([nearChair(10000)]));
+    for (const at of [10000, 10500, 11000]) {
+      const chair = nearChair(reason === 'stale' ? 8000 : reason === 'duplicate' ? 10000 : at);
+      const objects = [chair];
+      if (reason === 'other-obstacle') {objects.push({...nearChair(at), id: 2});}
+      if (reason === 'uncertain') {guide.invalidate();}
+      const current = scene(objects, at);
+      guide.observe(current, at);
+      expect(guide.next(current, at)?.text || '').not.toContain('locate the seat');
+    }
+  });
+});

@@ -41,6 +41,39 @@ class MaculusVoiceCommandModule(
     private var wakeEnabled = false
     private var wakePausedForTts = false
     private var lastWakeAtMs = 0L
+    private val commandAudioLock = Any()
+    private var commandAudioPending = false
+    private var commandAudioStreaming = false
+    private val commandAudioBuffer = ArrayList<Short>()
+    private var commandAudioStartedAt = 0L
+
+    @ReactMethod
+    fun startCommandAudio(promise: Promise) {
+        synchronized(commandAudioLock) {
+            if (!commandAudioPending || !wakeRunning.get()) {
+                promise.reject("COMMAND_AUDIO_EXPIRED", "Wake audio is no longer available")
+                return
+            }
+            commandAudioStreaming = true
+            emitCommandAudio(commandAudioBuffer.toShortArray())
+            commandAudioBuffer.clear()
+        }
+        promise.resolve(null)
+    }
+
+    @ReactMethod
+    fun stopCommandAudio(promise: Promise) {
+        mainHandler.post {
+            stopWakeLoop()
+            promise.resolve(null)
+        }
+    }
+
+    private fun emitCommandAudio(samples: ShortArray) {
+        val values = Arguments.createArray()
+        samples.forEach { values.pushDouble(it / 32768.0) }
+        emit("MaculusVoiceCommandAudio", Arguments.createMap().apply { putArray("samples", values) })
+    }
 
     private var recognizer: SpeechRecognizer? = null
     private var commandPromise: Promise? = null
@@ -245,12 +278,17 @@ class MaculusVoiceCommandModule(
             return
         }
         stopBargeInLoop()
+        synchronized(commandAudioLock) {
+            commandAudioPending = false
+            commandAudioStreaming = false
+            commandAudioBuffer.clear()
+        }
         val engine = ensureWakeEngine()
         val minBuffer = AudioRecord.getMinBufferSize(
             WAKE_SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(WAKE_READ_SIZE * 2)
+        ).coerceAtLeast(WAKE_SAMPLE_RATE * 2 * 4)
         val recorder = AudioRecord(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             WAKE_SAMPLE_RATE,
@@ -284,6 +322,19 @@ class MaculusVoiceCommandModule(
                 if (read <= 0) {
                     continue
                 }
+                val capturing = synchronized(commandAudioLock) {
+                    if (commandAudioPending) {
+                        if (commandAudioStreaming) { emitCommandAudio(readBuffer.copyOf(read)) }
+                        else if (commandAudioBuffer.size + read <= WAKE_SAMPLE_RATE * 30) {
+                            for (i in 0 until read) { commandAudioBuffer.add(readBuffer[i]) }
+                        }
+                        true
+                    } else false
+                }
+                if (capturing) {
+                    if (System.currentTimeMillis() - commandAudioStartedAt > 30000L) { break }
+                    continue
+                }
                 for (i in 0 until read) {
                     ring[writeIndex] = readBuffer[i]
                     writeIndex = (writeIndex + 1) % ring.size
@@ -306,11 +357,16 @@ class MaculusVoiceCommandModule(
                 }
                 if (detection != null && now - lastWakeAtMs >= WAKE_DEBOUNCE_MS) {
                     lastWakeAtMs = now
-                    mainHandler.post {
-                        emitWakeDetected(detection)
-                        stopWakeLoop()
+                    synchronized(commandAudioLock) {
+                        commandAudioPending = true
+                        commandAudioStartedAt = System.currentTimeMillis()
+                        commandAudioBuffer.clear()
+                        // Include the wake window: inference may finish after the command starts.
+                        snapshot.forEach { commandAudioBuffer.add(it) }
                     }
-                    break
+                    mainHandler.post {
+                        if (wakeRunning.get() && wakeLoopId == loopId) { emitWakeDetected(detection) }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -345,6 +401,11 @@ class MaculusVoiceCommandModule(
     }
 
     private fun stopWakeLoop() {
+        synchronized(commandAudioLock) {
+            commandAudioPending = false
+            commandAudioStreaming = false
+            commandAudioBuffer.clear()
+        }
         if (!wakeRunning.getAndSet(false)) {
             audioRecord = null
             wakeThread = null
@@ -653,6 +714,7 @@ class MaculusVoiceCommandModule(
         emitState("wake_detected")
         emit(EVENT_WAKE_DETECTED, Arguments.createMap().apply {
             putString("name", detection.name)
+            putBoolean("bufferedAudio", true)
             putDouble("confidence", detection.confidence.toDouble())
             putString("label", WAKE_LABEL)
         })

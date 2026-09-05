@@ -23,6 +23,7 @@ type InternalTrack = NextSceneEntity & {
   lastDetectionCy: number;
   embedding?: number[];
   lastEmbedding?: number[];
+  lastEmbeddingAt?: number;
   wasInPath: boolean;
 };
 
@@ -91,13 +92,24 @@ export class SessionSceneStore {
 
   setKnownPeople(profiles: KnownPersonProfile[]): void {
     this.knownPeople = profiles.map(profile => ({ ...profile, embedding: normalize(profile.embedding) }));
+    // Rebuild identity references together; never reuse numeric IDs while
+    // existing tracks still point at a previous identity table.
     this.identities.clear();
-    this.nextIdentityId = 1;
     this.restoreKnownPeople();
+    for (const track of this.tracks.values()) {
+      track.identityId = undefined;
+      track.alias = undefined;
+    }
+    for (const track of this.tracks.values()) {
+      if (track.label !== 'person') {continue;}
+      const identity = this.resolveIdentity(track.lastEmbedding, undefined, track.id);
+      track.identityId = identity.id;
+      track.alias = identity.alias;
+    }
   }
 
   rememberNearestPerson(nameValue: string, now: number = Date.now()):
-    { status: 'remembered'; profile: KnownPersonProfile; replaced: boolean } |
+    { status: 'remembered'; profile: KnownPersonProfile; replaced: boolean; previousName?: string } |
     { status: 'no-person' | 'ambiguous' | 'no-embedding' | 'invalid-name' } {
     const name = normalizePersonName(nameValue);
     if (!name) {return { status: 'invalid-name' };}
@@ -110,12 +122,13 @@ export class SessionSceneStore {
       return { status: 'ambiguous' };
     }
     const track = candidates[0];
-    if (!track.lastEmbedding) {return { status: 'no-embedding' };}
+    if (!track.lastEmbedding || track.lastEmbeddingAt === undefined || now - track.lastEmbeddingAt > 2000) {return { status: 'no-embedding' };}
     const key = name.toLocaleLowerCase();
     const replaced = [...this.identities.values()].some(identity =>
       identity.persistent && identity.alias.toLocaleLowerCase() === key,
     );
     let identity = track.identityId ? this.identities.get(track.identityId) : undefined;
+    const previousName = identity?.persistent ? identity.alias : undefined;
     for (const [id, existing] of this.identities) {
       if (existing.persistent && existing.alias.toLocaleLowerCase() === key && id !== identity?.id) {
         this.identities.delete(id);
@@ -142,8 +155,9 @@ export class SessionSceneStore {
       if (other.identityId === identity.id) {other.alias = name;}
     }
     const profile = { name, embedding: [...identity.embedding], samples: identity.samples, updatedAt: now };
-    this.knownPeople = [profile, ...this.knownPeople.filter(item => item.name.toLocaleLowerCase() !== key)];
-    return { status: 'remembered', profile, replaced };
+    this.knownPeople = [profile, ...this.knownPeople.filter(item => item.name.toLocaleLowerCase() !== key &&
+      item.name.toLocaleLowerCase() !== previousName?.toLocaleLowerCase())];
+    return { status: 'remembered', profile, replaced, previousName };
   }
 
   update(observation: SceneObservation): NextSceneSnapshot {
@@ -283,9 +297,12 @@ export class SessionSceneStore {
       const centerDistance = Math.hypot(detection.cx - track.cx, detection.cy - track.cy);
       const overlap = iou(detection, track);
       if (similarity !== null && similarity < 0.55) {continue;}
+      if (detection.label === 'person' && track.visibility === 'occluded' &&
+          (similarity === null || similarity < PERSON_REID_SIMILARITY)) {continue;}
       if (!longObjectReacquire && similarity === null && overlap < 0.06 && centerDistance > 0.28) {continue;}
       const shape = boxShapeSimilarity(detection, track);
-      if (longObjectReacquire && shape < 0.58) {continue;}
+      if (longObjectReacquire && (shape < 0.58 ||
+          (overlap < 0.06 && centerDistance > 0.28))) {continue;}
       const score = longObjectReacquire
         ? shape * 2 + Math.max(0, 1 - centerDistance) * 0.35
         : overlap * 2 + Math.max(0, 1 - centerDistance * 2.5) + (similarity ?? 0) * 2.5 + 2;
@@ -336,6 +353,7 @@ export class SessionSceneStore {
       lastDetectionCy: detection.cy,
       embedding,
       lastEmbedding: embedding,
+      lastEmbeddingAt: embedding ? now : undefined,
       wasInPath: inPath,
     };
     this.tracks.set(track.id, track);
@@ -351,6 +369,7 @@ export class SessionSceneStore {
   ): SceneChange[] {
     const changes: SceneChange[] = [];
     const wasConfirmed = track.confirmed;
+    const wasOccluded = track.visibility === 'occluded';
     track.hits += 1;
     track.misses = 0;
     track.lastSeenAt = now;
@@ -393,15 +412,29 @@ export class SessionSceneStore {
       track.pathCandidate = detectedInPath;
       track.pathCandidateHits = 0;
     }
-    track.wasInPath = track.wasInPath || track.inPath;
+    track.wasInPath = track.inPath;
+    if (wasOccluded) {
+      track.cx = detection.cx;
+      track.cy = detection.cy;
+      track.zone = zoneOf(detection.cx);
+      track.inPath = isInPath(detection);
+      track.lastAnnouncedCorrectedCx = detection.cx - this.cameraOffsetX;
+      track.motionCandidateHits = 0;
+    }
     track.confirmed = track.hits >= (track.label === 'person' ? 3 : 2);
 
     if (embedding && track.label === 'person') {
       track.lastEmbedding = embedding;
+      track.lastEmbeddingAt = now;
       track.embedding = track.embedding ? blend(track.embedding, embedding) : embedding;
-      const identity = track.identityId ? this.identities.get(track.identityId) : this.resolveIdentity(embedding);
+      const current = track.identityId ? this.identities.get(track.identityId) : undefined;
+      const identity = current?.persistent ? current : this.resolveIdentity(embedding, current, track.id);
       if (identity) {
-        identity.embedding = identity.embedding ? blend(identity.embedding, embedding) : embedding;
+        // Enrollment is the durable reference. Do not corrupt it through a
+        // spatial association or gradually drift away from the saved profile.
+        if (!identity.persistent) {
+          identity.embedding = identity.embedding ? blend(identity.embedding, embedding) : embedding;
+        }
         identity.samples += 1;
         track.identityId = identity.id;
         track.alias = identity.alias;
@@ -461,13 +494,16 @@ export class SessionSceneStore {
     return changes;
   }
 
-  private resolveIdentity(embedding: number[] | undefined): Identity {
+  private resolveIdentity(embedding: number[] | undefined, current?: Identity, trackId?: number): Identity {
     if (embedding) {
       let best: Identity | null = null;
-      let bestSimilarity = PERSON_REID_SIMILARITY;
+      let bestSimilarity = -1;
       let runnerUpSimilarity = -1;
       for (const identity of this.identities.values()) {
-        if (!identity.embedding) {continue;}
+        if (!identity.embedding || identity.id === current?.id) {continue;}
+        // A saved identity cannot belong to two people in the same frame.
+        if ([...this.tracks.values()].some(other => other.id !== trackId &&
+            other.identityId === identity.id && other.visibility === 'visible' && other.misses === 0)) {continue;}
         const similarity = cosineSimilarity(embedding, identity.embedding);
         const threshold = identity.persistent ? KNOWN_PERSON_REID_SIMILARITY : PERSON_REID_SIMILARITY;
         if (similarity >= threshold && similarity > bestSimilarity) {
@@ -480,6 +516,7 @@ export class SessionSceneStore {
       }
       if (best && bestSimilarity - runnerUpSimilarity >= 0.025) {return best;}
     }
+    if (current) {return current;}
     const identity: Identity = {
       id: this.nextIdentityId++,
       alias: this.nextAlias(),

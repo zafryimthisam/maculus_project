@@ -103,32 +103,18 @@ describe('VoiceCommandService private Whisper capture', () => {
     expect(NativeModules.MaculusVoiceCommand.startBargeInMonitoring).not.toHaveBeenCalled();
   });
 
-  it('finishes the activation cue before opening command recognition', async () => {
+  it('uses buffered wake audio immediately without a cue or microphone restart', async () => {
     const service = new VoiceCommandService() as any;
     service.enabled = true;
-    service.commandBusy = false;
     service.onTurn = jest.fn();
-    jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
-    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce').mockResolvedValueOnce({
-      text: 'describe scene',
-      confidence: null,
-    });
-    let finishCue!: () => void;
-    (NativeModules.MaculusSoundCue.playActivation as jest.Mock).mockImplementationOnce(
-      () => new Promise<void>(resolve => {finishCue = resolve;}),
-    );
-
-    const capture = service.handleWakeDetected({ name: 'hey_livekit' });
-    for (let step = 0; step < 8; step += 1) {await Promise.resolve();}
-
-    expect(NativeModules.MaculusSoundCue.playActivation).toHaveBeenCalledTimes(1);
-    expect(listen).not.toHaveBeenCalled();
-
-    finishCue();
-    await capture;
-
-    expect(listen).toHaveBeenCalledTimes(1);
+    const prepare = jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
+    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce').mockResolvedValueOnce({text: 'describe scene', confidence: null});
+    await service.handleWakeDetected({name: 'hey_livekit', bufferedAudio: true});
+    expect(listen).toHaveBeenCalledWith(expect.any(Number), expect.any(Function), true);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(NativeModules.MaculusSoundCue.playActivation).not.toHaveBeenCalled();
+    expect(NativeModules.MaculusVoiceCommand.pauseForTts).not.toHaveBeenCalled();
   });
 
   it('processes one Whisper capture as soon as its transcript is finalized', async () => {
@@ -181,7 +167,7 @@ describe('VoiceCommandService private Whisper capture', () => {
     expect(listen).toHaveBeenCalledTimes(1);
     expect(onTurn).not.toHaveBeenCalled();
     expect(onDiagnostic).toHaveBeenCalledWith(
-      'No spoken words were recognized. Say “Hey LiveKit,” wait for the sound, then speak.',
+      'No spoken words were recognized. Say “Hey LiveKit” followed by your request.',
     );
   });
 

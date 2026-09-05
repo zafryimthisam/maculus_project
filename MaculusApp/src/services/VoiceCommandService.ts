@@ -38,6 +38,7 @@ type WakeDetection = {
   name?: string;
   label?: string;
   confidence?: number;
+  bufferedAudio?: boolean;
 };
 
 type VoiceCommandNativeModule = {
@@ -69,10 +70,6 @@ export type VoiceCommandExecution = {
 
 const WAKE_WORD = WAKE_WORD_PARSER_TOKEN;
 const MIN_CONFIDENCE = 0.35;
-// Keep the wake-to-command handoff short enough that a single natural phrase
-// such as "Hey LiveKit, start Maculus" does not lose the first command word.
-// TTS is already stopped before this delay begins.
-const AUDIO_HANDOFF_MS = 120;
 const CONVERSATION_QUIET_MS_LLM_READY = 12000;
 const CONVERSATION_QUIET_MS_LLM_LOADING = 6000;
 const EMPTY_CAPTURE_QUIET_MS = 2500;
@@ -319,22 +316,17 @@ export class VoiceCommandService {
     this.reserveConversationWindow(this.effectiveQuietMs());
     this.setStatus('wake_detected');
     this.onTranscript?.('');
-    this.setDiagnostic('Wake word detected. Playing the activation sound.');
+    this.setDiagnostic('Wake word detected. Capturing your request.');
     if (!directCapture) {Vibration.vibrate([0, 60]);}
     if (detection.name === 'barge_in' || interruptedSpeech) {
       tts.stop();
       await soundCueService.stopAll();
     }
-    await MaculusVoiceCommand.pauseForTts().catch(() => {});
-    await tts.prepareForListening(AUDIO_HANDOFF_MS);
-    if (!directCapture) {
-      await soundCueService.stopAll();
-      // Let the activation cue finish before command recognition takes over
-      // the audio session. Otherwise the recognizer can make the cue inaudible.
-      await soundCueService.playActivation();
-      // AVAudioPlayer and the PCM recorder do not hand the audio route over
-      // atomically, so leave a short settle before opening Whisper capture.
-      await wait(AUDIO_HANDOFF_MS);
+    if (!detection.bufferedAudio) {
+      await MaculusVoiceCommand.pauseForTts().catch(() => {});
+      await tts.prepareForListening(0);
+    } else {
+      tts.stop();
     }
 
     if (!this.enabled || !MaculusVoiceCommand || this.safetyInterrupted) {
@@ -343,13 +335,14 @@ export class VoiceCommandService {
     }
 
     this.setStatus('command_listening');
-    this.setDiagnostic('Listening for your request. Speak after the activation sound.');
+    this.setDiagnostic('Listening. You can speak immediately after Hey LiveKit.');
     try {
       // Whisper and FSMN VAD run locally through ExecuTorch. No Apple speech
       // daemon or network connection participates in command recognition.
       const result: WhisperCommandResult | null = await whisperCommandService.listenForCommandOnce(
         COMMAND_TIMEOUT_MS,
         text => this.handlePartialTranscript({text, isFinal: false}),
+        Boolean(detection.bufferedAudio),
       );
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled) {
@@ -361,7 +354,7 @@ export class VoiceCommandService {
         console.log('[Voice] No command transcript returned');
         this.setDiagnostic(whisperCommandService.getState().capture
           ? whisperCommandService.getState().message
-          : 'No spoken words were recognized. Say “Hey LiveKit,” wait for the sound, then speak.');
+          : 'No spoken words were recognized. Say “Hey LiveKit” followed by your request.');
         this.reserveConversationWindow(EMPTY_CAPTURE_QUIET_MS);
         if (!this.safetyInterrupted) {Vibration.vibrate([0, 45, 60, 45]);}
         return;
@@ -674,9 +667,6 @@ function containsAny(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word));
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {return error.message;}

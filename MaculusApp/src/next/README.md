@@ -199,3 +199,38 @@ The existing native camera detector still passes JPEG base64 through the React
 Native bridge. MaculusNext isolates that cost behind `DeviceCameraService`; a
 future native frame broker should feed YOLO and libmtmd from one encoded frame
 without another JavaScript copy.
+
+
+### Identity, voice, and chair tracking reliability
+
+- Use “Hey LiveKit, remember him as Z A F R Y” (or “remember her as M A R Y”).
+  Explicit letter names also work after “spelled”, for example “spelled zee ay eff ar why”.
+  There are no person-name substitutions. Maculus reads back the saved spelling.
+  An unfamiliar spoken name can still be misheard by Whisper Tiny; spelling supplies
+  the intended text rather than trying to infer an arbitrary name from pronunciation.
+- Saved profiles use two alternating versioned snapshots in app-private document
+  storage. A fresh app process loads the newest valid snapshot; an interrupted write
+  can recover the preceding revision. Saves are serialized, and a failed save rolls
+  the scene back to the persisted names. Reusing a name replaces its enrollment;
+  renaming an already recognized person removes their previous saved spelling.
+- Delayed embeddings can upgrade temporary identities to saved names. A named
+  enrollment is not continuously blended with spatially associated detections.
+  Recognition is appearance-based OSNet ReID, not face recognition: persistence
+  does not guarantee a match after clothing, pose, or lighting changes.
+- Android and iOS retain the wake microphone, prepend its two-second wake window,
+  and stream command PCM to Whisper. Activation uses vibration without waiting for
+  a sound. “Hey LiveKit what's this scene” can be spoken as one phrase. Captures are
+  bounded to 30 seconds and stop on cancellation, emergency, or session shutdown.
+- An occluded chair needs plausible position and shape to reuse its track. A
+  similar chair elsewhere is not automatically the locked target. Chair arrival
+  requires three fresh, centered, close observations spanning at least one second.
+  The cue asks the user to stop and locate/check the seat by touch. It does not
+  certify seating safety, occupancy, exact distance, or a clear route. Other nearby
+  center-path objects and emergency speech suppress arrival guidance.
+
+Validation: Jest regressions cover delayed ReID, duplicate identity ownership,
+name spelling, restarted storage recovery, buffered PCM, and cautious chair arrival.
+Physical-device testing is still needed for microphone routing, processing latency,
+and ReID quality under real movement and clothing changes. On Windows the Kotlin
+compile uses `-PhermesEnabled=false` for the installed community JavaScriptCore
+package and Git's `usr/bin` on PATH for the audio dependency's build script.
