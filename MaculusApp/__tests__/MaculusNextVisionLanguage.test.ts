@@ -224,6 +224,17 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(result.targetId).toBeUndefined();
   });
 
+  it.each([0, 1])('never asks a blind user to compare seats, even when the model asks (target %s)', async targetId => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(JSON.stringify({ answer: 'Which chair would you prefer?', targetId }));
+    const result = await service.describeFrame('image', scene(), healthySensor(), 'Find a place to sit', {
+      activeGuidanceGoal: 'place to sit', selectTarget: true, candidateIds: [1],
+    });
+    expect(result.text).not.toMatch(/which|prefer|\?/i);
+    expect(result.text).toContain(targetId ? 'selected the chair to your left' : 'still looking');
+    expect(result.targetId).toBe(targetId || undefined);
+  });
+
   it('passes a captured example transcript into the VLM and returns its answer', async () => {
     const service = readyService();
     const vision = jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(

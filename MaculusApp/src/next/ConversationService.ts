@@ -1,7 +1,7 @@
 import { localLlmService } from '../services/LocalLlmService';
 import { modelAssetService } from '../services/ModelAssetService';
 import { NextSceneSnapshot, SafetyState } from './domain';
-import { detectorLabelsForGoal, extractGuidanceGoal } from './GuidanceController';
+import { detectorLabelsForGoal, extractGuidanceGoal, position } from './GuidanceController';
 
 type HistoryEntry = { role: 'user' | 'assistant'; content: string };
 
@@ -142,6 +142,7 @@ export class ConversationService {
         (!options.candidateIds || options.candidateIds.includes(e.id)) &&
         scene.timestamp - e.lastSeenAt <= 1200).slice(0, 6) : [];
       const selection = options.selectTarget === true && Boolean(goal);
+      const seatingSelection = selection && /\b(sit|seat|rest)\b/i.test(goal || '');
       const response = await localLlmService.completeVision({
         imageBase64,
         prompt: (selection ? `Help a blind user with: ${goal}. Choose ONE suitable candidate; do not ask them to compare interchangeable objects. Match requested attributes; never guess a person's identity. Return targetId 0 if no candidate fits. Never claim a safe route or exact distance. Answer in one short sentence. Current request: ${question.slice(0, 100)}.` : buildVisionPrompt(
@@ -150,7 +151,7 @@ export class ConversationService {
           options.conversationHistory,
           goal,
           selection,
-        )) + (selection ? ` Return JSON only: answer and targetId. For sitting, reject occupied or obstructed seating; appearance does not prove safety. Candidates (ID, label, position, center x/y, width/height): ${candidates.map(e => `${e.id}: ${e.label} ${e.zone} [${[e.cx, e.cy, e.w, e.h].map(n => n.toFixed(2)).join(',')}]`).join('; ') || 'none'}.` : ''),
+        )) + (selection ? ` Return JSON only: answer and targetId. For sitting, reject occupied or obstructed seating; prefer one that appears nearby, but appearance does not prove distance or safety. Never ask which seat to choose. Candidates (ID, label, position, center x/y, width/height): ${candidates.map(e => `${e.id}: ${e.label} ${e.zone} [${[e.cx, e.cy, e.w, e.h].map(n => n.toFixed(2)).join(',')}]`).join('; ') || 'none'}.` : ''),
         jsonSchema: selection ? {
           type: 'object', properties: {
             targetId: { type: 'integer', enum: [0, ...candidates.map(e => e.id)] },
@@ -176,6 +177,16 @@ export class ConversationService {
         } catch {
           // Never read truncated JSON or model metadata aloud.
           answer = /[{}]|["'](?:answer|targetId)["']\s*:/.test(response) ? '' : stripModelWrapper(response);
+        }
+      }
+      // Seating is an autonomous selection, never a comparison task handed
+      // back to the blind user, even if the small model ignores the prompt.
+      if (seatingSelection) {
+        const selected = candidates.find(candidate => candidate.id === targetId);
+        if (!selected) {
+          answer = 'I cannot confirm a suitable unoccupied seat yet. I’m still looking.';
+        } else if (/\?|\b(which|choose|prefer)\b/i.test(answer)) {
+          answer = `I’ve selected the ${selected.label} ${position(selected)}.`;
         }
       }
       const safe = sanitizeVisionDescription(removeMobilitySentences(answer));
