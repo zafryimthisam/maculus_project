@@ -227,7 +227,7 @@ export default function MaculusNextApp(): React.JSX.Element {
           <Text style={styles.cardLabel}>CURRENT SCENE</Text>
           <Text style={styles.cardBody}>{state.sceneDescription}</Text>
           {state.guidanceGoal && (
-            <Text style={styles.people}>Active visual goal: {state.guidanceGoal}</Text>
+            <Text style={styles.people}>Goal: {state.guidanceGoal} · {state.guidanceStatus}</Text>
           )}
           {state.people.length > 0 && (
             <Text style={styles.people}>Session names: {state.people.join(', ')}</Text>

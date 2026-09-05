@@ -89,6 +89,7 @@ export interface NextRuntimeState {
   sessionStartedAt: number | null;
   guidanceActive: boolean;
   guidanceGoal: string | null;
+  guidanceStatus: 'idle' | 'searching' | 'clarifying' | 'tracking' | 'lost';
   cameraReady: boolean;
   cameraSource: CameraSource;
   visionBackend: string;
@@ -152,6 +153,7 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   sessionStartedAt: null,
   guidanceActive: false,
   guidanceGoal: null,
+  guidanceStatus: 'idle',
   cameraReady: false,
   cameraSource: 'none',
   visionBackend: 'not loaded',

@@ -1,6 +1,7 @@
 import { localLlmService } from '../services/LocalLlmService';
 import { modelAssetService } from '../services/ModelAssetService';
 import { NextSceneSnapshot, SafetyState } from './domain';
+import { detectorLabelsForGoal, extractGuidanceGoal } from './GuidanceController';
 
 type HistoryEntry = { role: 'user' | 'assistant'; content: string };
 
@@ -9,6 +10,7 @@ export interface VisionDescriptionResult {
   source: 'vision-language' | 'deterministic' | 'unavailable';
   fallbackReason?: 'no-frame' | 'not-ready' | 'timeout' | 'unsafe-output' | 'inference-error';
   failureDetail?: string;
+  targetId?: number;
 }
 
 export interface ConversationResponse {
@@ -21,11 +23,15 @@ type VisionDescriptionOptions = {
   appendSensor?: boolean;
   conversationHistory?: HistoryEntry[];
   activeGuidanceGoal?: string | null;
+  selectTarget?: boolean;
+  candidateIds?: number[];
 };
 
 type ConversationResponseOptions = {
   visionOnly?: boolean;
   activeGuidanceGoal?: string | null;
+  selectTarget?: boolean;
+  candidateIds?: number[];
 };
 
 export class ConversationService {
@@ -83,7 +89,6 @@ export class ConversationService {
   ): Promise<VisionDescriptionResult> {
     const allowDeterministicFallback = options.allowDeterministicFallback !== false;
     const appendSensor = options.appendSensor !== false;
-    const visualRequest = isVisualSceneRequest(question);
     const sensorSuffix = appendSensor ? sensorDescription(sensor) : '';
     const fallback = `${scene.description}${sensorSuffix}`;
     if (!imageBase64) {
@@ -100,27 +105,52 @@ export class ConversationService {
 
     try {
       await localLlmService.cancel();
+      const goal = options.activeGuidanceGoal || extractGuidanceGoal(question);
+      const candidates = goal ? scene.visibleEntities.filter(e =>
+        (detectorLabelsForGoal(goal).includes(e.label) || e.alias?.toLowerCase() === goal.toLowerCase()) &&
+        (!options.candidateIds || options.candidateIds.includes(e.id)) &&
+        scene.timestamp - e.lastSeenAt <= 1200).slice(0, 6) : [];
+      const selection = options.selectTarget === true && Boolean(goal);
       const response = await localLlmService.completeVision({
         imageBase64,
         prompt: buildVisionPrompt(
           question,
           scene,
           options.conversationHistory,
-          options.activeGuidanceGoal,
-        ),
-        // Liquid's own example uses 64 output tokens. A small allowance above
-        // that keeps two natural spoken sentences possible without making the
-        // user wait for a long visual monologue.
-        maxTokens: 72,
+          goal,
+          selection,
+        ) + (selection ? ` Return JSON with answer (at most two short sentences) and targetId. Choose a target only if its visible appearance meets the request. For sitting, reject occupied or obstructed seating; appearance does not prove safety. If uncertain or several indistinguishable matches remain, ask one short clarification and use targetId 0. Never claim tracking has started. Candidates, with normalized center x,y and width,height: ${candidates.map(e => `${e.id}: ${e.label} ${e.zone} [${[e.cx, e.cy, e.w, e.h].map(n => n.toFixed(2)).join(',')}]`).join('; ') || 'none'}.` : ''),
+        jsonSchema: selection ? {
+          type: 'object', properties: {
+            answer: { type: 'string' },
+            targetId: { type: 'integer', enum: [0, ...candidates.map(e => e.id)] },
+          }, required: ['answer', 'targetId'], additionalProperties: false,
+        } : undefined,
+        maxTokens: selection ? 128 : 96,
         timeoutMs: 30000,
       });
-      const safe = removeMobilitySentences(sanitizeVisionDescription(response));
+      let answer = response;
+      let targetId: number | undefined;
+      if (selection) {
+        try {
+          const parsed = JSON.parse(response);
+          answer = typeof parsed.answer === 'string' ? parsed.answer : '';
+          if (Number.isInteger(parsed.targetId) && candidates.some(e => e.id === parsed.targetId)) {
+            targetId = parsed.targetId;
+          }
+        } catch {
+          // Never read truncated JSON or model metadata aloud.
+          answer = /^\s*[[{]/.test(response) ? '' : response;
+        }
+      }
+      const safe = sanitizeVisionDescription(removeMobilitySentences(answer));
       if (!safe) {
         return visionFallback('unsafe-output', fallback, allowDeterministicFallback);
       }
       return {
-        text: `${visualRequest ? appendMissingPersonAliases(safe, scene) : safe}${sensorSuffix}`,
+        text: `${safe}${sensorSuffix}`,
         source: 'vision-language',
+        ...(targetId !== undefined ? { targetId } : {}),
       };
     } catch (error: any) {
       console.warn('[MaculusNext] On-device visual description failed:', error?.message || error);
@@ -153,7 +183,7 @@ export class ConversationService {
     const question = transcript.trim();
     if (!question) {return { text: 'I did not hear a question.' };}
     if (options.visionOnly || isVisualSceneRequest(question)) {
-      const visualRequest = isVisualSceneRequest(question);
+    const visualRequest = isVisualSceneRequest(question);
       if (!options.visionOnly && /\b(who|person|people)\b/i.test(question) && !imageBase64) {
         return { text: groundedPeopleReply(scene) };
       }
@@ -169,6 +199,8 @@ export class ConversationService {
           appendSensor: visualRequest,
           conversationHistory: this.history.slice(-8),
           activeGuidanceGoal: options.activeGuidanceGoal,
+          selectTarget: options.selectTarget,
+          candidateIds: options.candidateIds,
         },
       );
       this.rememberTurn(question, vision.text);
@@ -229,8 +261,9 @@ export function buildVisionPrompt(
   scene: NextSceneSnapshot,
   history: HistoryEntry[] = [],
   activeGuidanceGoal: string | null = null,
+  forceVisual: boolean = false,
 ): string {
-  const visualRequest = isVisualSceneRequest(question);
+  const visualRequest = forceVisual || isVisualSceneRequest(question) || Boolean(extractGuidanceGoal(question));
   const verifiedObjects = scene.visibleEntities.length === 0
     ? 'No stable object detections are available.'
     : scene.visibleEntities.slice(0, 6).map(entity => {
@@ -254,8 +287,8 @@ export function buildVisionPrompt(
     return [
       'Privately analyze this live camera frame for a blind user.',
       `Request: ${question.trim().slice(0, 200)}`,
-      'Reply directly in one or two short natural sentences using only visible facts.',
-      'For a broad request, give the setting and the most useful people, objects, actions, positions, colors, or readable text. For a find request, say whether it is visible and where it appears.',
+      'Answer the user’s purpose first in at most two short sentences, about 35 words total. Do not repeat objects or list everything.',
+      'For finding or practical needs, identify a useful visible candidate, its position, and any visible limitation. For sitting, check for people or items on the seat; say appears unoccupied only when supported. If no suitable option is visible, say so. For a scene overview mention the setting and two useful landmarks or hazards.',
       recentConversation ? `Recent conversation:\n${recentConversation}` : '',
       goalContext,
       'Use supplied anonymous session names consistently. Mention an obvious hazard.',
@@ -281,10 +314,23 @@ export function sanitizeVisionDescription(text: string): string {
     .replace(/^\s*(assistant|description)\s*:\s*/i, '')
     .replace(/\s+/g, ' ')
     .trim();
-  if (cleaned.length <= 700) {return cleaned;}
-  const shortened = cleaned.slice(0, 700);
-  const sentenceEnd = Math.max(shortened.lastIndexOf('.'), shortened.lastIndexOf('!'), shortened.lastIndexOf('?'));
-  return sentenceEnd >= 120 ? shortened.slice(0, sentenceEnd + 1) : `${shortened.trim()}…`;
+  const sentences = cleaned.match(/[^.!?]+[.!?]+/g) || [];
+  const unique: string[] = [];
+  for (const sentence of sentences) {
+    const normalized = sentence.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+    const words = new Set(normalized.split(/\s+/));
+    if (unique.some(previous => {
+      const previousWords = new Set(previous.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim().split(/\s+/));
+      const overlap = [...words].filter(word => previousWords.has(word)).length;
+      return overlap / Math.max(words.size, previousWords.size) > 0.8;
+    })) {continue;}
+    unique.push(sentence.trim());
+    if (unique.length === 2) {break;}
+  }
+  if (unique.length) {return unique.join(' ');}
+  // Keep a short complete-looking answer without punctuation, but drop cutoff fragments.
+  return cleaned.length <= 240 && !/\b(?:a|an|the|is|are|there|and|of|to|on|with)\s*$/i.test(cleaned)
+    ? cleaned : '';
 }
 
 export function isVisualSceneRequest(text: string): boolean {
@@ -328,10 +374,8 @@ function sensorDescription(sensor: SafetyState): string {
   if (sensor.health === 'emergency' || sensor.health === 'warning') {
     return ` Separately, the ultrasonic sensor reports an obstacle about ${Math.round(sensor.distanceCm || 0)} centimeters ahead.`;
   }
-  if (sensor.health === 'healthy') {
-    return ' Separately, the ultrasonic sensor is healthy and does not currently report a close obstacle.';
-  }
-  return ' The ultrasonic sensor is unavailable, so distance safety is unknown.';
+  // Sensor availability has its own state-change announcement; don't append it to every answer.
+  return '';
 }
 
 function visionFallback(
@@ -366,20 +410,6 @@ export function formatVisionFailureDetail(detail: unknown): string | undefined {
     return 'The vision encoder could not decode the captured camera image.';
   }
   return normalized.length <= 160 ? normalized : `${normalized.slice(0, 157)}…`;
-}
-
-function appendMissingPersonAliases(text: string, scene: NextSceneSnapshot): string {
-  const missingAliases = [...new Set(scene.visibleEntities
-    .filter(entity => entity.label === 'person' && entity.alias)
-    .map(entity => entity.alias!))]
-    .filter(alias => !new RegExp(`\\b${escapeRegExp(alias)}\\b`, 'i').test(text));
-  if (missingAliases.length === 0) {return text;}
-  const labels = missingAliases.map(alias => `${alias} is the anonymous session name for a visible person`).join('; ');
-  return `${text.replace(/[\s.]+$/, '')}. ${labels}.`;
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function containsMobilityInstruction(text: string): boolean {

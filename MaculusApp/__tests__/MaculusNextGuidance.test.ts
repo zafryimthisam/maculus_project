@@ -1,0 +1,144 @@
+import { describe, expect, it } from '@jest/globals';
+import { AmbientGuide, detectorLabelsForGoal, extractGuidanceGoal, GuidanceController } from '../src/next/GuidanceController';
+import { NextSceneEntity, NextSceneSnapshot } from '../src/next/domain';
+
+function entity(id: number, label = 'chair', zone: NextSceneEntity['zone'] = 'left', at = 10000): NextSceneEntity {
+  return { id, label, zone, confidence: 0.9, inPath: false, nearScore: 0.3,
+    firstSeenAt: 9000, lastSeenAt: at, visibility: 'visible', confirmed: true,
+    cx: zone === 'left' ? 0.2 : zone === 'right' ? 0.8 : 0.5, cy: 0.5, w: 0.2, h: 0.4 };
+}
+function scene(entities: NextSceneEntity[], at = 10000): NextSceneSnapshot {
+  return { entities, visibleEntities: entities, timestamp: at, revision: 1, changes: [], pathBlocked: false, description: '' };
+}
+
+describe('Natural goal requests', () => {
+  it.each(['Find somewhere to sit', 'I would like to sit down', 'I need a seat', 'Where can I sit?', 'I am tired'])('understands %s', text => {
+    expect(extractGuidanceGoal(text)).toBe('place to sit');
+  });
+  it.each(['Where is my backpack?', 'Do you see a chair?', 'How can I find a chair online?', 'Do not follow that person', 'What is a chair?'])('keeps information or negative requests out of tracking: %s', text => {
+    expect(extractGuidanceGoal(text)).toBeNull();
+  });
+  it('supports objects, people and descriptive phrases', () => {
+    expect(extractGuidanceGoal('Please keep an eye on the person in blue')).toBe('person in blue');
+    expect(extractGuidanceGoal('Help me find my backpack')).toBe('my backpack');
+    expect(detectorLabelsForGoal('person in blue')).toEqual(['person']);
+    expect(detectorLabelsForGoal('red umbrella')).toEqual(['umbrella']);
+    expect(detectorLabelsForGoal('entrance')).toEqual([]);
+  });
+});
+
+describe('Persistent target guidance', () => {
+  it('locks one instance, updates direction, and does not select a better-scoring neighbor', () => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    expect(guide.next(scene([entity(1)]), 10000)?.text).toContain('to your left');
+    const next = scene([entity(2, 'chair', 'ahead', 12000), entity(1, 'chair', 'right', 12000)], 12000);
+    guide.observe(next, 12000);
+    expect(guide.next(next, 12000)?.text).toContain('now to your right');
+    expect(guide.targetId).toBe(1);
+  });
+  it('asks for a choice when several instances match, including those in the same direction', () => {
+    const guide = new GuidanceController();
+    guide.start('person');
+    expect(guide.next(scene([entity(1, 'person'), entity(2, 'person')]), 10000)?.text).toContain('Which one do you mean?');
+    expect(guide.targetId).toBeNull();
+    expect(guide.status).toBe('clarifying');
+  });
+  it('does not assume a seat or a clothing match is suitable from its category alone', () => {
+    for (const [goal, label] of [['place to sit', 'chair'], ['person in blue', 'person']]) {
+      const guide = new GuidanceController();
+      guide.start(goal);
+      guide.next(scene([entity(1, label)]), 10000);
+      expect(guide.targetId).toBeNull();
+      expect(guide.needsAnalysis()).toBe(true);
+      expect(guide.select(1, scene([entity(1, label)]))).toBe(true);
+    }
+  });
+  it('honors an AI clarification instead of automatically choosing the only detector match', () => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    guide.requireClarification();
+    guide.next(scene([entity(1)]), 10000);
+    expect(guide.targetId).toBeNull();
+  });
+  it('reports loss once and keeps ownership when another person remains visible', () => {
+    const guide = new GuidanceController();
+    guide.start('person');
+    guide.next(scene([entity(1, 'person')]), 10000);
+    const next = scene([entity(2, 'person', 'ahead', 13000)], 13000);
+    guide.observe(next, 13000);
+    expect(guide.next(next, 13000)?.text).toContain('out of view');
+    expect(guide.next(next, 16000)).toBeNull();
+    expect(guide.targetId).toBe(1);
+  });
+  it('recovers short occlusions but refuses reused IDs after a long gap', () => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    guide.next(scene([entity(1)]), 10000);
+    guide.observe(scene([], 12000), 12000);
+    guide.next(scene([], 12000), 12000);
+    const recovered = scene([entity(1, 'chair', 'left', 14000)], 14000);
+    guide.observe(recovered, 14000);
+    expect(guide.next(recovered, 14000)?.text).toContain('back in view');
+    const uncertain = scene([entity(1, 'chair', 'left', 24000)], 24000);
+    guide.observe(uncertain, 24000);
+    expect(guide.next(uncertain, 24000)?.text).toContain("can't confirm");
+    expect(guide.status).toBe('lost');
+  });
+  it('keeps tracking observations fresh through a long AI answer without consuming cues', () => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    guide.next(scene([entity(1)]), 10000);
+    for (let now = 11000; now <= 40000; now += 1000) {
+      guide.observe(scene([entity(1, 'chair', 'right', now)], now), now);
+    }
+    expect(guide.next(scene([entity(1, 'chair', 'right', 40000)], 40000), 40000)?.text).toContain('now to your right');
+    expect(guide.status).toBe('tracking');
+  });
+  it('rejects stale candidates, supports explicit switching, and clears completed goals', () => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    expect(guide.select(1, scene([entity(1)], 14000))).toBe(false);
+    guide.select(1, scene([entity(1)]));
+    guide.start('chair right', true);
+    const choices = scene([entity(1, 'chair', 'right'), entity(2, 'chair', 'right')]);
+    expect(guide.select(1, choices)).toBe(false);
+    expect(guide.select(2, choices)).toBe(true);
+    guide.reset();
+    expect(guide.next(choices, 20000)).toBeNull();
+    expect(guide.status).toBe('idle');
+  });
+  it('requires a new selection after switching cameras even when IDs are reused', () => {
+    const guide = new GuidanceController();
+    guide.start('chair');
+    guide.next(scene([entity(1)]), 10000);
+    guide.invalidate();
+    const next = scene([entity(1, 'chair', 'right', 13000)], 13000);
+    guide.observe(next, 13000);
+    expect(guide.next(next, 13000)?.text).toContain("can't confirm");
+  });
+});
+
+describe('Outdoor ambient guidance', () => {
+  it('announces stationary side objects, and retains remaining sightings until the speaker is free', () => {
+    const guide = new AmbientGuide();
+    const objects = [entity(1, 'car'), entity(2, 'bench', 'right'), entity(3, 'bicycle')];
+    const first = guide.next(scene(objects), 10000);
+    expect(first?.text).toContain('Car to your left');
+    expect(first?.text).toContain('Bench to your right');
+    const updated = objects.map(e => ({ ...e, lastSeenAt: 14000 }));
+    expect(guide.next(scene(updated, 14000), 14000)?.text).toContain('Bicycle');
+    expect(guide.next(scene(updated, 14000), 14000)).toBeNull();
+  });
+  it('uses the current position after a delayed announcement and drops stale sightings', () => {
+    const guide = new AmbientGuide();
+    expect(guide.next(scene([entity(1)]), 15000)).toBeNull();
+    expect(guide.next(scene([entity(1, 'chair', 'right', 16000)], 16000), 16000)?.text).toContain('right');
+  });
+  it('prioritizes an obstacle over ordinary goal tracking', () => {
+    const guide = new AmbientGuide();
+    const obstacle = { ...entity(1, 'car', 'ahead', 20000), inPath: true };
+    expect(guide.next({ ...scene([obstacle], 20000), pathBlocked: true }, 20000, true)?.kind).toBe('path-blocked');
+    expect(guide.next(scene([obstacle], 24000), 24000, true)).toBeNull();
+  });
+});

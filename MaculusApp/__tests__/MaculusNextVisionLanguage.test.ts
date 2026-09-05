@@ -21,7 +21,7 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(prompt).not.toContain('path does not currently look blocked');
   });
 
-  it('speaks a natural VLM result while appending sensor facts outside the model', async () => {
+  it('keeps the answer short without unrelated alias or healthy-sensor appendices', async () => {
     const service = readyService();
     jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(
       'A person in a blue shirt is standing beside a wooden chair. A doorway is visible behind them.',
@@ -31,10 +31,10 @@ describe('MaculusNext vision-language descriptions', () => {
 
     expect(result.source).toBe('vision-language');
     expect(result.text).toContain('blue shirt');
-    expect(result.text).toContain('Alex is the anonymous session name');
-    expect(result.text).toContain('Separately, the ultrasonic sensor is healthy');
+    expect(result.text).not.toContain('anonymous session name');
+    expect(result.text).not.toContain('ultrasonic sensor');
     expect(localLlmService.completeVision).toHaveBeenCalledWith(expect.objectContaining({
-      maxTokens: 72,
+      maxTokens: 96,
       timeoutMs: 30000,
     }));
   });
@@ -132,6 +132,48 @@ describe('MaculusNext vision-language descriptions', () => {
       prompt: expect.stringContaining('Answer it directly from general knowledge'),
     }));
     expect(textCompletion).not.toHaveBeenCalled();
+  });
+
+  it('removes repeated inventory sentences and an unfinished tail', () => {
+    expect(sanitizeVisionDescription('A chair is on the left. A chair is on the left. A bag is on the right couch. There is a'))
+      .toBe('A chair is on the left. A bag is on the right couch.');
+    expect(sanitizeVisionDescription('There is a')).toBe('');
+  });
+
+  it('grounds a seating selection in an eligible detector ID and keeps metadata out of speech', async () => {
+    const service = readyService();
+    const completion = jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(JSON.stringify({
+      answer: 'The chair to your left appears unoccupied.', targetId: 1,
+    }));
+    const result = await service.describeFrame('image', scene(), healthySensor(), 'I need somewhere to sit', {
+      activeGuidanceGoal: 'place to sit', selectTarget: true, candidateIds: [1],
+    });
+    expect(result).toMatchObject({ text: 'The chair to your left appears unoccupied.', targetId: 1 });
+    expect(completion).toHaveBeenCalledWith(expect.objectContaining({
+      jsonSchema: expect.objectContaining({ properties: expect.objectContaining({ targetId: { type: 'integer', enum: [0, 1] } }) }),
+      prompt: expect.stringContaining('reject occupied or obstructed seating'),
+    }));
+  });
+
+  it.each([0, 2, 999])('refuses an absent or unrelated selected ID %s', async targetId => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue(JSON.stringify({ answer: 'Which chair do you mean?', targetId }));
+    const result = await service.describeFrame('image', scene(), healthySensor(), 'Find a chair', {
+      activeGuidanceGoal: 'chair', selectTarget: true, candidateIds: [1],
+    });
+    expect(result.targetId).toBeUndefined();
+    expect(result.text).toBe('Which chair do you mean?');
+  });
+
+  it('does not speak truncated selection JSON', async () => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue('{"answer":"The chair');
+    const result = await service.describeFrame('image', scene(), healthySensor(), 'Find a chair', {
+      activeGuidanceGoal: 'chair', selectTarget: true, allowDeterministicFallback: false,
+    });
+    expect(result.source).toBe('unavailable');
+    expect(result.text).not.toContain('{');
+    expect(result.targetId).toBeUndefined();
   });
 
   it('passes a captured example transcript into the VLM and returns its answer', async () => {

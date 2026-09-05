@@ -131,11 +131,15 @@ export class SpeechCoordinator {
       kind: source === 'conversation' ? 'conversation' : source === 'safety' ? 'sensor' : 'scene-change',
       priority,
       text: trimmed,
-      expiresAt: Date.now() + (priority === 2 ? 2500 : 12000),
+      expiresAt: Date.now() + (priority === 2 || source === 'ambient' ? 2500 : 12000),
       haptic: false,
       interruption: immediate ? 'immediate' : source === 'conversation' ? 'after-command' : 'never',
       source,
     });
+  }
+
+  canSpeakScene(): boolean {
+    return this.initialized && !this.isConversationActive() && !tts.isSpeaking();
   }
 
   private clearConversationReleaseTimer(): void {

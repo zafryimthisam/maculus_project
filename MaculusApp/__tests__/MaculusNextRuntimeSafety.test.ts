@@ -189,3 +189,81 @@ function sceneSnapshot() {
     description: 'No stable objects are visible.',
   };
 }
+
+describe('Goal handoff and cancellation', () => {
+  function setup() {
+    const runtime = new MaculusRuntime();
+    const testable = runtime as any;
+    const now = Date.now();
+    const chair = { id: 1, label: 'chair', zone: 'left', confidence: 0.9, inPath: false,
+      nearScore: 0.3, firstSeenAt: now - 1000, lastSeenAt: now, visibility: 'visible', confirmed: true,
+      cx: 0.2, cy: 0.5, w: 0.2, h: 0.3 };
+    let snapshot: any = { ...sceneSnapshot(), timestamp: now, visibleEntities: [chair], entities: [chair] };
+    testable.running = true;
+    testable.state = { ...INITIAL_NEXT_RUNTIME_STATE, phase: 'running', cameraReady: true, guidanceActive: true };
+    testable.safety = { getState: () => healthySafety() };
+    testable.scene = { getSnapshot: () => snapshot };
+    testable.currentVisionObservation = () => ({ frame: { base64: 'frame' }, snapshot, receivedAt: Date.now() });
+    testable.speech = { speakConversation: jest.fn(), speakSystem: jest.fn(), beginConversationTurn: jest.fn(),
+      endConversationTurn: jest.fn(), canSpeakScene: () => true, isConversationActive: () => false, speakScene: jest.fn() };
+    testable.conversation = { respondWithMetadata: jest.fn(async () => ({
+      text: 'A chair appears unoccupied on the left.',
+      vision: { text: 'A chair appears unoccupied on the left.', source: 'vision-language', targetId: 1 },
+    })), cancel: jest.fn(async () => {}), isVisionReady: () => false };
+    return { runtime, testable, setSnapshot: (value: any) => {snapshot = value;} };
+  }
+
+  const turn = { transcript: 'I need somewhere to sit', timestamp: 10000, confidence: 0.9, sessionId: 'test' };
+
+  it('locks the AI-selected visible instance and publishes tracking state', async () => {
+    const { runtime, testable } = setup();
+    await testable.handleVoiceTurn(turn, null);
+    expect(testable.guide.targetId).toBe(1);
+    expect(runtime.getState()).toMatchObject({ guidanceGoal: 'place to sit', guidanceStatus: 'tracking' });
+    expect(testable.conversation.respondWithMetadata).toHaveBeenCalledWith(
+      turn.transcript, expect.any(Object), expect.any(Object), 'frame',
+      { visionOnly: true, activeGuidanceGoal: 'place to sit', selectTarget: true, candidateIds: [1] },
+    );
+  });
+
+  it('rejects a target which disappeared while the AI was answering', async () => {
+    const { testable, setSnapshot } = setup();
+    testable.conversation.respondWithMetadata.mockImplementation(async () => {
+      setSnapshot({ ...sceneSnapshot(), timestamp: Date.now() });
+      return { text: 'Chair to your left.', vision: { text: 'Chair to your left.', source: 'vision-language', targetId: 1 } };
+    });
+    await testable.handleVoiceTurn(turn, null);
+    expect(testable.guide.targetId).toBeNull();
+    expect(testable.speech.speakConversation).toHaveBeenCalledWith(
+      expect.stringContaining('no longer in view'), expect.any(String),
+    );
+  });
+
+  it('cancelling a pending goal prevents its late AI result from speaking or reactivating tracking', async () => {
+    const { runtime, testable } = setup();
+    let finish!: (value: any) => void;
+    let started!: () => void;
+    const began = new Promise<void>(resolve => {started = resolve;});
+    testable.conversation.respondWithMetadata.mockImplementation(() => {
+      started();
+      return new Promise(resolve => {finish = resolve;});
+    });
+    const pending = testable.handleVoiceTurn(turn, null);
+    await began;
+    testable.handleFastCommand('cancel_goal');
+    finish({ text: 'Chair on the left.', vision: { text: 'Chair on the left.', source: 'vision-language', targetId: 1 } });
+    await pending;
+    expect(testable.speech.speakConversation).not.toHaveBeenCalled();
+    expect(runtime.getState()).toMatchObject({ guidanceGoal: null, guidanceStatus: 'idle', descriptionInProgress: false });
+  });
+
+  it('retains first sightings across a busy speaker without needing a movement event', () => {
+    const { testable } = setup();
+    testable.speech.canSpeakScene = () => false;
+    testable.publishGuidance(testable.scene.getSnapshot());
+    expect(testable.speech.speakScene).not.toHaveBeenCalled();
+    testable.speech.canSpeakScene = () => true;
+    testable.publishGuidance(testable.scene.getSnapshot());
+    expect(testable.speech.speakScene).toHaveBeenCalledWith(expect.objectContaining({ text: 'Chair to your left.' }));
+  });
+});

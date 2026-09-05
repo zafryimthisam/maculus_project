@@ -181,8 +181,8 @@ export class SessionSceneStore {
         timestamp: observation.timestamp,
         speak: true,
         text: pathBlocked
-          ? 'The visible center path may now be blocked. Pause while I keep checking.'
-          : 'The visible center path appears open again. Confirm with the obstacle sensor before moving.',
+          ? 'Possible obstacle ahead. Pause.'
+          : 'The obstacle is no longer visible.',
       });
       this.lastPathBlocked = pathBlocked;
       this.pendingPathBlocked = null;
@@ -205,6 +205,7 @@ export class SessionSceneStore {
   ): InternalTrack | null {
     let best: InternalTrack | null = null;
     let bestScore = -Infinity;
+    let runnerUpScore = -Infinity;
     for (const id of candidates) {
       const track = this.tracks.get(id);
       if (!track || track.label !== detection.label) {continue;}
@@ -215,15 +216,19 @@ export class SessionSceneStore {
       if (age > ACTIVE_MATCH_MS && (similarity === null || similarity < PERSON_REID_SIMILARITY)) {continue;}
       const centerDistance = Math.hypot(detection.cx - track.cx, detection.cy - track.cy);
       const overlap = iou(detection, track);
-      if (similarity !== null && similarity < 0.55 && overlap < 0.25) {continue;}
+      if (similarity !== null && similarity < 0.55) {continue;}
       if (similarity === null && overlap < 0.06 && centerDistance > 0.28) {continue;}
       const score = overlap * 2 + Math.max(0, 1 - centerDistance * 2.5) + (similarity ?? 0) * 2.5;
       if (score > bestScore) {
+        runnerUpScore = bestScore;
         bestScore = score;
         best = track;
+      } else if (score > runnerUpScore) {
+        runnerUpScore = score;
       }
     }
-    return best;
+    // Ambiguous overlap is a lost association, never evidence to swap target identities.
+    return bestScore - runnerUpScore < 0.18 ? null : best;
   }
 
   private createTrack(detection: Detection, embedding: number[] | undefined, now: number): InternalTrack {
@@ -337,7 +342,7 @@ export class SessionSceneStore {
         kind: 'entered',
         entityId: track.id,
         timestamp: now,
-        speak: track.label === 'person' || track.inPath,
+        speak: true,
         text: `${displayName(track)} is ${track.zone === 'ahead' ? 'ahead' : `to the ${track.zone}`}${track.inPath ? ', in the center path' : ''}.`,
       });
       track.lastAnnouncedCorrectedCx = track.cx - this.cameraOffsetX;
@@ -505,7 +510,7 @@ function describeEntities(entities: NextSceneEntity[], pathBlocked: boolean): st
     const where = entity.zone === 'ahead' ? 'ahead' : `to the ${entity.zone}`;
     return `${displayName(entity)} ${where}${entity.inPath ? ' in the center path' : ''}`;
   });
-  return `${items.join(', ')}. The visible center path ${pathBlocked ? 'may be blocked' : 'does not currently look blocked'}.`;
+  return `${items.slice(0, 3).join(', ')}.${pathBlocked ? ' Possible obstacle ahead.' : ''}`;
 }
 
 function displayName(entity: Pick<NextSceneEntity, 'label' | 'alias'>): string {

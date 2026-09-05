@@ -14,6 +14,7 @@ export interface LocalVisionCompletionRequest {
   prompt: string;
   maxTokens: number;
   timeoutMs: number;
+  jsonSchema?: object;
 }
 
 type LlamaContextLike = {
@@ -215,7 +216,11 @@ export class LocalLlmService {
         jinja: true,
         temperature: 0.1,
         min_p: 0.15,
-        repeat_penalty: 1.05,
+        repeat_penalty: 1.12,
+        response_format: request.jsonSchema ? {
+          type: 'json_schema',
+          json_schema: { strict: true, schema: request.jsonSchema },
+        } : undefined,
         n_predict: this.thermalThrottled ? Math.min(request.maxTokens, 72) : request.maxTokens,
         stop: ['<|endoftext|>', '<|im_end|>', '<|end_of_turn|>'],
       }, (chunk: { token?: string }) => {

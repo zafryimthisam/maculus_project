@@ -627,6 +627,14 @@ export class VoiceCommandService {
     this.conversationQuietUntil = Math.max(this.conversationQuietUntil, Date.now() + effective);
   }
 
+  finishGuidanceTurn(): void {
+    if (this.isCommandCaptureActive()) {return;}
+    this.conversationQuietUntil = 0;
+    this.followupWindowUntil = 0;
+    if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
+    this.followupWindowTimer = null;
+  }
+
   /**
    * In alwaysListening (Live Mode), open a short follow-up window during
    * which the user can speak again without saying the wake word. Called
