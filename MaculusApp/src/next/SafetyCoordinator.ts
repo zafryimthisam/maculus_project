@@ -8,6 +8,7 @@ const FAILURE_CONFIRMATION_COUNT = 2;
 const WARNING_REPEAT_MS = 4000;
 const EMERGENCY_REPEAT_MS = 6000;
 const CLOSER_DELTA_CM = 15;
+const DISTANCE_TOLERANCE_CM = 5;
 
 export class SafetyCoordinator {
   private state: SafetyState = { ...EMPTY_SAFETY_STATE };
@@ -16,6 +17,9 @@ export class SafetyCoordinator {
   private lastAlertAt = 0;
   private lastAlertDistance: number | null = null;
   private faultAnnounced = false;
+  private reportedDistance: number | null = null;
+  private lastAlertKind: 'warning' | 'emergency' | null = null;
+  private warningDeferred = false;
 
   reset(): void {
     this.state = { ...EMPTY_SAFETY_STATE };
@@ -24,10 +28,17 @@ export class SafetyCoordinator {
     this.lastAlertAt = 0;
     this.lastAlertDistance = null;
     this.faultAnnounced = false;
+    this.reportedDistance = null;
+    this.lastAlertKind = null;
+    this.warningDeferred = false;
   }
 
   getState(): SafetyState {
     return { ...this.state };
+  }
+
+  deferWarningAnnouncement(): void {
+    this.warningDeferred = true;
   }
 
   ingest(input: SafetyInput): SafetyAlert | null {
@@ -40,6 +51,12 @@ export class SafetyCoordinator {
     const distanceCm = reading.distance_cm;
     this.consecutiveFailures = 0;
     const emergency = distanceCm <= EMERGENCY_CM;
+    const enteringEmergency = emergency && this.lastAlertKind !== 'emergency';
+    if (this.reportedDistance === null || enteringEmergency ||
+        Math.abs(distanceCm - this.reportedDistance) > DISTANCE_TOLERANCE_CM) {
+      this.reportedDistance = distanceCm;
+    }
+    const reported = roundedDistance(this.reportedDistance);
     const warning = reading.obstacle || distanceCm < reading.threshold_cm;
 
     if (emergency || warning) {
@@ -51,17 +68,22 @@ export class SafetyCoordinator {
         lastValidAt: now,
         sequence: reading.sequence ?? null,
         message: emergency
-          ? `Emergency obstacle at ${roundedDistance(distanceCm)} centimeters`
-          : `Obstacle at ${roundedDistance(distanceCm)} centimeters`,
+          ? `Emergency obstacle at ${reported} centimeters`
+          : `Obstacle at ${reported} centimeters`,
       };
       const repeatMs = emergency ? EMERGENCY_REPEAT_MS : WARNING_REPEAT_MS;
       const movedCloser = this.lastAlertDistance === null || this.lastAlertDistance - distanceCm >= CLOSER_DELTA_CM;
-      if (now - this.lastAlertAt < repeatMs && !movedCloser) {
-        return null;
+      const firstAlert = this.lastAlertDistance === null;
+      const distanceChanged = firstAlert || Math.abs(distanceCm - this.lastAlertDistance!) > DISTANCE_TOLERANCE_CM;
+      if (!firstAlert && !enteringEmergency) {
+        if (!emergency && !distanceChanged && !this.warningDeferred) {return null;}
+        if (now - this.lastAlertAt < repeatMs && !movedCloser) {return null;}
       }
       this.lastAlertAt = now;
       this.lastAlertDistance = distanceCm;
-      const rounded = roundedDistance(distanceCm);
+      this.lastAlertKind = emergency ? 'emergency' : 'warning';
+      this.warningDeferred = false;
+      const rounded = reported;
       return {
         key: `${emergency ? 'emergency' : 'warning'}:${Math.round(rounded / 10)}`,
         priority: emergency ? 2 : 1,
@@ -89,6 +111,8 @@ export class SafetyCoordinator {
       message: 'Obstacle sensor healthy',
     };
     this.lastAlertDistance = null;
+    this.lastAlertKind = null;
+    this.warningDeferred = false;
     if (wasBlocked) {
       return {
         key: `sensor-clear:${reading.sequence ?? now}`,
@@ -108,6 +132,9 @@ export class SafetyCoordinator {
 
   private recordFailure(now: number): SafetyAlert | null {
     this.consecutiveFailures += 1;
+    this.reportedDistance = null;
+    this.lastAlertDistance = null;
+    this.lastAlertKind = null;
     this.consecutiveClear = 0;
     this.state = {
       ...this.state,

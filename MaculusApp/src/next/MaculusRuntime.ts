@@ -784,6 +784,9 @@ export class MaculusRuntime {
       if (this.sensorFaultAnnounced) {return;}
       this.sensorFaultAnnounced = true;
     }
+    if (alert.kind === 'warning' && this.speech.isConversationActive()) {
+      this.safety.deferWarningAnnouncement();
+    }
     this.speech.speakSafety(alert);
   }
 

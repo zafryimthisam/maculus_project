@@ -105,3 +105,52 @@ describe('MaculusNext SafetyCoordinator', () => {
     expect(safety.getState().health).toBe('fault');
   });
 });
+
+
+describe('Obstacle distance narration tolerance', () => {
+  const ingest = (safety: SafetyCoordinator, cm: number, at: number) =>
+    safety.ingest({reading: reading({distance_cm: cm, obstacle: true}), receivedAt: at});
+
+  it('ignores inclusive five-centimeter jitter, even after the old repeat timer', () => {
+    const safety = new SafetyCoordinator();
+    expect(ingest(safety, 60, 1000)?.text).toContain('60 centimeters');
+    for (const [cm, at] of [[65, 6000], [60, 11000], [55, 16000], [64, 21000]]) {
+      expect(ingest(safety, cm, at)).toBeNull();
+      expect(safety.getState().message).toContain('60 centimeters');
+      expect(safety.getState().distanceCm).toBe(cm);
+    }
+  });
+
+  it('compares cumulative movement with the last announced distance', () => {
+    const safety = new SafetyCoordinator();
+    ingest(safety, 60, 1000);
+    expect(ingest(safety, 63, 6000)).toBeNull();
+    expect(ingest(safety, 66, 11000)?.text).toContain('65 centimeters');
+    expect(ingest(safety, 63, 16000)).toBeNull();
+  });
+
+  it('immediately escalates across 40cm despite a five-centimeter difference', () => {
+    const safety = new SafetyCoordinator();
+    ingest(safety, 45, 1000);
+    expect(ingest(safety, 40, 1100)?.kind).toBe('emergency');
+    expect(ingest(safety, 39, 1200)).toBeNull();
+    expect(ingest(safety, 40, 7100)?.kind).toBe('emergency');
+  });
+
+  it('retries a warning deferred during conversation', () => {
+    const safety = new SafetyCoordinator();
+    ingest(safety, 60, 1000);
+    safety.deferWarningAnnouncement();
+    expect(ingest(safety, 65, 2000)).toBeNull();
+    expect(ingest(safety, 65, 5000)?.kind).toBe('warning');
+  });
+
+  it('announces again after sensor recovery or a new session', () => {
+    const safety = new SafetyCoordinator();
+    ingest(safety, 60, 1000);
+    safety.recordTransportFailure('offline', 2000);
+    expect(ingest(safety, 60, 2100)?.kind).toBe('warning');
+    safety.reset();
+    expect(ingest(safety, 60, 2200)?.kind).toBe('warning');
+  });
+});
