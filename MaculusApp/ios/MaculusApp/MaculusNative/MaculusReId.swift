@@ -5,7 +5,7 @@ import onnxruntime_objc
 
 @objc(MaculusReId)
 final class MaculusReId: NSObject {
-  private let queue = DispatchQueue(label: "com.maculus.reid", qos: .utility)
+  private let queue = DispatchQueue(label: "com.maculus.reid", qos: .utility, autoreleaseFrequency: .workItem)
   private var session: ORTSession?
   private let inputWidth = 128
   private let inputHeight = 256

@@ -13,7 +13,7 @@ final class MaculusDeviceCamera: NSObject, AVCaptureVideoDataOutputSampleBufferD
     let capturedAt: Double
   }
 
-  private let queue = DispatchQueue(label: "com.maculus.device-camera", qos: .userInitiated)
+  private let queue = DispatchQueue(label: "com.maculus.device-camera", qos: .userInitiated, autoreleaseFrequency: .workItem)
   private let session = AVCaptureSession()
   private let videoOutput = AVCaptureVideoDataOutput()
   private let imageContext = CIContext(options: [CIContextOption.cacheIntermediates: false])

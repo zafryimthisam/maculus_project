@@ -28,7 +28,7 @@ import {
 import { SafetyCoordinator } from './SafetyCoordinator';
 import { SessionSceneStore } from './SessionSceneStore';
 import { SpeechCoordinator } from './SpeechCoordinator';
-import { AmbientGuide, extractGuidanceGoal, GuidanceController } from './GuidanceController';
+import { AmbientGuide, detectorLabelsForGoal, extractGuidanceGoal, GuidanceController } from './GuidanceController';
 export { extractGuidanceGoal, detectorLabelsForGoal } from './GuidanceController';
 
 type RuntimeListener = (state: NextRuntimeState) => void;
@@ -94,16 +94,14 @@ export class MaculusRuntime {
           Boolean(status.thermalThrottled),
         );
         this.update({ model: nextModelState(status) });
-        if (
-          this.running &&
-          status.state === 'ready' &&
-          status.visionSupported === true &&
-          !this.conversation.isReady()
-        ) {
-          const generation = this.generation;
-          this.conversation.initialize().then(conversationReady => {
-            if (this.running && generation === this.generation) {this.update({ conversationReady });}
-          }).catch(error => console.warn('[MaculusNext] Vision model reload failed:', error));
+        // Recovery enables an explicit request; never immediately reload the model
+        // which just triggered a memory warning.
+        if (status.visionSupported === false) {
+          this.assistantGeneration += 1;
+          this.assistantBusy = false;
+          this.speech.endConversationTurn();
+          soundCueService.stopProcessing().catch(() => {});
+          this.update({ conversationReady: false, descriptionInProgress: false });
         }
       });
     }
@@ -638,17 +636,18 @@ export class MaculusRuntime {
   private publishGuidance(snapshot: NextSceneSnapshot): void {
     const now = Date.now();
     this.guide.observe(snapshot, now);
+    this.ambient.observe(snapshot, now);
     const candidates = this.guide.candidates({ ...snapshot, timestamp: now }).map(e => e.id).sort().join(',');
     if (this.guide.needsAnalysis() && candidates && candidates !== this.lastGoalAnalysisCandidates &&
         !this.assistantBusy && !this.speech.isConversationActive() &&
         this.safety.getState().health !== 'emergency' &&
-        now - this.lastGoalAnalysisAt >= 15000 && this.conversation.isVisionReady()) {
+        now - this.lastGoalAnalysisAt >= 15000 && this.state.model.state === 'ready' && this.state.model.supported) {
       this.lastGoalAnalysisCandidates = candidates;
       this.lastGoalAnalysisAt = now;
       this.refreshGoalSelection().catch(error => console.warn('[MaculusNext] Goal review failed:', error));
     }
     if (this.speech.canSpeakScene() && this.safety.getState().health !== 'emergency') {
-      const ambient = this.ambient.next(snapshot, now, Boolean(this.activeGuidanceGoal));
+      const ambient = this.ambient.next(snapshot, now, Boolean(this.activeGuidanceGoal), this.guide.targetId);
       const speakable = ambient || this.guide.next(snapshot, now);
       if (speakable) {this.speech.speakScene(speakable);}
     }
@@ -735,6 +734,10 @@ export class MaculusRuntime {
     detections: Detection[],
     now: number,
   ): Promise<PersonEmbedding[]> => {
+    if (!reIdService.isReady() && this.activeGuidanceGoal &&
+        detectorLabelsForGoal(this.activeGuidanceGoal).includes('person')) {
+      await reIdService.loadModel();
+    }
     if (!reIdService.isReady() || now - this.lastReIdAt < REID_INTERVAL_MS) {return [];}
     const personIndices = detections
       .map((detection, index) => ({ detection, index }))
@@ -747,16 +750,14 @@ export class MaculusRuntime {
   };
 
   private initializeOptionalModels = async (generation: number): Promise<void> => {
-    const [, , conversationReady] = await Promise.all([
-      depthService.loadModel(),
-      reIdService.loadModel(),
-      this.conversation.initialize(),
-    ]);
+    // Keep YOLO + Whisper resident. Load the VLM on request and Re-ID only
+    // for a person goal; optional monocular depth must not crowd out voice/vision.
+    await this.prepareModelAssets();
     if (!this.running || generation !== this.generation) {
       await this.conversation.destroy();
       return;
     }
-    this.update({ conversationReady });
+    this.update({ conversationReady: this.conversation.isReady() });
   };
 
   private publishScene(snapshot: NextSceneSnapshot, fps: number): void {
@@ -804,7 +805,8 @@ export class MaculusRuntime {
       return;
     }
     const correction = this.activeGuidanceGoal && /\b(other|instead|left one|right one|one on (?:the|my) (?:left|right))\b/i.test(text);
-    const clarification = this.activeGuidanceGoal && this.guide.status === 'clarifying' && /\b(left|right|ahead|track it|that one)\b/i.test(text);
+    const clarification = this.activeGuidanceGoal &&
+      /^(?:(?:please|the|that|a)\s+)*(?:(?:[a-z]+\s+)?(?:on|to)\s+(?:(?:the|my)\s+)?)?(?:left|right|ahead)(?:\s+(?:one|please))?[.!?]*$|^(?:track it|that one)[.!?]*$/i.test(text);
     let requestedGoal = extractGuidanceGoal(text);
     if (this.activeGuidanceGoal && (/^(?:it|them|that)(?: again)?$/i.test(requestedGoal || '') ||
         /^(?:please )?(?:look|try|find it|find them) again[.!?]*$/i.test(text))) {
@@ -825,6 +827,17 @@ export class MaculusRuntime {
       this.lastGoalAnalysisCandidates = '';
       this.lastGoalAnalysisAt = Date.now();
       this.update({ guidanceActive: true, guidanceGoal: requestedGoal, guidanceStatus: this.guide.status });
+      if ((correction || clarification) && !/\b(red|blue|green|black|white|yellow|shirt|wearing)\b/i.test(requestedGoal)) {
+        const current = this.currentVisionObservation();
+        const candidate = current && this.guide.candidates({ ...current.snapshot, timestamp: Date.now() })
+          .sort((a, b) => b.confidence - a.confidence || b.w * b.h - a.w * a.h)[0];
+        if (candidate && this.guide.select(candidate.id, { ...current!.snapshot, timestamp: Date.now() })) {
+          const cue = this.guide.next(current!.snapshot, Date.now());
+          this.update({ guidanceStatus: 'tracking' });
+          if (cue) {this.speech.speakConversation(cue.text, `choice:${turn.timestamp}`);}
+          return;
+        }
+      }
     }
     const generation = this.generation;
     const assistantGeneration = ++this.assistantGeneration;
@@ -870,6 +883,7 @@ export class MaculusRuntime {
       }
       if (response.vision) {
         this.update({
+          conversationReady: response.vision.source === 'vision-language' || this.state.conversationReady,
           detailedDescription: response.vision.text,
           descriptionSource: response.vision.source,
           message: voiceVisionStatusMessage(response.vision),

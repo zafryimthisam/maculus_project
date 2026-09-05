@@ -4,7 +4,7 @@ import onnxruntime_objc
 
 @objc(MaculusDepth)
 final class MaculusDepth: NSObject {
-  private let queue = DispatchQueue(label: "com.maculus.depth", qos: .utility)
+  private let queue = DispatchQueue(label: "com.maculus.depth", qos: .utility, autoreleaseFrequency: .workItem)
   private var session: ORTSession?
   private let inputSize = 256
   private var outputWidth = 518

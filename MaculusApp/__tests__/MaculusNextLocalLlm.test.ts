@@ -21,8 +21,8 @@ describe('MaculusNext local multimodal runtime', () => {
       model: 'file:///models/lfm.gguf',
       n_gpu_layers: 99,
       n_ctx: 1024,
-      n_batch: 512,
-      n_ubatch: 256,
+      n_batch: 256,
+      n_ubatch: 64,
       n_threads: 6,
       cache_type_k: 'q8_0',
       cache_type_v: 'q8_0',
@@ -32,7 +32,7 @@ describe('MaculusNext local multimodal runtime', () => {
       path: 'file:///models/mmproj.gguf',
       use_gpu: false,
       image_min_tokens: 64,
-      image_max_tokens: 192,
+      image_max_tokens: 128,
     }));
   });
 
@@ -96,9 +96,49 @@ describe('MaculusNext local multimodal runtime', () => {
 
     await expect(service.cancel()).resolves.toBeUndefined();
     await expect(service.release()).resolves.toBeUndefined();
-    expect(context.stopCompletion).toHaveBeenCalledTimes(1);
+    expect(context.stopCompletion).toHaveBeenCalledTimes(2);
     expect(context.releaseMultimodal).toHaveBeenCalledTimes(1);
     expect(context.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('deduplicates simultaneous model loads', async () => {
+    initLlama.mockResolvedValue(mockContext());
+    const service = new LocalLlmService();
+    await Promise.all([service.load('/model', '/projector'), service.load('/model', '/projector')]);
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    await service.release();
+  });
+
+  it('prefers parsed assistant content over raw chat-template text', async () => {
+    const context = mockContext();
+    context.completion.mockResolvedValue({ text: 'assistant raw wrapper', content: 'A chair.' } as any);
+    initLlama.mockResolvedValue(context);
+    const service = new LocalLlmService();
+    await service.load('/model', '/projector');
+    await expect(service.completeVision({ imageBase64: 'image', prompt: 'Describe', maxTokens: 72, timeoutMs: 1000 })).resolves.toBe('A chair.');
+    await service.release();
+  });
+
+  it('waits for native inference to drain before releasing its context', async () => {
+    const context = mockContext();
+    let finish!: (value: { text: string }) => void;
+    let started!: () => void;
+    const began = new Promise<void>(resolve => {started = resolve;});
+    context.completion.mockImplementation(() => {started(); return new Promise(resolve => {finish = resolve;});});
+    initLlama.mockResolvedValue(context);
+    const service = new LocalLlmService();
+    await service.load('/model', '/projector');
+    const response = service.completeVision({ imageBase64: 'image', prompt: 'Describe', maxTokens: 72, timeoutMs: 10000 });
+    const settled = response.catch(error => error);
+    await began;
+    const release = service.release();
+    await Promise.resolve(); await Promise.resolve();
+    expect(context.release).not.toHaveBeenCalled();
+    finish({ text: 'Late answer.' });
+    await release;
+    expect(await settled).toEqual(expect.objectContaining({ message: expect.stringContaining('cancelled') }));
+    expect(context.release).toHaveBeenCalledTimes(1);
+    expect(service.getState()).toBe('unloaded');
   });
 });
 

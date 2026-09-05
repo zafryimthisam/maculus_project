@@ -68,6 +68,10 @@ export class GuidanceController {
   }
 
   requireClarification(): void {
+    if (/\b(sit|seat|rest)\b/i.test(this.goal || '')) {
+      this.status = 'searching';
+      return;
+    }
     this.selectionDeclined = true;
     this.status = 'clarifying';
   }
@@ -108,9 +112,12 @@ export class GuidanceController {
       if (candidates.length === 1 && !this.needsVisualSelection && !this.selectionDeclined) {
         this.select(candidates[0].id, scene);
       } else {
-        this.status = candidates.length ? 'clarifying' : 'searching';
+        const seating = /\b(sit|seat|rest)\b/i.test(this.goal);
+        this.status = candidates.length && !seating ? 'clarifying' : 'searching';
         const labels = detectorLabelsForGoal(this.goal);
-        const text = !labels.length
+        const text = seating && candidates.length
+          ? 'I’m checking for an unoccupied seat.'
+          : !labels.length
           ? `I can describe ${this.goal}, but cannot reliably track it yet.`
           : candidates.length > 1
             ? [...new Set(candidates.map(e => e.zone))].length > 1
@@ -186,25 +193,78 @@ export function detectorLabelsForGoal(goal: string): string[] {
 /** Retains first sightings until spoken, always recomputing their current position. */
 export class AmbientGuide {
   private announced = new Map<number, number>();
+  private people = new Map<number, { zone: NextSceneEntity['zone']; seenAt: number; outside: boolean }>();
   private lastSpokenAt = 0;
   private lastPathWarningAt = 0;
   private recentCues: number[] = [];
 
   reset(): void {
+    this.people.clear();
     this.announced.clear(); this.lastSpokenAt = 0; this.lastPathWarningAt = 0; this.recentCues = [];
   }
 
-  next(scene: NextSceneSnapshot, now: number, goalActive: boolean = false): SceneChange | null {
+  observe(scene: NextSceneSnapshot, now: number): void {
+    for (const entity of scene.visibleEntities) {
+      const known = this.people.get(entity.id);
+      if (known && entity.confirmed) {known.seenAt = entity.lastSeenAt;}
+    }
+    for (const [id, person] of this.people) {
+      if (now - person.seenAt > 120000) {this.people.delete(id);}
+    }
+    for (const [id, at] of this.announced) {
+      if (now - at > 120000) {this.announced.delete(id);}
+    }
+    while (this.people.size > 128) {this.people.delete(this.people.keys().next().value!);}
+    while (this.announced.size > 256) {this.announced.delete(this.announced.keys().next().value!);}
+  }
+
+  next(scene: NextSceneSnapshot, now: number, goalActive: boolean = false, selectedTargetId: number | null = null): SceneChange | null {
+    this.observe(scene, now);
     const visible = scene.visibleEntities.filter(e => now - e.lastSeenAt <= 1200);
     if (scene.pathBlocked && visible.some(e => e.inPath) && now - this.lastPathWarningAt > 12000) {
       this.lastSpokenAt = now;
       this.lastPathWarningAt = now;
       return { key: `path:${now}`, kind: 'path-blocked', text: 'Possible obstacle ahead. Pause.', timestamp: now, speak: true };
     }
+    // Retain the last *spoken* position, not transient frame events. This also
+    // survives TTS/AI busy periods. Direction is relative to the camera; it
+    // does not prove that the person, rather than the camera, moved.
+    const people = visible.filter(e => e.label === 'person' && e.confirmed && e.id !== selectedTargetId);
+    this.people.delete(selectedTargetId ?? -1);
+    if (now - this.lastSpokenAt >= 4000) {
+      for (const [id, known] of this.people) {
+        const person = people.find(e => e.id === id);
+        const prefix = person?.alias || (this.people.size > 1 ? `The person previously ${position(known)}` : 'The person');
+        let text = '';
+        let kind: SceneChange['kind'] = 'moved';
+        if (person && (known.outside || person.zone !== known.zone)) {
+          text = `${prefix} is ${known.outside ? 'back in view' : 'now'} ${position(person)}.`;
+          known.zone = person.zone; known.outside = false;
+        } else if (!person && !known.outside && now - known.seenAt >= 2500) {
+          text = `${prefix} is no longer in view.`;
+          known.outside = true; kind = 'left';
+        }
+        if (text) {
+          this.lastSpokenAt = now;
+          return { key: `person:${id}:${now}`, entityId: id, kind, text, timestamp: now, speak: true };
+        }
+      }
+      const newcomers = people.filter(e => !this.people.has(e.id)).sort((a, b) => ambientImportance(b) - ambientImportance(a));
+      if (newcomers.length) {
+        const chosen = newcomers.slice(0, 2);
+        const text = chosen.map(e => `${e.alias || 'Person'} ${position(e)}`).join('. ') + '.';
+        chosen.forEach(e => {
+          this.people.set(e.id, { zone: e.zone, seenAt: e.lastSeenAt, outside: false });
+          this.announced.set(e.id, now);
+        });
+        this.lastSpokenAt = now;
+        return { key: `people:${now}`, kind: 'entered', text, timestamp: now, speak: true };
+      }
+    }
     if (goalActive) {return null;}
     this.recentCues = this.recentCues.filter(at => now - at < 30000);
     if (now - this.lastSpokenAt < 6000 || this.recentCues.length >= 2) {return null;}
-    const candidates = visible.filter(e => !this.announced.has(e.id))
+    const candidates = visible.filter(e => e.label !== 'person' && !this.announced.has(e.id))
       .sort((a, b) => ambientImportance(b) - ambientImportance(a));
     if (candidates.length) {
       // Summarize this scene once; do not drain the rest as a spoken inventory.
@@ -216,7 +276,7 @@ export class AmbientGuide {
       const text = chosen.map(e => `${e.label === 'person' ? 'Person' : e.label[0].toUpperCase() + e.label.slice(1)} ${position(e)}`).join('. ') + '.';
       return { key: `sighting:${chosen.map(e => e.id).join(':')}`, kind: 'entered', text, timestamp: now, speak: true };
     }
-    const movement = scene.changes.find(c => c.kind === 'moved' && c.speak && visible.some(e => e.id === c.entityId));
+    const movement = scene.changes.find(c => c.kind === 'moved' && c.speak && visible.some(e => e.id === c.entityId && e.label !== 'person'));
     if (movement) {this.lastSpokenAt = now; this.recentCues.push(now); return movement;}
     // Bound memory in long outdoor sessions; recently seen IDs retain their deduplication.
     for (const [id, at] of this.announced) {if (now - at > 120000 && !visible.some(e => e.id === id)) {this.announced.delete(id);}}

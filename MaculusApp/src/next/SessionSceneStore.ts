@@ -471,11 +471,14 @@ export class SessionSceneStore {
   private trimTracks(): void {
     if (this.tracks.size <= MAX_SESSION_TRACKS) {return;}
     const removable = [...this.tracks.values()]
-      .filter(track => track.visibility === 'occluded' && track.label !== 'person')
+      .filter(track => track.visibility === 'occluded')
       .sort((a, b) => a.lastSeenAt - b.lastSeenAt);
     for (const track of removable) {
       if (this.tracks.size <= MAX_SESSION_TRACKS) {break;}
       this.tracks.delete(track.id);
+      if (track.identityId && ![...this.tracks.values()].some(other => other.identityId === track.identityId)) {
+        this.identities.delete(track.identityId);
+      }
     }
   }
 }

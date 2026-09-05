@@ -101,6 +101,12 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     queue.async {
       self.memoryPressureUntil = Date().addingTimeInterval(60)
       self.emitCapability()
+      self.queue.asyncAfter(deadline: .now() + 61) { [weak self] in
+        guard let self = self else { return }
+        if let until = self.memoryPressureUntil, until > Date() { return }
+        self.memoryPressureUntil = nil
+        self.emitCapability()
+      }
     }
   }
 

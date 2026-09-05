@@ -239,6 +239,20 @@ describe('Goal handoff and cancellation', () => {
     );
   });
 
+  it.each(['chair to the left', 'the one on the left', 'left'])('resolves %s once without another slow AI selection', async transcript => {
+    const { testable, setSnapshot } = setup();
+    testable.activeGuidanceGoal = 'place to sit';
+    testable.guide.start('place to sit');
+    const snapshot = testable.scene.getSnapshot();
+    const other = { ...snapshot.visibleEntities[0], id: 2, confidence: 0.8 };
+    setSnapshot({ ...snapshot, visibleEntities: [...snapshot.visibleEntities, other] });
+    await testable.handleVoiceTurn({ ...turn, transcript }, null);
+    expect(testable.guide.targetId).toBe(1);
+    expect(testable.guide.status).toBe('tracking');
+    expect(testable.conversation.respondWithMetadata).not.toHaveBeenCalled();
+    expect(testable.speech.speakConversation).toHaveBeenCalledWith(expect.stringContaining('to your left'), expect.any(String));
+  });
+
   it('cancelling a pending goal prevents its late AI result from speaking or reactivating tracking', async () => {
     const { runtime, testable } = setup();
     let finish!: (value: any) => void;

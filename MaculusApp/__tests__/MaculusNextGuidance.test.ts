@@ -120,6 +120,35 @@ describe('Persistent target guidance', () => {
 });
 
 describe('Outdoor ambient guidance', () => {
+  it('reports people entering, changing relative position, leaving and returning during a goal', () => {
+    const guide = new AmbientGuide();
+    expect(guide.next(scene([entity(1, 'person')]), 10000, true)?.text).toContain('Person to your left');
+    expect(guide.next(scene([entity(1, 'person', 'right', 14000)], 14000), 14000, true)?.text).toContain('now to your right');
+    expect(guide.next(scene([], 18000), 18000, true)?.text).toContain('no longer in view');
+    expect(guide.next(scene([], 22000), 22000, true)).toBeNull();
+    expect(guide.next(scene([entity(1, 'person', 'ahead', 24000)], 24000), 24000, true)?.text).toContain('back in view straight ahead');
+  });
+  it('retains the last spoken position while speech is busy, but ignores brief occlusions', () => {
+    const guide = new AmbientGuide();
+    guide.next(scene([entity(1, 'person')]), 10000);
+    for (let at = 11000; at <= 30000; at += 1000) {
+      guide.observe(scene([entity(1, 'person', 'right', at)], at), at);
+    }
+    expect(guide.next(scene([], 31000), 31000)).toBeNull();
+    expect(guide.next(scene([entity(1, 'person', 'right', 32000)], 32000), 32000)?.text).toContain('now to your right');
+  });
+  it('does not duplicate the selected person or treat camera-relative position as proven motion', () => {
+    const guide = new AmbientGuide();
+    expect(guide.next(scene([entity(1, 'person')]), 10000, true, 1)).toBeNull();
+    const cue = guide.next(scene([entity(1, 'person'), entity(2, 'person', 'right')]), 10000, true, 1);
+    expect(cue?.text).toBe('Person to your right.');
+  });
+  it('paces crowded person appearances without repeating stationary people', () => {
+    const guide = new AmbientGuide();
+    const people = [1, 2, 3].map(id => entity(id, 'person'));
+    expect(guide.next(scene(people), 10000)?.text.match(/Person/g)).toHaveLength(2);
+    expect(guide.next(scene(people), 10500)).toBeNull();
+  });
   it('summarizes two useful stationary objects without listing the rest afterward', () => {
     const guide = new AmbientGuide();
     const objects = [entity(1, 'car'), entity(2, 'bench', 'right'), entity(3, 'bicycle')];
@@ -141,7 +170,7 @@ describe('Outdoor ambient guidance', () => {
     const guide = new AmbientGuide();
     const result = guide.next(scene([entity(1, 'bottle'), entity(2, 'cup'), entity(3, 'person'), entity(4, 'bench')]), 10000);
     expect(result?.text).toContain('Person');
-    expect(result?.text).toContain('Bench');
+    expect(result?.text).not.toContain('Cup');
     expect(result?.text).not.toContain('Bottle');
   });
   it('uses the current position after a delayed announcement and drops stale sightings', () => {

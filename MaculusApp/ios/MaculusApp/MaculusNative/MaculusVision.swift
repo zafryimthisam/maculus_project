@@ -3,7 +3,7 @@ import React
 
 @objc(MaculusVision)
 final class MaculusVision: NSObject {
-  private let queue = DispatchQueue(label: "com.maculus.vision", qos: .userInitiated)
+  private let queue = DispatchQueue(label: "com.maculus.vision", qos: .userInitiated, autoreleaseFrequency: .workItem)
   private var interpreter: MaculusTFLiteRunner?
   private var labels: [String] = []
   private var inputSize = 0

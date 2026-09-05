@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, afterEach, describe, expect, it, jest } from '@jest/globals';
 import { localLlmService } from '../src/services/LocalLlmService';
+import { modelAssetService } from '../src/services/ModelAssetService';
 import {
   buildVisionPrompt,
   ConversationService,
@@ -10,7 +11,54 @@ import {
 import { NextSceneSnapshot, SafetyState } from '../src/next/domain';
 
 describe('MaculusNext vision-language descriptions', () => {
-  afterEach(() => { jest.restoreAllMocks(); });
+  beforeEach(() => {jest.useFakeTimers();});
+  afterEach(() => { jest.clearAllTimers(); jest.useRealTimers(); jest.restoreAllMocks(); });
+
+  it('strips assistant wrappers and repeated words from structured answers', async () => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue('assistant {"targetId":1,"answer":"The chair appears unoccupied and unoccupied."}');
+    const result = await service.describeFrame('image', scene(), healthySensor(), 'Find a place to sit', {
+      activeGuidanceGoal: 'place to sit', selectTarget: true, candidateIds: [1],
+    });
+    expect(result).toMatchObject({ text: 'The chair appears unoccupied.', targetId: 1 });
+  });
+
+  it('unloads idle detailed vision after selection while retaining the conversation service', async () => {
+    const service = readyService();
+    jest.spyOn(localLlmService, 'getState').mockReturnValue('ready');
+    const release = jest.spyOn(localLlmService, 'release').mockResolvedValue();
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue('{"targetId":1,"answer":"A chair is on your left."}');
+    await service.describeFrame('image', scene(), healthySensor(), 'Find a chair', { activeGuidanceGoal: 'chair', selectTarget: true });
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('unloads after a memory warning during loading and does not eagerly reload on recovery', async () => {
+    const service = new ConversationService();
+    jest.spyOn(modelAssetService, 'initialize').mockResolvedValue({
+      state: 'ready', path: '/model', projectorPath: '/projector', visionSupported: true,
+      downloadedBytes: 1, totalBytes: 1, metered: false,
+    });
+    jest.spyOn(localLlmService, 'cancel').mockResolvedValue();
+    const release = jest.spyOn(localLlmService, 'release').mockResolvedValue();
+    let finish!: (ready: boolean) => void;
+    let started!: () => void;
+    const began = new Promise<void>(resolve => {started = resolve;});
+    const load = jest.spyOn(localLlmService, 'load').mockImplementation(() => {
+      started(); return new Promise(resolve => {finish = resolve;});
+    });
+    const loading = service.initialize();
+    await began;
+    service.setDeviceCapability(false, false);
+    expect(release).not.toHaveBeenCalled();
+    finish(true);
+    expect(await loading).toBe(false);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(release).toHaveBeenCalledTimes(1);
+    service.setDeviceCapability(true, false);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(service.isReady()).toBe(false);
+  });
 
   it('grounds a private VLM request with detector hints but excludes path-clear claims', () => {
     const prompt = buildVisionPrompt('What is happening around me?', scene());

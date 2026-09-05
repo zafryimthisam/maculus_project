@@ -39,8 +39,12 @@ export class ConversationService {
   private ready = false;
   private capabilitySupported = true;
   private initializationPromise: Promise<boolean> | null = null;
+  private suspensionPromise: Promise<void> | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private requestGeneration = 0;
 
   async initialize(): Promise<boolean> {
+    this.clearIdleTimer();
     if (this.initializationPromise) {return this.initializationPromise;}
     this.initializationPromise = this.initializeModel().finally(() => {
       this.initializationPromise = null;
@@ -49,14 +53,29 @@ export class ConversationService {
   }
 
   setDeviceCapability(supported: boolean, thermalThrottled: boolean): void {
+    const wasSupported = this.capabilitySupported;
     this.capabilitySupported = supported;
     localLlmService.setThermalThrottled(thermalThrottled);
+    if (!supported && wasSupported) {
+      this.requestGeneration += 1;
+      this.clearIdleTimer();
+      this.ready = false;
+      const initializing = this.initializationPromise;
+      this.suspensionPromise = (async () => {
+        await localLlmService.cancel();
+        await initializing?.catch(() => false);
+        await localLlmService.release();
+      })().catch(error => console.warn('[MaculusNext] Memory cleanup failed:', error))
+        .finally(() => {this.suspensionPromise = null;});
+    }
   }
 
   private async initializeModel(): Promise<boolean> {
+    await this.suspensionPromise;
     const model = await modelAssetService.initialize();
-    this.setDeviceCapability(model.visionSupported === true, Boolean(model.thermalThrottled));
-    this.ready = Boolean(
+    this.capabilitySupported = model.visionSupported === true;
+    localLlmService.setThermalThrottled(Boolean(model.thermalThrottled));
+    const loaded = Boolean(
       this.capabilitySupported &&
       model.state === 'ready' &&
       model.path &&
@@ -65,6 +84,8 @@ export class ConversationService {
       model.visionSupported !== false &&
       await localLlmService.load(model.path, model.projectorPath)
     );
+    this.ready = loaded && this.capabilitySupported;
+    if (this.ready) {this.scheduleIdleRelease();}
     return this.ready;
   }
 
@@ -73,11 +94,13 @@ export class ConversationService {
 
   reset(): void {
     this.history = [];
-    localLlmService.cancel().catch(() => {});
+    this.cancel().catch(() => {});
   }
 
   async cancel(): Promise<void> {
+    this.requestGeneration += 1;
     await localLlmService.cancel();
+    this.scheduleIdleRelease();
   }
 
   async describeFrame(
@@ -87,24 +110,32 @@ export class ConversationService {
     question: string = 'Describe the current scene.',
     options: VisionDescriptionOptions = {},
   ): Promise<VisionDescriptionResult> {
+    const generation = ++this.requestGeneration;
+    this.clearIdleTimer();
     const allowDeterministicFallback = options.allowDeterministicFallback !== false;
     const appendSensor = options.appendSensor !== false;
     const sensorSuffix = appendSensor ? sensorDescription(sensor) : '';
     const fallback = `${scene.description}${sensorSuffix}`;
     if (!imageBase64) {
+      this.scheduleIdleRelease();
       return visionFallback('no-frame', fallback, allowDeterministicFallback);
     }
-    if (!this.isVisionReady()) {
-      return visionFallback(
-        'not-ready',
-        fallback,
-        allowDeterministicFallback,
-        formatVisionFailureDetail(localLlmService.getLastError()),
-      );
-    }
-
     try {
+      if (!this.isVisionReady() && this.capabilitySupported && localLlmService.getState() !== 'generating') {
+        await this.initialize();
+      }
+      if (generation !== this.requestGeneration) {throw new Error('Visual request cancelled.');}
+      if (!this.isVisionReady()) {
+        return visionFallback(
+          'not-ready',
+          fallback,
+          allowDeterministicFallback,
+          formatVisionFailureDetail(localLlmService.getLastError()),
+        );
+      }
+
       await localLlmService.cancel();
+      if (generation !== this.requestGeneration) {throw new Error('Visual request cancelled.');}
       const goal = options.activeGuidanceGoal || extractGuidanceGoal(question);
       const candidates = goal ? scene.visibleEntities.filter(e =>
         (detectorLabelsForGoal(goal).includes(e.label) || e.alias?.toLowerCase() === goal.toLowerCase()) &&
@@ -113,34 +144,38 @@ export class ConversationService {
       const selection = options.selectTarget === true && Boolean(goal);
       const response = await localLlmService.completeVision({
         imageBase64,
-        prompt: buildVisionPrompt(
+        prompt: (selection ? `Help a blind user with: ${goal}. Choose ONE suitable candidate; do not ask them to compare interchangeable objects. Match requested attributes; never guess a person's identity. Return targetId 0 if no candidate fits. Never claim a safe route or exact distance. Answer in one short sentence. Current request: ${question.slice(0, 100)}.` : buildVisionPrompt(
           question,
           scene,
           options.conversationHistory,
           goal,
           selection,
-        ) + (selection ? ` Return JSON with answer (at most two short sentences) and targetId. Choose a target only if its visible appearance meets the request. For sitting, reject occupied or obstructed seating; appearance does not prove safety. If uncertain or several indistinguishable matches remain, ask one short clarification and use targetId 0. Never claim tracking has started. Candidates, with normalized center x,y and width,height: ${candidates.map(e => `${e.id}: ${e.label} ${e.zone} [${[e.cx, e.cy, e.w, e.h].map(n => n.toFixed(2)).join(',')}]`).join('; ') || 'none'}.` : ''),
+        )) + (selection ? ` Return JSON only: answer and targetId. For sitting, reject occupied or obstructed seating; appearance does not prove safety. Candidates (ID, label, position, center x/y, width/height): ${candidates.map(e => `${e.id}: ${e.label} ${e.zone} [${[e.cx, e.cy, e.w, e.h].map(n => n.toFixed(2)).join(',')}]`).join('; ') || 'none'}.` : ''),
         jsonSchema: selection ? {
           type: 'object', properties: {
-            answer: { type: 'string' },
             targetId: { type: 'integer', enum: [0, ...candidates.map(e => e.id)] },
+            answer: { type: 'string' },
           }, required: ['answer', 'targetId'], additionalProperties: false,
         } : undefined,
-        maxTokens: selection ? 128 : 72,
+        maxTokens: selection ? 96 : 72,
         timeoutMs: 60000,
       });
+      if (generation !== this.requestGeneration) {throw new Error('Visual request cancelled.');}
       let answer = response;
       let targetId: number | undefined;
       if (selection) {
         try {
-          const parsed = JSON.parse(response);
+          const normalized = stripModelWrapper(response);
+          const start = normalized.indexOf('{');
+          const end = normalized.lastIndexOf('}');
+          const parsed = JSON.parse(start >= 0 && end > start ? normalized.slice(start, end + 1) : normalized);
           answer = typeof parsed.answer === 'string' ? parsed.answer : '';
           if (Number.isInteger(parsed.targetId) && candidates.some(e => e.id === parsed.targetId)) {
             targetId = parsed.targetId;
           }
         } catch {
           // Never read truncated JSON or model metadata aloud.
-          answer = /^\s*[[{]/.test(response) ? '' : response;
+          answer = /[{}]|["'](?:answer|targetId)["']\s*:/.test(response) ? '' : stripModelWrapper(response);
         }
       }
       const safe = sanitizeVisionDescription(removeMobilitySentences(answer));
@@ -161,6 +196,8 @@ export class ConversationService {
         allowDeterministicFallback,
         formatVisionFailureDetail(localLlmService.getLastError() || error?.message),
       );
+    } finally {
+      if (generation === this.requestGeneration) {this.scheduleIdleRelease(options.selectTarget ? 5000 : 30000);}
     }
   }
 
@@ -183,7 +220,7 @@ export class ConversationService {
     const question = transcript.trim();
     if (!question) {return { text: 'I did not hear a question.' };}
     if (options.visionOnly || isVisualSceneRequest(question)) {
-    const visualRequest = isVisualSceneRequest(question);
+      const visualRequest = isVisualSceneRequest(question);
       if (!options.visionOnly && /\b(who|person|people)\b/i.test(question) && !imageBase64) {
         return { text: groundedPeopleReply(scene) };
       }
@@ -241,10 +278,29 @@ export class ConversationService {
   }
 
   async destroy(): Promise<void> {
+    this.requestGeneration += 1;
+    this.clearIdleTimer();
     await this.initializationPromise?.catch(() => false);
+    await this.suspensionPromise;
     this.history = [];
     this.ready = false;
     await localLlmService.release();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {clearTimeout(this.idleTimer); this.idleTimer = null;}
+  }
+
+  private scheduleIdleRelease(delayMs = 30000): void {
+    this.clearIdleTimer();
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (localLlmService.getState() !== 'ready' || this.initializationPromise || this.suspensionPromise) {return;}
+      this.ready = false;
+      this.suspensionPromise = localLlmService.release()
+        .catch(error => console.warn('[MaculusNext] Idle model cleanup failed:', error))
+        .finally(() => {this.suspensionPromise = null;});
+    }, delayMs);
   }
 
   private rememberTurn(question: string, answer: string): void {
@@ -309,11 +365,11 @@ export function buildVisionPrompt(
 }
 
 export function sanitizeVisionDescription(text: string): string {
-  const cleaned = text
-    .replace(/<\|[^|>]+\|>/g, '')
-    .replace(/^\s*(assistant|description)\s*:\s*/i, '')
+  const cleaned = stripModelWrapper(text)
+    .replace(/\b([a-z]+)(?:\s+(?:and\s+)?\1)+\b/gi, '$1')
     .replace(/\s+/g, ' ')
     .trim();
+  if (/[{}]|["'](?:answer|targetId)["']\s*:/.test(cleaned)) {return '';}
   const sentences = cleaned.match(/[^.!?]+[.!?]+/g) || [];
   const unique: string[] = [];
   for (const sentence of sentences) {
@@ -331,6 +387,11 @@ export function sanitizeVisionDescription(text: string): string {
   // Keep a short complete-looking answer without punctuation, but drop cutoff fragments.
   return cleaned.length <= 240 && !/\b(?:a|an|the|is|are|there|and|of|to|on|with)\s*$/i.test(cleaned)
     ? cleaned : '';
+}
+
+function stripModelWrapper(text: string): string {
+  return text.replace(/<\|[^|>]+\|>/g, '').replace(/```(?:json)?/gi, '')
+    .replace(/^\s*(?:assistant|description)\b\s*:?\s*/i, '').trim();
 }
 
 export function isVisualSceneRequest(text: string): boolean {
