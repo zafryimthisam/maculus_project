@@ -219,3 +219,13 @@ describe('Locked chair arrival', () => {
     }
   });
 });
+
+
+it.each(['laptop', 'bottle', 'person'])('announces a stable nearby locked %s', label => {
+  const guide = new GuidanceController();
+  guide.start(label);
+  const target = (at: number) => ({...entity(1, label, 'ahead', at), w: 0.6, h: 0.5, nearScore: 0.8});
+  guide.select(1, scene([target(10000)]));
+  for (const at of [10000, 10500, 11000]) {guide.observe(scene([target(at)], at), at);}
+  expect(guide.next(scene([target(11000)], 11000), 11000)?.text).toContain('appears nearby');
+});

@@ -229,3 +229,23 @@ describe('TTSService guidance speech', () => {
     expect(Tts.speak).toHaveBeenCalledTimes(1);
   });
 });
+
+
+it('resolves a voice prompt only for its own completed utterance', async () => {
+  const service = new TTSService();
+  const callbacks = new Map<string, Array<(event: any) => void>>();
+  const add = jest.spyOn(Tts, 'addEventListener').mockImplementation((name: any, callback: any) => {
+    callbacks.set(name, [...(callbacks.get(name) || []), callback]);
+  });
+  const speak = jest.spyOn(Tts, 'speak').mockResolvedValue('prompt-id' as never);
+  await service.init();
+  let completed = false;
+  const prompt = service.speakPrompt('Listening').then(result => {completed = true; return result;});
+  for (let step = 0; step < 5; step++) {await Promise.resolve();}
+  callbacks.get('tts-finish')?.forEach(fn => fn({utteranceId: 'previous-id'}));
+  expect(completed).toBe(false);
+  callbacks.get('tts-finish')?.forEach(fn => fn({utteranceId: 'prompt-id'}));
+  await expect(prompt).resolves.toBe(true);
+  service.stop();
+  add.mockRestore(); speak.mockRestore();
+});

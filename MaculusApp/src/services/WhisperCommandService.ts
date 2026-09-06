@@ -100,12 +100,13 @@ export class WhisperCommandService {
     timeoutMs: number,
     onPartial?: (text: string) => void,
     bufferedAudio = false,
+    onCaptureFinished?: () => Promise<void>,
   ): Promise<WhisperCommandResult | null> {
     if (this.busy) {throw new Error('Whisper is already listening or processing.');}
     this.busy = true;
     const cancellationId = this.cancellationId;
     try {
-      const result = await this.captureCommand(timeoutMs, onPartial, cancellationId, bufferedAudio);
+      const result = await this.captureCommand(timeoutMs, onPartial, cancellationId, bufferedAudio, onCaptureFinished);
       return cancellationId === this.cancellationId ? result : null;
     } finally {
       this.busy = false;
@@ -117,6 +118,7 @@ export class WhisperCommandService {
     onPartial: ((text: string) => void) | undefined,
     cancellationId: number,
     bufferedAudio: boolean,
+    onCaptureFinished?: () => Promise<void>,
   ): Promise<WhisperCommandResult | null> {
     const module = this.module;
     if (!module) {
@@ -186,7 +188,7 @@ export class WhisperCommandService {
           if (!committed.trim() && !provisional.trim()) {continue;}
           committedText = combineTranscription(committedText, committed);
           finalText = combineTranscription(committedText, provisional);
-          if (finalText && cancellationId === this.cancellationId) {onPartial?.(finalText);}
+          if (finalText && cancellationId === this.cancellationId) {onPartial?.(stripWakePhrase(finalText));}
         }
       } catch (error) {
         streamFailure = error;
@@ -285,6 +287,9 @@ export class WhisperCommandService {
       if (recorder?.isRecording()) {await recorder.stop().catch(() => undefined);}
       this.setState({...this.currentState, state: 'processing', message: 'Finishing private transcription…'});
       module.streamStop();
+      if (cancellationId === this.cancellationId && sampleCount > 0) {
+        await onCaptureFinished?.().catch(() => undefined);
+      }
       await streamTask.catch(() => undefined);
       this.cancelCapture = null;
       this.setState({
@@ -312,7 +317,7 @@ export class WhisperCommandService {
         const result = await module.transcribe(waveform);
         if (cancellationId !== this.cancellationId) {return null;}
         finalText = result.text || '';
-        if (finalText.trim()) {onPartial?.(finalText.trim());}
+        if (finalText.trim()) {onPartial?.(stripWakePhrase(finalText));}
       } finally {
         capture.processingMs = Date.now() - startedAt;
         this.setState({...this.currentState, state: 'ready', capture: {...capture},
@@ -320,9 +325,7 @@ export class WhisperCommandService {
       }
     }
     // Buffered capture includes the wake phrase so its command suffix is never clipped.
-    const wakePrefix = bufferedAudio ? /^[\s\S]*?\blive\s*kit\b[,.!? ]*/i
-      : /^(?:(?:hey|hi|okay|ok)[, ]+)?live\s*kit\b[,.!? ]*/i;
-    const text = finalText.trim().replace(wakePrefix, '').trim();
+    const text = stripWakePhrase(finalText);
     const detail = capture.buffers === 0
       ? 'No microphone samples reached Whisper. The audio engine opened, but its input callback delivered nothing.'
       : capture.peakRms < MIN_AUDIBLE_RMS
@@ -438,3 +441,8 @@ function errorMessage(error: unknown): string {
 }
 
 export const whisperCommandService = new WhisperCommandService();
+
+
+export function stripWakePhrase(text: string): string {
+  return text.trim().replace(/^(?:(?:hey|hi|okay|ok)[, ]+)?live\s*kit\b[,.!? ]*/i, '').trim();
+}

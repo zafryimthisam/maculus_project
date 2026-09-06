@@ -538,11 +538,13 @@ export class MaculusRuntime {
           piSensorAvailable: reading.healthy === true && reading.valid === true,
           piLastSeenAt: receivedAt,
         });
+        this.speech.updateProximity(sensor, this.scene.getSnapshot(receivedAt));
         if (sensor.health === 'emergency') {this.interruptAssistantForEmergency();}
         if (alert) {this.speakSafetyAlert(alert);}
       } catch (error: any) {
         if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {break;}
         const alert = this.safety.recordTransportFailure('Check the Raspberry Pi or Bluetooth sensor connection.');
+        this.speech.updateProximity(this.safety.getState(), this.scene.getSnapshot());
         const piIsStale = this.state.piLastSeenAt === null ||
           Date.now() - this.state.piLastSeenAt > PI_STALE_MS;
         this.update({
@@ -996,7 +998,7 @@ export class MaculusRuntime {
       case 'stop_guidance': this.setGuidanceActive(false); return true;
       case 'haptic_on': this.speech.setHapticsEnabled(true); this.speech.speakSystem('Haptic alerts are on.'); return true;
       case 'haptic_off': this.speech.setHapticsEnabled(false); this.speech.speakSystem('Haptic alerts are off.'); return true;
-      case 'stop_haptic': Vibration.cancel(); return true;
+      case 'stop_haptic': this.speech.setHapticsEnabled(false); return true;
       case 'cancel_goal': {
         const hadGoal = Boolean(this.activeGuidanceGoal);
         if (this.assistantBusy) {

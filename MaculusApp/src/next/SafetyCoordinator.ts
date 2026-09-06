@@ -1,7 +1,8 @@
 import { DistanceReading } from '../types';
 import { EMPTY_SAFETY_STATE, SafetyAlert, SafetyInput, SafetyState } from './domain';
 
-const EMERGENCY_CM = 40;
+const EMERGENCY_CM = 60;
+const EMERGENCY_RELEASE_CM = 70;
 const READING_MAX_AGE_MS = 1200;
 const CLEAR_HYSTERESIS_CM = 15;
 const FAILURE_CONFIRMATION_COUNT = 2;
@@ -20,6 +21,8 @@ export class SafetyCoordinator {
   private reportedDistance: number | null = null;
   private lastAlertKind: 'warning' | 'emergency' | null = null;
   private warningDeferred = false;
+  private stopActive = false;
+  private stopClearCount = 0;
 
   reset(): void {
     this.state = { ...EMPTY_SAFETY_STATE };
@@ -31,6 +34,8 @@ export class SafetyCoordinator {
     this.reportedDistance = null;
     this.lastAlertKind = null;
     this.warningDeferred = false;
+    this.stopActive = false;
+    this.stopClearCount = 0;
   }
 
   getState(): SafetyState {
@@ -50,7 +55,10 @@ export class SafetyCoordinator {
 
     const distanceCm = reading.distance_cm;
     this.consecutiveFailures = 0;
-    const emergency = distanceCm <= EMERGENCY_CM;
+    if (distanceCm <= EMERGENCY_CM) {this.stopActive = true;}
+    this.stopClearCount = this.stopActive && distanceCm >= EMERGENCY_RELEASE_CM ? this.stopClearCount + 1 : 0;
+    if (this.stopClearCount >= 2) {this.stopActive = false;}
+    const emergency = this.stopActive;
     const enteringEmergency = emergency && this.lastAlertKind !== 'emergency';
     if (this.reportedDistance === null || enteringEmergency ||
         Math.abs(distanceCm - this.reportedDistance) > DISTANCE_TOLERANCE_CM) {
@@ -91,7 +99,7 @@ export class SafetyCoordinator {
         distanceCm,
         timestamp: now,
         text: emergency
-          ? `Stop. Obstacle directly ahead. About ${rounded} centimeters away.`
+          ? 'Stop. Obstacle nearby.'
           : `Caution. Obstacle ahead, about ${rounded} centimeters away.`,
       };
     }

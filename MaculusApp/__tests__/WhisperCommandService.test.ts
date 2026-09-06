@@ -104,6 +104,20 @@ describe('Whisper microphone handoff', () => {
 
   afterEach(() => {Platform.OS = originalOS;});
 
+  it('announces processing only after the recording has stopped', async () => {
+    const processing = jest.fn(async () => {expect(recording).toBe(false);});
+    recorder.start.mockImplementationOnce(async () => {
+      recording = true;
+      feedAudio(new Float32Array(16000).fill(0.1));
+      (service as any).cancelCapture();
+      return {status: 'success'};
+    });
+    queueTranscriptions(update('What is this?'));
+    await service.listenForCommandOnce(1000, undefined, false, processing);
+    expect(processing).toHaveBeenCalledTimes(1);
+    expect(recorder.stop).toHaveBeenCalledTimes(1);
+  });
+
   it('feeds wake pre-roll and live PCM into Whisper without opening another microphone', async () => {
     queueTranscriptions(update('Hey LiveKit what is this scene'));
     NativeModules.MaculusVoiceCommand.startCommandAudio = jest.fn(async () => {

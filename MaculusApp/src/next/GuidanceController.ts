@@ -18,10 +18,10 @@ export class GuidanceController {
   private needsVisualSelection = false;
   private identityUncertain = false;
   private selectionDeclined = false;
-  private chairNearSince = 0;
-  private chairNearFrames = 0;
-  private chairObservationAt = 0;
-  private chairArrivalSpoken = false;
+  private targetNearSince = 0;
+  private targetNearFrames = 0;
+  private targetObservationAt = 0;
+  private targetArrivalSpoken = false;
 
   reset(): void {
     this.goal = null;
@@ -37,10 +37,10 @@ export class GuidanceController {
     this.needsVisualSelection = false;
     this.identityUncertain = false;
     this.selectionDeclined = false;
-    this.chairNearSince = 0;
-    this.chairNearFrames = 0;
-    this.chairObservationAt = 0;
-    this.chairArrivalSpoken = false;
+    this.targetNearSince = 0;
+    this.targetNearFrames = 0;
+    this.targetObservationAt = 0;
+    this.targetArrivalSpoken = false;
   }
 
   start(goal: string, switchTarget = false): void {
@@ -69,10 +69,10 @@ export class GuidanceController {
     const entity = this.candidates(scene, !allowMoved).find(candidate => candidate.id === id);
     if (!entity) {return false;}
     this.targetId = id;
-    this.chairNearSince = 0;
-    this.chairNearFrames = 0;
-    this.chairObservationAt = 0;
-    this.chairArrivalSpoken = false;
+    this.targetNearSince = 0;
+    this.targetNearFrames = 0;
+    this.targetObservationAt = 0;
+    this.targetArrivalSpoken = false;
     this.targetIdentityId = entity.identityId ?? null;
     this.targetName = entity.label === 'person' ? (entity.alias || 'The selected person') : `The ${entity.label}`;
     this.status = 'tracking';
@@ -115,7 +115,7 @@ export class GuidanceController {
       if (!this.identityUncertain) {this.lastSeenAt = target.lastSeenAt;}
     }
     if (!target || this.identityUncertain) {this.status = 'lost';}
-    this.observeChairArrival(target, scene, now);
+    this.observeTargetArrival(target, scene, now);
   }
 
   /** Called only when the speaker is available, so cues cannot be consumed silently. */
@@ -154,13 +154,15 @@ export class GuidanceController {
       this.status = 'lost';
       return this.notice(`I can't confirm this is the same target. Ask me to find it again.`, now, 'left');
     }
-    this.observeChairArrival(target, scene, now);
-    if (!this.chairArrivalSpoken && this.chairNearFrames >= 3 && now - this.chairNearSince >= 1000) {
+    this.observeTargetArrival(target, scene, now);
+    if (!this.targetArrivalSpoken && this.targetNearFrames >= 3 && now - this.targetNearSince >= 1000) {
       const arrival = this.notice(
-        'The chair appears close. Stop and locate the seat with your hand. Check that it is empty and stable before sitting.',
+        target.label === 'chair'
+          ? 'The chair appears close. Stop and locate the seat with your hand. Check that it is empty and stable before sitting.'
+          : `${this.targetName} appears nearby, straight ahead. Pause here.`,
         now, 'moved',
       );
-      if (arrival) {this.chairArrivalSpoken = true;}
+      if (arrival) {this.targetArrivalSpoken = true;}
       return arrival;
     }
     const recovered = this.status === 'lost';
@@ -174,26 +176,29 @@ export class GuidanceController {
     return this.notice(text, now, 'moved', true);
   }
 
-  private observeChairArrival(target: NextSceneEntity | undefined, scene: NextSceneSnapshot, now: number): void {
+  private observeTargetArrival(target: NextSceneEntity | undefined, scene: NextSceneSnapshot, now: number): void {
     const otherObstacle = scene.visibleEntities.some(entity => entity.id !== this.targetId &&
       now - entity.lastSeenAt <= 1200 && entity.inPath && (entity.nearScore >= 0.7 || entity.h >= 0.55));
-    const near = target?.label === 'chair' && !this.identityUncertain &&
+    const near = target && !this.identityUncertain &&
       target.confirmed && target.confidence >= 0.7 && target.zone === 'ahead' &&
-      target.cx >= 0.38 && target.cx <= 0.62 && target.h >= 0.6 &&
-      target.nearScore >= 0.75 && !otherObstacle;
-    if (!near) {
-      this.chairNearSince = 0;
-      this.chairNearFrames = 0;
-      this.chairObservationAt = 0;
+      target.cx >= 0.38 && target.cx <= 0.62 &&
+      (target.label === 'chair' ? target.h >= 0.6 : Math.max(target.w, target.h) >= 0.35) &&
+      (target.nearScore >= 0.75 || (target.label !== 'chair' &&
+        Math.max(target.w, target.h) >= 0.55 && target.nearScore >= 0.45)) &&
+      (target.label !== 'chair' || !otherObstacle);
+    if (!near || !target) {
+      this.targetNearSince = 0;
+      this.targetNearFrames = 0;
+      this.targetObservationAt = 0;
       return;
     }
-    if (target.lastSeenAt === this.chairObservationAt) {return;}
-    if (target.lastSeenAt - this.chairObservationAt > 1200) {
-      this.chairNearSince = now;
-      this.chairNearFrames = 0;
+    if (target.lastSeenAt === this.targetObservationAt) {return;}
+    if (target.lastSeenAt - this.targetObservationAt > 1200) {
+      this.targetNearSince = now;
+      this.targetNearFrames = 0;
     }
-    this.chairObservationAt = target.lastSeenAt;
-    this.chairNearFrames += 1;
+    this.targetObservationAt = target.lastSeenAt;
+    this.targetNearFrames += 1;
   }
 
   private resolveTarget(scene: NextSceneSnapshot, now: number): NextSceneEntity | undefined {

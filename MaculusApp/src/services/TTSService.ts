@@ -25,6 +25,7 @@ type SpeechItem = {
  */
 export class TTSService {
   private initialized = false;
+  private cancelPrompt: (() => void) | null = null;
   private initPromise: Promise<void> | null = null;
   private queue: SpeechItem[] = [];
   private speaking = false;
@@ -148,6 +149,45 @@ export class TTSService {
       this.initialized = false;
       throw e;
     }
+  }
+
+  /** Wait for this utterance's native completion, not a guessed speech duration. */
+  async speakPrompt(text: 'Listening' | 'Processing', allowed: () => boolean = () => true): Promise<boolean> {
+    await this.init();
+    if (!allowed()) {return false;}
+    this.stop();
+    return new Promise<boolean>(resolve => {
+      let utteranceId: string | null = null;
+      const early: Array<{id: string; ok: boolean}> = [];
+      const finish = (ok: boolean) => {
+        clearTimeout(timeout);
+        subscriptions.forEach(({name, handler}) => Tts.removeEventListener(name as any, handler));
+        if (this.cancelPrompt === cancel) {this.cancelPrompt = null;}
+        resolve(ok);
+      };
+      const cancel = () => finish(false);
+      const event = (value: {utteranceId?: string | number}, ok: boolean) => {
+        const id = String(value.utteranceId);
+        if (utteranceId === null) {early.push({id, ok});}
+        else if (id === utteranceId) {finish(ok);}
+      };
+      const subscriptions = [
+        {name: 'tts-finish', handler: (value: any) => event(value, true)},
+        {name: 'tts-cancel', handler: (value: any) => event(value, false)},
+        {name: 'tts-error', handler: (value: any) => event(value, false)},
+      ];
+      subscriptions.forEach(({name, handler}) => Tts.addEventListener(name as any, handler));
+      const timeout = setTimeout(cancel, 6000);
+      this.cancelPrompt = cancel;
+      Tts.setDefaultRate(this.DEFAULT_RATE);
+      Tts.setDefaultPitch(1);
+      this.setSpeaking(true);
+      Promise.resolve(Tts.speak(text)).then(id => {
+        utteranceId = String(id);
+        const completed = early.find(item => item.id === utteranceId);
+        if (completed) {finish(completed.ok);}
+      }).catch(cancel);
+    });
   }
 
   isSpeaking(): boolean {
@@ -523,6 +563,7 @@ export class TTSService {
   }
 
   stop(): void {
+    this.cancelPrompt?.();
     Tts.stop();
     if (this.queueTimer) {clearTimeout(this.queueTimer);}
     this.queueTimer = null;

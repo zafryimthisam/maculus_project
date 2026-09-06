@@ -311,41 +311,42 @@ export class VoiceCommandService {
 
     this.commandBusy = true;
     const directCapture = detection.name === 'barge_in' || detection.name === 'followup';
-    const interruptedSpeech = tts.isSpeaking();
+    const captureSession = this.sessionId;
     this.safetyInterrupted = false;
     this.reserveConversationWindow(this.effectiveQuietMs());
     this.setStatus('wake_detected');
     this.onTranscript?.('');
-    this.setDiagnostic('Wake word detected. Capturing your request.');
+    this.setDiagnostic('Preparing the listening cue. Speak when it finishes.');
     if (!directCapture) {Vibration.vibrate([0, 60]);}
-    if (detection.name === 'barge_in' || interruptedSpeech) {
+    try {
+      // Discard wake pre-roll before audible prompts so neither the wake phrase
+      // nor our own speech/cue reaches command transcription.
+      await MaculusVoiceCommand.pauseForTts();
       tts.stop();
       await soundCueService.stopAll();
-    }
-    if (!detection.bufferedAudio) {
-      await MaculusVoiceCommand.pauseForTts().catch(() => {});
-      await tts.prepareForListening(0);
-    } else {
-      tts.stop();
-    }
-
-    if (!this.enabled || !MaculusVoiceCommand || this.safetyInterrupted) {
-      this.commandBusy = false;
-      return;
-    }
-
-    this.setStatus('command_listening');
-    this.setDiagnostic('Listening. You can speak immediately after Hey LiveKit.');
-    try {
+      if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+      if (!await tts.speakPrompt('Listening', () => this.enabled && !this.safetyInterrupted && captureSession === this.sessionId)) {return;}
+      if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+      await soundCueService.playActivation();
+      if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+      this.setStatus('command_listening');
+      this.setDiagnostic('Listening. Speak now.');
       // Whisper and FSMN VAD run locally through ExecuTorch. No Apple speech
       // daemon or network connection participates in command recognition.
       const result: WhisperCommandResult | null = await whisperCommandService.listenForCommandOnce(
         COMMAND_TIMEOUT_MS,
         text => this.handlePartialTranscript({text, isFinal: false}),
-        Boolean(detection.bufferedAudio),
+        false,
+        async () => {
+          if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+          this.setStatus('processing');
+          if (!await tts.speakPrompt('Processing', () => this.enabled && !this.safetyInterrupted && captureSession === this.sessionId)) {return;}
+          if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+          await soundCueService.startProcessing();
+        },
       );
       console.log('[Voice] Command transcript result:', result);
-      if (!this.enabled) {
+      if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {
         this.commandBusy = false;
         return;
       }
@@ -354,7 +355,7 @@ export class VoiceCommandService {
         console.log('[Voice] No command transcript returned');
         this.setDiagnostic(whisperCommandService.getState().capture
           ? whisperCommandService.getState().message
-          : 'No spoken words were recognized. Say “Hey LiveKit” followed by your request.');
+          : 'No spoken words were recognized. Say “Hey LiveKit,” then speak after the listening cue.');
         this.reserveConversationWindow(EMPTY_CAPTURE_QUIET_MS);
         if (!this.safetyInterrupted) {Vibration.vibrate([0, 45, 60, 45]);}
         return;
@@ -389,6 +390,7 @@ export class VoiceCommandService {
         }
         return;
       }
+      await soundCueService.stopProcessing();
       await this.onTurn?.({
         transcript,
         timestamp: Date.now(),
@@ -400,6 +402,7 @@ export class VoiceCommandService {
       this.setStatus('error');
       this.setDiagnostic(`Private voice recognition failed: ${errorMessage(e)}`);
     } finally {
+      await soundCueService.stopProcessing();
       this.commandBusy = false;
       this.safetyInterrupted = false;
       if (this.enabled) {

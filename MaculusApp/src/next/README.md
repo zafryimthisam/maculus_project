@@ -217,16 +217,31 @@ without another JavaScript copy.
   enrollment is not continuously blended with spatially associated detections.
   Recognition is appearance-based OSNet ReID, not face recognition: persistence
   does not guarantee a match after clothing, pose, or lighting changes.
-- Android and iOS retain the wake microphone, prepend its two-second wake window,
-  and stream command PCM to Whisper. Activation uses vibration without waiting for
-  a sound. “Hey LiveKit what's this scene” can be spoken as one phrase. Captures are
-  bounded to 30 seconds and stop on cancellation, emergency, or session shutdown.
+- Voice interaction pauses/discards wake audio, says “Listening”, plays activation,
+  then opens command capture. When recording ends, it says “Processing” and starts
+  the processing cue while transcription/model work completes. Neither wake audio
+  nor the app's prompts enter command capture. The retained native buffered-audio
+  path remains available internally but is not used by this prompt-based flow.
+- Stop alerts begin at 60 cm or closer and stay active until two valid polls reach
+  at least 70 cm. Speech uses a fresh centered near detection, for example “Stop.
+  A person nearby.” Missing, stale, or ambiguous detections use “Obstacle nearby.”
+  Speech repeats two seconds after the preceding utterance ends; haptic intervals
+  shorten from about 1.4 seconds toward 0.5 seconds as distance decreases. Sensor
+  loss, distance release, and session shutdown cancel the loop. These thresholds
+  control alerts; they do not certify that a route is safe.
+- Activation and processing MP3s use 2x amplitude gain with a 0.97 peak limiter;
+  Android/iOS copies are identical. Native TTS and cue playback already use the
+  platform's maximum gain (1.0). Speech is not doubled beyond that maximum, and
+  speaker/headphone volume remains subject to hardware and the user's settings.
 - An occluded chair needs plausible position and shape to reuse its track. A
   similar chair elsewhere is not automatically the locked target. Chair arrival
   requires three fresh, centered, close observations spanning at least one second.
   The cue asks the user to stop and locate/check the seat by touch. It does not
   certify seating safety, occupancy, exact distance, or a clear route. Other nearby
-  center-path objects and emergency speech suppress arrival guidance.
+  center-path objects and emergency speech suppress chair arrival guidance.
+  Other locked objects, including laptops, also get a stable “appears nearby” cue.
+  Object size/relative depth is approximate; this does not claim an exact distance
+  or promise the object is within reach.
 
 Validation: Jest regressions cover delayed ReID, duplicate identity ownership,
 name spelling, restarted storage recovery, buffered PCM, and cautious chair arrival.
