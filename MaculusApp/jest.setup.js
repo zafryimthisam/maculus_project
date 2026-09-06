@@ -86,8 +86,10 @@ jest.mock('react-native-tts', () => ({
   stop: jest.fn().mockResolvedValue(true),
   pause: jest.fn().mockResolvedValue(true),
   resume: jest.fn().mockResolvedValue(true),
-  addEventListener: jest.fn(),
-  removeEventListener: jest.fn(),
+  addListener: jest.fn(() => ({remove: jest.fn()})),
+  addEventListener: jest.fn(() => ({remove: jest.fn()})),
+  // Model the installed library's incompatible legacy method, not a silent no-op.
+  removeEventListener: jest.fn(() => {throw new TypeError('this.removeListener is not a function');}),
 }));
 
 // Mock the native MaculusVision module (on-device TFLite inference)

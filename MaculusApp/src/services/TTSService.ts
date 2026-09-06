@@ -34,7 +34,7 @@ export class TTSService {
   private lastSpeakTime = 0;
   private lastText = '';
   private lastGuidanceKeys = new Map<string, number>();
-  private listeners: Array<{ name: string; handler: any }> = [];
+  private listeners: Array<{ remove(): void }> = [];
   private speakingListeners = new Set<(speaking: boolean) => void>();
   private lastUtteranceAtByPrefix = new Map<string, number>();
   private profileListeners = new Set<(profile: TtsProsodyProfile) => void>();
@@ -131,16 +131,13 @@ export class TTSService {
         this.processQueue();
       };
 
-      Tts.addEventListener('tts-finish', finishHandler);
-      Tts.addEventListener('tts-cancel', cancelHandler);
-      Tts.addEventListener('tts-start', startHandler);
-      Tts.addEventListener('tts-error', errorHandler);
-
+      // NativeEventEmitter subscriptions own cleanup in React Native 0.81.
+      // react-native-tts.removeEventListener calls the removed removeListener API.
       this.listeners.push(
-        { name: 'tts-finish', handler: finishHandler },
-        { name: 'tts-cancel', handler: cancelHandler },
-        { name: 'tts-start', handler: startHandler },
-        { name: 'tts-error', handler: errorHandler },
+        Tts.addListener('tts-finish', finishHandler),
+        Tts.addListener('tts-cancel', cancelHandler),
+        Tts.addListener('tts-start', startHandler),
+        Tts.addListener('tts-error', errorHandler),
       );
 
       this.initialized = true;
@@ -159,9 +156,12 @@ export class TTSService {
     return new Promise<boolean>(resolve => {
       let utteranceId: string | null = null;
       const early: Array<{id: string; ok: boolean}> = [];
+      let settled = false;
       const finish = (ok: boolean) => {
+        if (settled) {return;}
+        settled = true;
         clearTimeout(timeout);
-        subscriptions.forEach(({name, handler}) => Tts.removeEventListener(name as any, handler));
+        subscriptions.forEach(subscription => subscription.remove());
         if (this.cancelPrompt === cancel) {this.cancelPrompt = null;}
         resolve(ok);
       };
@@ -172,11 +172,10 @@ export class TTSService {
         else if (id === utteranceId) {finish(ok);}
       };
       const subscriptions = [
-        {name: 'tts-finish', handler: (value: any) => event(value, true)},
-        {name: 'tts-cancel', handler: (value: any) => event(value, false)},
-        {name: 'tts-error', handler: (value: any) => event(value, false)},
+        Tts.addListener('tts-finish', value => event(value, true)),
+        Tts.addListener('tts-cancel', value => event(value, false)),
+        Tts.addListener('tts-error', value => event(value, false)),
       ];
-      subscriptions.forEach(({name, handler}) => Tts.addEventListener(name as any, handler));
       const timeout = setTimeout(cancel, 6000);
       this.cancelPrompt = cancel;
       Tts.setDefaultRate(this.DEFAULT_RATE);
@@ -581,9 +580,7 @@ export class TTSService {
 
   destroy(): void {
     this.stop();
-    this.listeners.forEach((l) => {
-      Tts.removeEventListener?.(l.name as any, l.handler);
-    });
+    this.listeners.forEach(subscription => subscription.remove());
     this.listeners = [];
     this.initialized = false;
     this.initPromise = null;

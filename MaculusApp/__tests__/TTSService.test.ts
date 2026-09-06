@@ -231,21 +231,69 @@ describe('TTSService guidance speech', () => {
 });
 
 
-it('resolves a voice prompt only for its own completed utterance', async () => {
-  const service = new TTSService();
-  const callbacks = new Map<string, Array<(event: any) => void>>();
-  const add = jest.spyOn(Tts, 'addEventListener').mockImplementation((name: any, callback: any) => {
-    callbacks.set(name, [...(callbacks.get(name) || []), callback]);
+describe('React Native 0.81 prompt subscriptions', () => {
+  let service: TTSService;
+  let callbacks: Map<string, Set<(event: any) => void>>;
+  let removed: Array<ReturnType<typeof jest.fn>>;
+
+  beforeEach(async () => {
+    jest.useFakeTimers();
+    callbacks = new Map();
+    removed = [];
+    jest.spyOn(Tts, 'addListener').mockImplementation((name: any, callback: any) => {
+      const group = callbacks.get(name) || new Set();
+      group.add(callback);
+      callbacks.set(name, group);
+      const remove = jest.fn(() => {group.delete(callback);});
+      removed.push(remove);
+      return {remove} as unknown as ReturnType<typeof Tts.addListener>;
+    });
+    jest.spyOn(Tts, 'speak').mockReturnValue('prompt-id' as never);
+    service = new TTSService();
+    await service.init();
   });
-  const speak = jest.spyOn(Tts, 'speak').mockResolvedValue('prompt-id' as never);
-  await service.init();
-  let completed = false;
-  const prompt = service.speakPrompt('Listening').then(result => {completed = true; return result;});
-  for (let step = 0; step < 5; step++) {await Promise.resolve();}
-  callbacks.get('tts-finish')?.forEach(fn => fn({utteranceId: 'previous-id'}));
-  expect(completed).toBe(false);
-  callbacks.get('tts-finish')?.forEach(fn => fn({utteranceId: 'prompt-id'}));
-  await expect(prompt).resolves.toBe(true);
-  service.stop();
-  add.mockRestore(); speak.mockRestore();
+
+  afterEach(() => {
+    service.destroy();
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  async function begin(text: 'Listening' | 'Processing') {
+    const result = service.speakPrompt(text);
+    for (let step = 0; step < 5; step++) {await Promise.resolve();}
+    return {result};
+  }
+
+  function emit(name: string, id = 'prompt-id') {
+    [...(callbacks.get(name) || [])].forEach(callback => callback({utteranceId: id}));
+  }
+
+  it.each(['Listening', 'Processing'] as const)('finishes %s without the broken legacy removal API', async text => {
+    const {result} = await begin(text);
+    let completed = false;
+    result.then(() => {completed = true;});
+    emit('tts-finish', 'previous-id');
+    expect(completed).toBe(false);
+    expect(() => emit('tts-finish')).not.toThrow();
+    await expect(result).resolves.toBe(true);
+    removed.slice(4).forEach(remove => expect(remove).toHaveBeenCalledTimes(1));
+    expect(callbacks.get('tts-finish')?.size).toBe(1);
+  });
+
+  it.each(['cancel', 'error', 'timeout', 'stop'])('cleans prompt subscriptions on %s', async reason => {
+    const {result} = await begin('Listening');
+    if (reason === 'timeout') {jest.advanceTimersByTime(6000);}
+    else if (reason === 'stop') {service.stop();}
+    else {emit(`tts-${reason}`);}
+    await expect(result).resolves.toBe(false);
+    removed.slice(4).forEach(remove => expect(remove).toHaveBeenCalledTimes(1));
+  });
+
+  it('removes both prompt and service subscriptions during teardown', async () => {
+    const {result} = await begin('Listening');
+    expect(() => service.destroy()).not.toThrow();
+    await expect(result).resolves.toBe(false);
+    removed.forEach(remove => expect(remove).toHaveBeenCalledTimes(1));
+  });
 });
