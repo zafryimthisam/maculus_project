@@ -39,7 +39,24 @@ bash MaculusApp/scripts/build-ios-unsigned.sh
 
 The default run safely fast-forwards `main` from `origin`, refuses to overwrite
 tracked local changes, installs npm/CocoaPods dependencies, builds without code
-signing, validates all six model assets, and writes the IPA to `~/Downloads`.
+signing, validates the model assets, and writes the timestamped IPA to `~/Downloads`.
+It then automatically copies it with `cp -X` to
+`/Volumes/VMware Shared Folders/Downloads/Maculus-unsigned-49.ipa` and verifies
+the contents byte-for-byte. Subsequent successful exports use 50, 51, and so on.
+The last exported number is stored in `~/Downloads/.maculus-ipa-counter`
+(or the configured output directory). Existing numbered IPAs are also checked
+so an earlier export is never overwritten. This counter changes the exported
+filename, not the app's internal bundle version.
+
+If the shared folder is unavailable or verification fails, the script reports
+an error and retains the local IPA. Retry just the export without rebuilding:
+
+```bash
+python3 MaculusApp/scripts/export-ios-ipa.py "$HOME/Downloads/Maculus-unsigned-TIMESTAMP.ipa"
+```
+
+Replace `TIMESTAMP` with the timestamp shown by the build. A failed copy does
+not advance the counter. The shared folder must already be mounted.
 
 To build the current checkout without fetching GitHub:
 
@@ -50,4 +67,5 @@ bash MaculusApp/scripts/build-ios-unsigned.sh --no-sync
 The script keeps an incremental Xcode cache under `ios/build` and uses four
 compiler jobs by default, which is suitable for the 12 GB development VM.
 Environment overrides are `MACULUS_BRANCH`, `MACULUS_REMOTE`,
-`MACULUS_XCODE_JOBS`, `MACULUS_DERIVED_DATA`, and `MACULUS_OUTPUT_DIR`.
+`MACULUS_XCODE_JOBS`, `MACULUS_DERIVED_DATA`, `MACULUS_OUTPUT_DIR`, and
+`MACULUS_SHARED_IPA_DIR` (the shared destination).

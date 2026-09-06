@@ -266,4 +266,6 @@ unzip -tq "$IPA"
 printf '\nMaculus unsigned IPA created successfully.\n'
 printf 'IPA: %s\n' "$IPA"
 printf 'Log: %s\n' "$BUILD_LOG"
+log "Copying and verifying the numbered IPA in VMware shared Downloads"
+python3 "$APP_ROOT/scripts/export-ios-ipa.py" "$IPA"
 printf '\nThe IPA still needs an external signer and a valid provisioning profile before installation.\n'
