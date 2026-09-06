@@ -129,12 +129,12 @@ describe('Obstacle distance narration tolerance', () => {
     expect(ingest(safety, 83, 18000)).toBeNull();
   });
 
-  it('immediately escalates across 60cm despite a five-centimeter difference', () => {
+  it('immediately escalates across 40cm despite a five-centimeter difference', () => {
     const safety = new SafetyCoordinator();
-    ingest(safety, 65, 1000);
-    expect(ingest(safety, 60, 1100)?.kind).toBe('emergency');
-    expect(ingest(safety, 59, 1200)).toBeNull();
-    expect(ingest(safety, 60, 7100)?.kind).toBe('emergency');
+    ingest(safety, 45, 1000);
+    expect(ingest(safety, 40, 1100)?.kind).toBe('emergency');
+    expect(ingest(safety, 39, 1200)).toBeNull();
+    expect(ingest(safety, 40, 7100)?.kind).toBe('emergency');
   });
 
   it('retries a warning deferred during conversation', () => {
@@ -156,17 +156,17 @@ describe('Obstacle distance narration tolerance', () => {
 });
 
 
-it('latches stop alerts through jitter until two fresh readings reach 70cm', () => {
+it('latches stop alerts through jitter until two fresh readings reach 45cm', () => {
   const safety = new SafetyCoordinator();
   const sample = (cm: number, at: number) => safety.ingest({reading: reading({distance_cm: cm}), receivedAt: at});
-  expect(sample(60, 1000)?.text).toBe('Stop. Obstacle nearby.');
-  sample(65, 1100);
+  expect(sample(40, 1000)?.text).toBe('Stop. Obstacle nearby.');
+  sample(43, 1100);
   expect(safety.getState().health).toBe('emergency');
-  sample(70, 1200);
+  sample(45, 1200);
   expect(safety.getState().health).toBe('emergency');
-  sample(69, 1300);
-  sample(70, 1400);
+  sample(44, 1300);
+  sample(45, 1400);
   expect(safety.getState().health).toBe('emergency');
-  sample(71, 1500);
+  sample(46, 1500);
   expect(safety.getState().health).toBe('warning');
 });

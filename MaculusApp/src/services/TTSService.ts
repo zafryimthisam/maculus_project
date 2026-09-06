@@ -25,6 +25,7 @@ type SpeechItem = {
  */
 export class TTSService {
   private initialized = false;
+  private completedFollowupEligible = false;
   private cancelPrompt: (() => void) | null = null;
   private initPromise: Promise<void> | null = null;
   private queue: SpeechItem[] = [];
@@ -113,11 +114,14 @@ export class TTSService {
 
       // Track listeners for cleanup
       const finishHandler = () => {
+        this.completedFollowupEligible = this.currentItem?.source === 'conversation' ||
+          Boolean(this.currentItem?.eventKey?.startsWith('goal:'));
         this.currentItem = null;
         this.setSpeaking(false);
         this.processQueue();
       };
       const cancelHandler = () => {
+        this.completedFollowupEligible = false;
         this.currentItem = null;
         this.setSpeaking(false);
         this.processQueue();
@@ -187,6 +191,10 @@ export class TTSService {
         if (completed) {finish(completed.ok);}
       }).catch(cancel);
     });
+  }
+
+  canOpenAutomaticFollowup(): boolean {
+    return this.completedFollowupEligible;
   }
 
   isSpeaking(): boolean {
@@ -562,6 +570,7 @@ export class TTSService {
   }
 
   stop(): void {
+    this.completedFollowupEligible = false;
     this.cancelPrompt?.();
     Tts.stop();
     if (this.queueTimer) {clearTimeout(this.queueTimer);}

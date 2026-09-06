@@ -1,8 +1,8 @@
 import { DistanceReading } from '../types';
 import { EMPTY_SAFETY_STATE, SafetyAlert, SafetyInput, SafetyState } from './domain';
 
-const EMERGENCY_CM = 60;
-const EMERGENCY_RELEASE_CM = 70;
+const EMERGENCY_CM = 40;
+const EMERGENCY_RELEASE_CM = 45;
 const READING_MAX_AGE_MS = 1200;
 const CLEAR_HYSTERESIS_CM = 15;
 const FAILURE_CONFIRMATION_COUNT = 2;

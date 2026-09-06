@@ -497,7 +497,7 @@ export class VoiceCommandService {
       this.followupWindowUntil = 0;
       if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
       this.followupWindowTimer = null;
-    } else if (this.alwaysListening && !this.wakeWordRequired()) {
+    } else if (this.alwaysListening && !this.wakeWordRequired() && tts.canOpenAutomaticFollowup()) {
       this.followupWindowUntil = 0;
       if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
       this.followupWindowTimer = null;

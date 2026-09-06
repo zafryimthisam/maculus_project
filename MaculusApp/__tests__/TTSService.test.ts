@@ -269,6 +269,15 @@ describe('React Native 0.81 prompt subscriptions', () => {
     [...(callbacks.get(name) || [])].forEach(callback => callback({utteranceId: id}));
   }
 
+  it.each([
+    ['safety', 'warning:8', false], ['ambient', 'path:blocked', false],
+    ['conversation', 'answer:1', true], ['ambient', 'goal:1:1000', true],
+  ])('classifies completed %s speech for automatic follow-ups', (source, eventKey, expected) => {
+    (service as any).currentItem = {source, eventKey};
+    emit('tts-finish');
+    expect(service.canOpenAutomaticFollowup()).toBe(expected);
+  });
+
   it.each(['Listening', 'Processing'] as const)('finishes %s without the broken legacy removal API', async text => {
     const {result} = await begin(text);
     let completed = false;

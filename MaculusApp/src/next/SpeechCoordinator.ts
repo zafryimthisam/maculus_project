@@ -133,7 +133,7 @@ export class SpeechCoordinator {
     }
     // Conversation owns the speaker. Keep non-emergency warnings silent while
     // the user is speaking, the VLM is thinking, or the AI is answering. The
-    // <=60 cm priority-two stop alert is deliberately exempt.
+    // <=40 cm priority-two stop alert is deliberately exempt.
     if (alert.priority < 2 && this.isConversationActive()) {return;}
     this.speak(alert.text, alert.priority, 'safety', alert.key, alert.priority === 2);
   }

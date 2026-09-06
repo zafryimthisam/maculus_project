@@ -222,8 +222,8 @@ without another JavaScript copy.
   the processing cue while transcription/model work completes. Neither wake audio
   nor the app's prompts enter command capture. The retained native buffered-audio
   path remains available internally but is not used by this prompt-based flow.
-- Stop alerts begin at 60 cm or closer and stay active until two valid polls reach
-  at least 70 cm. Speech uses a fresh centered near detection, for example “Stop.
+- Stop alerts begin at 40 cm or closer and stay active until two valid polls reach
+  at least 45 cm. Speech uses a fresh centered near detection, for example “Stop.
   A person nearby.” Missing, stale, or ambiguous detections use “Obstacle nearby.”
   Speech repeats two seconds after the preceding utterance ends; haptic intervals
   shorten from about 1.4 seconds toward 0.5 seconds as distance decreases. Sensor
@@ -249,3 +249,5 @@ Physical-device testing is still needed for microphone routing, processing laten
 and ReID quality under real movement and clothing changes. On Windows the Kotlin
 compile uses `-PhermesEnabled=false` for the installed community JavaScriptCore
 package and Git's `usr/bin` on PATH for the audio dependency's build script.
+
+Automatic listening after speech is restricted to conversation replies and goal-tracking cues with an active follow-up window. Obstacle, ambient scene, and system announcements return to wake-word listening.
