@@ -1,13 +1,17 @@
 """Flask-based HTTP server for Maculus Pi"""
 import logging
 import socket
-from flask import Flask, Response, jsonify
+import os
+from flask import Flask, Response, jsonify, request
+from hardware.spatial import SpatialTracker
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 _camera = None
 _sensor = None
+_spatial = None
+app.config["MAX_CONTENT_LENGTH"] = 128 * 1024
 
 
 @app.after_request
@@ -91,6 +95,17 @@ def distance():
     # disconnected.
     return jsonify(reading), 200
 
+@app.route('/spatial', methods=['POST'])
+def spatial():
+    if _spatial is None or _camera is None:
+        return jsonify({'available': False, 'reason': 'Spatial tracking is not configured'})
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get('frameId'), int):
+        return jsonify({'available': False, 'reason': 'Invalid spatial request'}), 400
+    frame = _camera.get_cached_frame(payload['frameId'])
+    return jsonify(_spatial.process(frame, payload))
+
+
 @app.route('/status')
 def status():
     return jsonify({
@@ -103,9 +118,11 @@ def status():
     })
 
 def start_server(host, port, camera, sensor):
-    global _camera, _sensor
+    global _camera, _sensor, _spatial
     _camera = camera
     _sensor = sensor
+    calibration_path = os.getenv("MACULUS_CAMERA_CALIBRATION")
+    _spatial = SpatialTracker(calibration_path) if calibration_path else None
 
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)

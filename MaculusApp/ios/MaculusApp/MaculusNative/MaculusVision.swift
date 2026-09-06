@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import React
 
 @objc(MaculusVision)
@@ -7,7 +8,7 @@ final class MaculusVision: NSObject {
   private var interpreter: MaculusTFLiteRunner?
   private var labels: [String] = []
   private var inputSize = 0
-  private let classCount = 80
+  private var classCount = 0
   private let confidenceThreshold: Float = 0.30
   private let iouThreshold: Float = 0.45
 
@@ -23,6 +24,8 @@ final class MaculusVision: NSObject {
           resolve([
             "backend": "TensorFlow Lite CPU",
             "inputSize": self.inputSize,
+          "classCount": self.classCount,
+          "labels": self.labels,
             "alreadyLoaded": true,
           ])
           return
@@ -44,19 +47,32 @@ final class MaculusVision: NSObject {
               "and divisible by 32, got \(inputShape)"
           )
         }
+        let labels = MaculusResources.textLines("coco-labels", extension: "txt")
+        guard !labels.isEmpty else {
+          throw MaculusNativeError.message("Missing detector labels; model and labels must be installed together")
+        }
+        let provenancePath = try MaculusResources.path("yolo11s.tflite.provenance", extension: "json")
+        let provenance = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: provenancePath))) as? [String: Any]
+        if let expected = provenance?["labelsSha256"] as? String {
+          let data = Data((labels.joined(separator: "\n") + "\n").utf8)
+          let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+          guard actual == expected else { throw MaculusNativeError.message("Detector label checksum does not match the model") }
+        }
         let shape = output.shape.map(\.intValue)
-        guard shape.count == 3, shape[0] == 1, shape[1] == self.classCount + 4 else {
+        guard shape.count == 3, shape[0] == 1, shape[1] == labels.count + 4, shape[2] > 0 else {
           throw MaculusNativeError.message(
-            "Expected YOLO output [1,84,anchors], got \(shape)"
+            "Expected YOLO output [1,\(labels.count + 4),anchors], got \(shape)"
           )
         }
-        self.labels = MaculusResources.textLines("coco-labels", extension: "txt")
-        if self.labels.isEmpty { self.labels = Self.fallbackLabels }
+        self.labels = labels
+        self.classCount = labels.count
         self.inputSize = inputShape[1]
         self.interpreter = interpreter
         resolve([
           "backend": "TensorFlow Lite CPU",
           "inputSize": self.inputSize,
+          "classCount": self.classCount,
+          "labels": self.labels,
           "numAnchors": shape[2],
           "quantized": output.dataTypeName != "float32",
         ])
@@ -234,7 +250,7 @@ final class MaculusVision: NSObject {
     var kept: [Detection] = []
     for detection in sorted {
       if kept.contains(where: {
-        $0.classId == detection.classId && intersectionOverUnion($0, detection) > iouThreshold
+        labels[$0.classId] == labels[detection.classId] && intersectionOverUnion($0, detection) > iouThreshold
       }) {
         continue
       }
@@ -252,18 +268,4 @@ final class MaculusVision: NSObject {
     let union = firstArea + secondArea - intersection
     return union > 0 ? intersection / union : 0
   }
-
-  private static let fallbackLabels = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
-    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
-    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
-    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
-    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
-    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
-    "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
-    "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
-  ]
 }

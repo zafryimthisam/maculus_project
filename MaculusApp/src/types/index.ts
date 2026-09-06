@@ -62,6 +62,8 @@ export interface Detection {
 }
 
 export interface ModelInfo {
+  labels?: string[];
+  classCount?: number;
   backend: string; // Android accelerator or iOS TensorFlow Lite backend
   inputSize?: number;
   numAnchors?: number;
@@ -83,7 +85,16 @@ export interface ObjectDepthScore {
   nearScore: number;
 }
 
+export interface DepthGrid {
+  width: number;
+  height: number;
+  values: number[];
+  /** Relative scores must never be back-projected as metres. */
+  units: 'relative-nearness' | 'metres';
+}
+
 export interface DepthEstimation {
+  grid?: DepthGrid;
   width: number;
   height: number;
   leftNearScore: number;

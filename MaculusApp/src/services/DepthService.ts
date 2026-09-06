@@ -4,6 +4,8 @@ import { DepthEstimation, DepthModelInfo, Detection } from '../types';
 const { MaculusDepth } = NativeModules as {
   MaculusDepth?: {
     loadDepthModel(): Promise<DepthModelInfo>;
+    loadMetricDepthModel?(): Promise<DepthModelInfo>;
+    unloadDepthModel?(): Promise<boolean>;
     estimateDepth(base64Jpeg: string, detections: Detection[]): Promise<DepthEstimation>;
   };
 };
@@ -11,7 +13,9 @@ const { MaculusDepth } = NativeModules as {
 class DepthService {
   private loaded = false;
   private unavailable = false;
+  private metric = false;
   private loadingPromise: Promise<DepthModelInfo> | null = null;
+  private releasingPromise: Promise<void> | null = null;
   backend: string = 'unavailable';
 
   isReady(): boolean {
@@ -22,7 +26,14 @@ class DepthService {
     return this.unavailable;
   }
 
-  async loadModel(): Promise<DepthModelInfo> {
+  async loadModel(metric = false): Promise<DepthModelInfo> {
+    if (this.releasingPromise) {await this.releasingPromise;}
+    if (this.loadingPromise) {await this.loadingPromise;}
+    if (this.metric !== metric) {
+      await this.release();
+      this.metric = metric;
+      this.unavailable = false;
+    }
     if (!MaculusDepth) {
       this.unavailable = true;
       return { backend: 'unavailable', available: false };
@@ -37,12 +48,14 @@ class DepthService {
       return this.loadingPromise;
     }
 
-    this.loadingPromise = MaculusDepth.loadDepthModel()
+    const load = metric ? MaculusDepth.loadMetricDepthModel : MaculusDepth.loadDepthModel;
+    if (!load) {return { backend: 'unavailable', available: false };}
+    this.loadingPromise = load()
       .then((info) => {
-        this.loaded = true;
-        this.unavailable = false;
+        this.loaded = info.available !== false;
+        this.unavailable = !this.loaded;
         this.backend = info.backend || 'ONNX Runtime';
-        return { ...info, available: true };
+        return { ...info, available: this.loaded };
       })
       .catch((error) => {
         this.loaded = false;
@@ -56,6 +69,17 @@ class DepthService {
       });
 
     return this.loadingPromise;
+  }
+
+  async release(): Promise<void> {
+    if (this.releasingPromise) {return this.releasingPromise;}
+    this.releasingPromise = (async () => {
+      if (this.loadingPromise) {await this.loadingPromise;}
+      this.loaded = false;
+      await MaculusDepth?.unloadDepthModel?.();
+      this.backend = 'unavailable';
+    })().finally(() => {this.releasingPromise = null;});
+    return this.releasingPromise;
   }
 
   async estimateDepth(base64Jpeg: string, detections: Detection[]): Promise<DepthEstimation | null> {

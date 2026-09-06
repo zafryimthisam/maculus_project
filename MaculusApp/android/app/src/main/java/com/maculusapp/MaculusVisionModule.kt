@@ -34,35 +34,17 @@ import android.os.Looper
  * Decode JPEG -> letterbox to the model tensor size -> TFLite (NNAPI/GPU/CPU) -> dequantize
  * -> NMS, all in native. Only a small result array crosses the RN bridge.
  *
- * Model: YOLO11s exported int8. Expected output [1, 84, anchors]
- * where 84 = 4 box coords + 80 COCO class scores.
+ * Raw YOLO output [1, 4 + label count, anchors]. Labels must match the checkpoint.
  */
 class MaculusVisionModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     companion object {
         private const val TAG = "MaculusVision"
-        private const val NUM_CLASSES = 80
         private const val CONF_THRESHOLD = 0.30f
         private const val IOU_THRESHOLD = 0.45f
         private const val MODEL_ASSET = "yolo11s.tflite"
         private const val LABELS_ASSET = "coco-labels.txt"
-
-        private val COCO_FALLBACK = listOf(
-            "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
-            "truck", "boat", "traffic light", "fire hydrant", "stop sign",
-            "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-            "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag",
-            "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-            "baseball bat", "baseball glove", "skateboard", "surfboard",
-            "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon",
-            "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
-            "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-            "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
-            "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
-            "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-            "hair drier", "toothbrush"
-        )
     }
 
     private var interpreter: Interpreter? = null
@@ -99,6 +81,8 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
                 val map = Arguments.createMap()
                 map.putString("backend", backend)
                 map.putInt("inputSize", inputSize)
+                map.putInt("classCount", labels.size)
+            map.putArray("labels", Arguments.fromList(labels))
                 map.putBoolean("alreadyLoaded", true)
                 promise.resolve(map)
                 return
@@ -106,6 +90,17 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
 
             val modelBuffer = loadModelFile(MODEL_ASSET)
             labels = loadLabels(LABELS_ASSET)
+            check(labels.isNotEmpty()) { "Detector label file is empty" }
+            val metadata = reactApplicationContext.assets.open("$MODEL_ASSET.provenance.json").use {
+                org.json.JSONObject(it.bufferedReader().readText())
+            }
+            val expectedLabelsHash = metadata.optString("labelsSha256", "")
+            if (expectedLabelsHash.isNotEmpty()) {
+                val actual = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(labels.joinToString("\n", postfix = "\n").toByteArray(Charsets.UTF_8))
+                    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                check(actual == expectedLabelsHash) { "Detector label checksum does not match the model" }
+            }
             interpreter = tryCreateInterpreter(modelBuffer)
 
             val inputTensor = interpreter!!.getInputTensor(0)
@@ -130,10 +125,19 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             val map = Arguments.createMap()
             map.putString("backend", backend)
             map.putInt("inputSize", inputSize)
+            map.putInt("classCount", labels.size)
+            map.putArray("labels", Arguments.fromList(labels))
             map.putInt("numAnchors", numAnchors)
             map.putBoolean("quantized", outputIsQuantized)
             promise.resolve(map)
         } catch (e: Exception) {
+            interpreter?.close()
+            interpreter = null
+            gpuDelegate?.close()
+            gpuDelegate = null
+            nnApiDelegate?.close()
+            nnApiDelegate = null
+            labels = emptyList()
             promise.reject("MODEL_LOAD_ERROR", e.message, e)
         }
     }
@@ -180,9 +184,9 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     }
 
     private fun validateOutputShape(shape: IntArray) {
-        if (shape.size != 3 || shape[0] != 1 || shape[1] != NUM_CLASSES + 4 || shape[2] <= 0) {
+        if (shape.size != 3 || shape[0] != 1 || shape[1] != labels.size + 4 || shape[2] <= 0) {
             throw IllegalStateException(
-                "Expected YOLO output shape [1,${NUM_CLASSES + 4},anchors], got ${shape.joinToString(prefix = "[", postfix = "]") }"
+                "Expected YOLO output shape [1,${labels.size + 4},anchors], got ${shape.joinToString(prefix = "[", postfix = "]") }"
             )
         }
     }
@@ -337,14 +341,14 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
     }
 
     private fun allocateOutputBuffer(): ByteBuffer {
-        val count = (NUM_CLASSES + 4) * numAnchors
+        val count = (labels.size + 4) * numAnchors
         val bytesPer = if (outputIsQuantized) 1 else 4
         return ByteBuffer.allocateDirect(count * bytesPer).order(ByteOrder.nativeOrder())
     }
 
     private fun decodeYolo(buffer: ByteBuffer, lb: Letterbox): MutableList<Det> {
         val anchors = numAnchors
-        val total = (NUM_CLASSES + 4) * anchors
+        val total = (labels.size + 4) * anchors
         val data = FloatArray(total)
         if (outputIsQuantized) {
             for (i in 0 until total) {
@@ -359,7 +363,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
         for (a in 0 until anchors) {
             var bestScore = 0f
             var bestClass = -1
-            for (c in 0 until NUM_CLASSES) {
+            for (c in 0 until labels.size) {
                 val s = data[(4 + c) * anchors + a]
                 if (s > bestScore) { bestScore = s; bestClass = c }
             }
@@ -426,7 +430,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
             for (j in i + 1 until boxes.size) {
                 if (removed[j]) continue
                 val b = boxes[j]
-                if (b.classId != a.classId) continue
+                if (labels[b.classId] != labels[a.classId]) continue
                 if (iou(a, b) > IOU_THRESHOLD) removed[j] = true
             }
         }
@@ -484,7 +488,7 @@ class MaculusVisionModule(reactContext: ReactApplicationContext) :
                     .filter { it.isNotEmpty() }
             }
         } catch (e: Exception) {
-            COCO_FALLBACK
+            throw IllegalStateException("Missing detector labels; install model and labels together", e)
         }
     }
 }

@@ -34,3 +34,37 @@ back to the Pi automatically when it appears.
 
 GPIO defaults are BCM 23 for trigger and BCM 24 for echo. The echo signal must
 be level-shifted to 3.3 V before reaching the Raspberry Pi GPIO pin.
+
+## Experimental indoor spatial guidance
+
+The camera configuration is 640x480 at 10 fps. The v1.3 camera name alone does
+not establish the actual intrinsics, lens distortion, mounting pitch or height.
+Keep that crop fixed after calibration. Install optional OpenCV/numpy using
+Raspberry Pi OS packages (`sudo apt install python3-opencv python3-numpy`) or
+`spatial-requirements.txt` in your environment.
+
+Collect at least 12 sharp JPEGs from `/capture` of a checkerboard at varied
+positions, angles and distances. Measure its square size. Also capture one
+reference image with the board flat on the floor and the camera in its worn
+position. Use the number of **inner** corners, not squares:
+
+```sh
+python3 calibrate_camera.py --images calibration-views --floor-image floor.jpg \
+  --columns 9 --rows 6 --square-metres 0.025 --output camera-calibration.json
+export MACULUS_CAMERA_CALIBRATION="$PWD/camera-calibration.json"
+python3 main.py
+```
+
+The example 0.025 m is valid only for a board whose squares you measured as
+25 mm. Calibration leaves `navigationValidated` false. Before enabling that
+field, supervised physical testing must verify estimated depth against measured
+distances, camera/body alignment, floor and body clearance, motion tracking,
+dynamic obstacles, and prompt stopping on stale data. Recalibrate if crop/lens
+or mounting changes. The prototype is indoor-only and is not validated for
+independent walking, drop-offs, outdoor routing or stair traversal.
+
+`POST /spatial` accepts an exact frame ID and a bounded metric-depth grid. It
+returns a pose only with validated configuration and sufficient stable matches.
+Relative scores, missing calibration, tracking gaps, stale frames and unstable
+geometry return unavailable. Cached JPEGs are bounded to 40 frames in RAM and
+cleared when the camera stops. No images are uploaded to cloud services.

@@ -1,5 +1,6 @@
 import { NativeModules } from 'react-native';
 import { Detection, ModelInfo } from '../types';
+import { setDetectorVocabulary } from '../config/DetectorVocabulary';
 
 /**
  * Thin wrapper over the native MaculusVision YOLO detector.
@@ -38,6 +39,7 @@ class DetectionService {
 
     this.loadingPromise = MaculusVision.loadModel()
       .then((info) => {
+        if (info.labels?.length) {setDetectorVocabulary(info.labels);}
         this.loaded = true;
         this.backend = info.backend || 'unknown';
         return info;

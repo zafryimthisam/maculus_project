@@ -3,6 +3,7 @@ import io
 import logging
 import time
 from threading import Condition
+from collections import deque
 
 try:
     from picamera2 import Picamera2
@@ -21,12 +22,14 @@ class StreamingOutput(io.BufferedIOBase):
         self.frame_id = 0
         self.timestamp = 0.0
         self.condition = Condition()
+        self.history = deque(maxlen=40)
 
     def write(self, buf):
         with self.condition:
             self.frame = buf
             self.frame_id += 1
             self.timestamp = time.time()
+            self.history.append((self.frame_id, self.timestamp, bytes(buf)))
             self.condition.notify_all()
 
 
@@ -75,6 +78,7 @@ class Camera:
             self.picam2 = None
         with self.output.condition:
             self.output.frame = None
+            self.output.history.clear()
             self.output.condition.notify_all()
             
     def get_frame(self):
@@ -101,6 +105,13 @@ class Camera:
                 "resolution": self.resolution,
             }
             
+    def get_cached_frame(self, frame_id):
+        with self.output.condition:
+            for identifier, timestamp, data in reversed(self.output.history):
+                if identifier == frame_id:
+                    return {'bytes': data, 'frame_id': identifier, 'timestamp': timestamp, 'resolution': self.resolution}
+        return None
+
     def get_stream_output(self):
         return self.output
         

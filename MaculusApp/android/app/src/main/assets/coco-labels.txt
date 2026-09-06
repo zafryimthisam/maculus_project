@@ -78,3 +78,27 @@ scissors
 teddy bear
 hair drier
 toothbrush
+cupboard
+filing cabinet
+bookshelf
+desk
+door
+stairs
+tree
+pole
+traffic cone
+bin
+street light
+traffic sign
+house
+building
+shop
+fence
+gate
+bollard
+barrier
+curb
+pothole
+wheelchair
+stroller
+van

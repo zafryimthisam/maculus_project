@@ -1,4 +1,4 @@
-import { COCO_CLASSES } from '../config/CocoClasses';
+import { allowsSizeArrival, detectorVocabulary } from '../config/DetectorVocabulary';
 import { NextSceneEntity, NextSceneSnapshot, SceneChange } from './domain';
 
 export type GoalStatus = 'idle' | 'searching' | 'clarifying' | 'tracking' | 'lost';
@@ -179,7 +179,7 @@ export class GuidanceController {
   private observeTargetArrival(target: NextSceneEntity | undefined, scene: NextSceneSnapshot, now: number): void {
     const otherObstacle = scene.visibleEntities.some(entity => entity.id !== this.targetId &&
       now - entity.lastSeenAt <= 1200 && entity.inPath && (entity.nearScore >= 0.7 || entity.h >= 0.55));
-    const near = target && !this.identityUncertain &&
+    const near = target && allowsSizeArrival(target.label) && !this.identityUncertain &&
       target.confirmed && target.confidence >= 0.7 && target.zone === 'ahead' &&
       target.cx >= 0.38 && target.cx <= 0.62 &&
       (target.label === 'chair' ? target.h >= 0.6 : Math.max(target.w, target.h) >= 0.35) &&
@@ -229,7 +229,7 @@ export function extractGuidanceGoal(transcript: string): string | null {
   if (/\b(dont|do not|stop|cancel|how (?:do|can)|what is|online|internet|definition)\b/i.test(text)) {return null;}
   if (/\b(?:find|need|want|like|looking for|help|somewhere|place|where can I)\b.*\b(?:sit|seat|rest)\b/i.test(text) ||
       /\b(?:Im|I am) tired\b/i.test(text)) {return 'place to sit';}
-  const match = text.match(/\b(?:(?:guide|lead|take)\s+me\s+(?:to|towards?)|(?:help me\s+)?(?:find|locate|track|follow)|(?:look|search)\s+for|keep\s+(?:track of|an eye on))\s+(.+?)(?:\s+please)?[.!?]*$/i);
+  const match = text.match(/\b(?:(?:guide|lead|take|navigate)\s+me\s+(?:to|towards?)|(?:help me\s+)?(?:find|locate|track|follow)|(?:look|search)\s+for|keep\s+(?:track of|an eye on))\s+(.+?)(?:\s+please)?[.!?]*$/i);
   const desire = text.match(/\bI (?:need|am looking for|want to find)\s+(.+?)[.!?]*$/i)?.[1];
   const goal = (match?.[1] || (desire && detectorLabelsForGoal(desire).length ? desire : ''))
     .replace(/^(?:a|an|the|that|this)\s+/i, '').replace(/\s+(?:for me|please)$/i, '').slice(0, 80);
@@ -246,8 +246,12 @@ export function detectorLabelsForGoal(goal: string): string[] {
     [/\b(?:bag|luggage)\b/i, ['backpack', 'handbag', 'suitcase']],
     [/\b(?:screen|television)\b/i, ['tv']],
     [/\bsofa\b/i, ['couch']],
+    [/\b(?:cabinet|cupboard)\b/i, ['cupboard', 'cabinetry', 'filing cabinet', 'cabinet/shelf']],
+    [/\b(?:shop|store)\b/i, ['convenience store', 'shop']],
+    [/\b(?:bin|trash|rubbish)\b/i, ['bin', 'waste container', 'trash bin can']],
+    [/\b(?:cone|cones)\b/i, ['traffic cone']],
   ];
-  return synonyms.find(([pattern]) => pattern.test(goal))?.[1] || COCO_CLASSES.filter(label =>
+  return synonyms.find(([pattern]) => pattern.test(goal))?.[1].filter(label => detectorVocabulary().includes(label)) || detectorVocabulary().filter(label =>
     new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}s?\\b`, 'i').test(goal));
 }
 

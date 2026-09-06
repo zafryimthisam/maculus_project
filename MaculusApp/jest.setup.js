@@ -108,6 +108,8 @@ NativeModules.MaculusVision = {
 
 // Mock optional Depth Anything module. Missing/failed depth should not block YOLO.
 NativeModules.MaculusDepth = {
+  unloadDepthModel: jest.fn().mockResolvedValue(true),
+  loadMetricDepthModel: jest.fn().mockResolvedValue({ available: true, backend: "ONNX Runtime" }),
   loadDepthModel: jest.fn().mockResolvedValue({
     backend: 'ONNX Runtime',
     inputSize: 256,

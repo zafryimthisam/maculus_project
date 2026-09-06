@@ -8,6 +8,8 @@ import {
   normalizePiUrl,
   setPiUrl,
 } from '../api/piClient';
+import { LocalRoutePlanner, Point3 } from './LocalRoutePlanner';
+import { estimateSpatialFrame } from '../services/SpatialService';
 import { depthService } from '../services/DepthService';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
@@ -63,6 +65,11 @@ export class MaculusRuntime {
   private assistantGeneration = 0;
   private assistantBusy = false;
   private abortController: AbortController | null = null;
+  private routePlanner = new LocalRoutePlanner();
+  private routeRequested = false;
+  private routeTarget: { id: number; position: Point3 } | null = null;
+  private lastRouteCue = '';
+  private lastRouteCueAt = 0;
   private lastDepthAt = 0;
   private lastReIdAt = 0;
   private lastFrameKey = '';
@@ -98,6 +105,7 @@ export class MaculusRuntime {
         // Recovery enables an explicit request; never immediately reload the model
         // which just triggered a memory warning.
         if (status.visionSupported === false) {
+          depthService.release().catch(error => console.warn("[Depth] Release failed", error));
           this.assistantGeneration += 1;
           this.assistantBusy = false;
           this.speech.endConversationTurn();
@@ -160,6 +168,8 @@ export class MaculusRuntime {
     this.latestVisionObservation = null;
     this.visionLoopRunning = false;
     this.activeGuidanceGoal = null;
+    this.routeRequested = false;
+    this.routePlanner.reset();
     this.guide.reset();
     this.ambient.reset();
     this.lastGoalAnalysisAt = 0;
@@ -288,6 +298,8 @@ export class MaculusRuntime {
     this.safety.reset();
     this.scene.reset();
     this.activeGuidanceGoal = null;
+    this.routeRequested = false;
+    this.routePlanner.reset();
     this.guide.reset();
     this.ambient.reset();
     this.latestVisionObservation = null;
@@ -579,11 +591,18 @@ export class MaculusRuntime {
           continue;
         }
         this.lastFrameKey = frameKey;
+        let spatialUpdated = false;
+        const frameReceivedAt = Date.now();
         let detections = await detectionService.detectObjects(frame.base64);
         const now = Date.now();
         if (!this.state.descriptionInProgress && depthService.isReady() && now - this.lastDepthAt >= DEPTH_INTERVAL_MS) {
           this.lastDepthAt = now;
           const depth = await depthService.estimateDepth(frame.base64, detections);
+          if (depth?.grid && this.routeRequested) {
+            const spatial = await estimateSpatialFrame(frame, depth.grid, frameReceivedAt, this.abortController?.signal, detections);
+            if (spatial) {spatialUpdated = this.routePlanner.observe(spatial, Date.now());}
+            else {this.routePlanner.reset('Calibrated metric depth and camera tracking are unavailable.');}
+          }
           if (depth) {
             const nearByIndex = new Map(depth.objectDepths.map(item => [item.index, item.nearScore]));
             detections = detections.map((detection, index) => ({ ...detection, nearScore: nearByIndex.get(index) }));
@@ -596,6 +615,7 @@ export class MaculusRuntime {
         if (!this.running || generation !== this.generation) {break;}
         if (this.latestVisionObservation && this.latestVisionObservation.frame.source !== frame.source) {
           this.guide.invalidate();
+          this.routePlanner.reset();
           this.scene.reset();
           this.ambient.reset();
         }
@@ -606,6 +626,11 @@ export class MaculusRuntime {
           personEmbeddings: embeddings,
           cameraMoving,
         });
+        if (spatialUpdated) {
+          const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId);
+          const position = target ? this.routePlanner.targetAt(target.cx, target.cy) : null;
+          this.routeTarget = target && position ? { id: target.id, position } : null;
+        }
         const stabilizedDetections = previewDetections(snapshot);
         this.latestVisionObservation = {
           frame,
@@ -658,7 +683,20 @@ export class MaculusRuntime {
     }
     if (this.speech.canSpeakScene() && this.safety.getState().health !== 'emergency') {
       const ambient = this.ambient.next(snapshot, now, Boolean(this.activeGuidanceGoal), this.guide.targetId);
-      const speakable = ambient || this.guide.next(snapshot, now);
+      let routeCue = null;
+      const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId && now - entity.lastSeenAt <= 750);
+      if (this.routeRequested && this.guide.targetId !== null) {
+        const position = target && this.guide.status === 'tracking' && this.routeTarget?.id === target.id
+          ? this.routeTarget.position : null;
+        const safety = this.safety.getState();
+        const result = this.routePlanner.plan(position || { x: NaN, y: NaN, z: NaN }, now,
+          safety.health === 'healthy' && safety.lastValidAt !== null && now - safety.lastValidAt <= 750);
+        if (now - this.lastRouteCueAt >= (result.instruction === this.lastRouteCue ? 6000 : 2000)) {
+          routeCue = { key: `route:${now}`, kind: 'moved' as const, text: result.instruction, timestamp: now, speak: true };
+          this.lastRouteCue = result.instruction; this.lastRouteCueAt = now;
+        }
+      }
+      const speakable = (routeCue?.text.startsWith('Stop.') ? routeCue : null) || ambient || routeCue || this.guide.next(snapshot, now);
       if (speakable) {this.speech.speakScene(speakable);}
     }
     this.update({ guidanceStatus: this.guide.status });
@@ -759,12 +797,15 @@ export class MaculusRuntime {
   };
 
   private initializeOptionalModels = async (generation: number): Promise<void> => {
-    // Keep YOLO, Whisper, and Re-ID resident. Load the VLM on request; optional
-    // monocular depth must not crowd out voice/vision.
+    // Depth is optional and runs serially with detector inference at a bounded rate.
     await this.prepareModelAssets();
     if (!this.running || generation !== this.generation) {
       await this.conversation.destroy();
       return;
+    }
+    if (this.state.model.supported) {
+      await depthService.loadModel();
+      if (!this.running || generation !== this.generation) {await depthService.release(); return;}
     }
     this.update({ conversationReady: this.conversation.isReady() });
   };
@@ -881,6 +922,12 @@ export class MaculusRuntime {
       this.guide.start(requestedGoal, Boolean(correction));
       this.lastGoalAnalysisCandidates = '';
       this.lastGoalAnalysisAt = Date.now();
+      this.routeRequested = /\b(?:guide|lead|take|navigate)\s+me\s+(?:to|towards?)\b/i.test(text);
+      if (this.state.model.supported) {await depthService.loadModel(this.routeRequested);}
+      this.routePlanner.reset();
+      this.routeTarget = null;
+      this.lastRouteCue = '';
+      this.lastRouteCueAt = 0;
       this.update({ guidanceActive: true, guidanceGoal: requestedGoal, guidanceStatus: this.guide.status });
       if ((correction || clarification) && !/\b(red|blue|green|black|white|yellow|shirt|wearing)\b/i.test(requestedGoal)) {
         const current = this.currentVisionObservation();
@@ -1025,6 +1072,7 @@ export class MaculusRuntime {
       deviceMotionService.stop(),
       keepAwakeService.setEnabled(false),
       this.conversation.destroy(),
+      depthService.release(),
       soundCueService.stopAll(),
     ]);
     this.speech.stop();

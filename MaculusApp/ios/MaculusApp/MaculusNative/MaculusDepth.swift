@@ -5,6 +5,7 @@ import onnxruntime_objc
 @objc(MaculusDepth)
 final class MaculusDepth: NSObject {
   private let queue = DispatchQueue(label: "com.maculus.depth", qos: .utility, autoreleaseFrequency: .workItem)
+  private var metric = false
   private var session: ORTSession?
   private let inputSize = 256
   private var outputWidth = 518
@@ -16,12 +17,24 @@ final class MaculusDepth: NSObject {
     _ resolve: @escaping RCTPromiseResolveBlock,
     rejecter reject: @escaping RCTPromiseRejectBlock
   ) {
+    load(metric: false, resolve: resolve, reject: reject)
+  }
+
+  @objc func loadMetricDepthModel(_ resolve: @escaping RCTPromiseResolveBlock,
+                                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    load(metric: true, resolve: resolve, reject: reject)
+  }
+
+  private func load(metric: Bool, resolve: @escaping RCTPromiseResolveBlock,
+                    reject: @escaping RCTPromiseRejectBlock) {
     queue.async {
       do {
+        if self.metric != metric { self.session = nil }
+        self.metric = metric
         let alreadyLoaded = self.session != nil
         if self.session == nil {
           self.session = try MaculusORT.makeSession(
-            resource: "depth_anything_v2_small_uint8_256"
+            resource: metric ? "depth_metric_indoor_uint8_256" : "depth_anything_v2_small_uint8_256"
           )
         }
         resolve([
@@ -35,6 +48,14 @@ final class MaculusDepth: NSObject {
       } catch {
         reject("DEPTH_MODEL_LOAD_ERROR", error.localizedDescription, error)
       }
+    }
+  }
+
+  @objc func unloadDepthModel(_ resolve: @escaping RCTPromiseResolveBlock,
+                               rejecter reject: @escaping RCTPromiseRejectBlock) {
+    queue.async {
+      self.session = nil
+      resolve(true)
     }
   }
 
@@ -62,7 +83,9 @@ final class MaculusDepth: NSObject {
           shape: [1, self.inputSize, self.inputSize, 3]
         )
         self.updateOutputDimensions(shape: output.shape, count: output.values.count)
-        let nearMap = try self.normalize(output.values)
+        let nearMap = self.metric
+          ? output.values.map { value in value.isFinite && value > 0 ? (1 - value / 4).clamped(to: 0...1) : 0 }
+          : try self.normalize(output.values)
         let objectDepths = detections.enumerated().map { index, detection in
           let cx = detection.maculusDouble("cx", fallback: 0.5)
           let cy = detection.maculusDouble("cy", fallback: 0.5)
@@ -87,7 +110,18 @@ final class MaculusDepth: NSObject {
             ),
           ] as [String: Any]
         }
+        // Small spatial grid only; never bridge the full tensor to JavaScript.
+        let gridWidth = 32
+        let gridHeight = 24
+        let grid = (0..<(gridWidth * gridHeight)).map { index -> Double in
+          let x = min(self.outputWidth - 1, (index % gridWidth * 2 + 1) * self.outputWidth / (gridWidth * 2))
+          let y = min(self.outputHeight - 1, (index / gridWidth * 2 + 1) * self.outputHeight / (gridHeight * 2))
+          let index = y * self.outputWidth + x
+          let value = self.metric ? output.values[index] : nearMap[index]
+          return value.isFinite ? Double(value) : 0
+        }
         resolve([
+          "grid": ["width": gridWidth, "height": gridHeight, "values": grid, "units": self.metric ? "metres" : "relative-nearness"],
           "width": self.outputWidth,
           "height": self.outputHeight,
           "leftNearScore": self.sample(map: nearMap, x1: 0, y1: 0, x2: 1.0 / 3.0, y2: 1),
