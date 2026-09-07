@@ -1,0 +1,53 @@
+{
+  "status": "incomplete_floor_reference_required",
+  "squareMetres": 0.025,
+  "resolution": [
+    640,
+    480
+  ],
+  "usableViews": [
+    "20260907-101612.jpg",
+    "20260907-101621.jpg",
+    "20260907-101633.jpg",
+    "20260907-101641.jpg",
+    "20260907-101654.jpg",
+    "20260907-101710.jpg",
+    "20260907-101729.jpg",
+    "20260907-101739.jpg",
+    "20260907-101756.jpg",
+    "20260907-101810.jpg",
+    "20260907-101946.jpg",
+    "20260907-102009.jpg",
+    "20260907-102044.jpg",
+    "20260907-102059.jpg",
+    "20260907-102107.jpg"
+  ],
+  "rejectedViews": [],
+  "reprojectionRmsPixels": 0.4379994830465858,
+  "cameraMatrix": [
+    [
+      620.7755617170369,
+      0.0,
+      309.6709546968683
+    ],
+    [
+      0.0,
+      622.3272710212608,
+      249.69539060662277
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion": [
+    0.16392265226452207,
+    0.15767027967157637,
+    0.009329298223762217,
+    -0.005841962293347653,
+    -2.54250795026167
+  ],
+  "navigationValidated": false,
+  "floorReference": "Native-resolution detection failed; only 3x interpolation detected corners, while 1x, 2x and 4x failed. Retake a larger, sharper board view."
+}
