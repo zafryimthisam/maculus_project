@@ -182,6 +182,23 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(textCompletion).not.toHaveBeenCalled();
   });
 
+  it('refreshes a cached memory pause on the next visual request', async () => {
+    const service = new ConversationService();
+    (service as any).capabilitySupported = false;
+    jest.spyOn(localLlmService, 'getState').mockReturnValue('unloaded');
+    const refresh = jest.spyOn(modelAssetService, 'initialize').mockResolvedValue({
+      state: 'ready', path: '/model', projectorPath: '/projector', visionSupported: true,
+      downloadedBytes: 1, totalBytes: 1, metered: false,
+    });
+    jest.spyOn(localLlmService, 'load').mockResolvedValue(true);
+    jest.spyOn(localLlmService, 'isVisionReady').mockReturnValue(true);
+    jest.spyOn(localLlmService, 'cancel').mockResolvedValue();
+    jest.spyOn(localLlmService, 'completeVision').mockResolvedValue('A wooden desk is visible.');
+    const result = await service.describeFrame('image', scene(), healthySensor());
+    expect(refresh).toHaveBeenCalled();
+    expect(result.source).toBe('vision-language');
+  });
+
   it('removes repeated inventory sentences and an unfinished tail', () => {
     expect(sanitizeVisionDescription('A chair is on the left. A chair is on the left. A bag is on the right couch. There is a'))
       .toBe('A chair is on the left. A bag is on the right couch.');

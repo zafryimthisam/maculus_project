@@ -87,9 +87,9 @@ export class LocalLlmService {
         // Bound physical scratch allocation while retaining a full image's
         // embeddings in the logical batch; ASR shares the same phone RAM.
         n_batch: 256,
-        n_ubatch: 64,
+        n_ubatch: 32,
         n_parallel: 1,
-        n_threads: this.thermalThrottled ? 2 : Platform.OS === 'android' ? 2 : 6,
+        n_threads: this.thermalThrottled ? 2 : Platform.OS === 'android' ? 2 : 4,
         n_gpu_layers: Platform.OS === 'ios' ? 99 : 0,
         flash_attn_type: 'auto',
         cache_type_k: 'q8_0',

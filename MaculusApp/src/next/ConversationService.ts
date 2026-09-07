@@ -128,7 +128,7 @@ export class ConversationService {
       return visionFallback('no-frame', fallback, allowDeterministicFallback);
     }
     try {
-      if (!this.isVisionReady() && this.capabilitySupported && localLlmService.getState() !== 'generating') {
+      if (!this.isVisionReady() && localLlmService.getState() !== 'generating') {
         await this.initialize();
       }
       if (generation !== this.requestGeneration) {throw new Error('Visual request cancelled.');}

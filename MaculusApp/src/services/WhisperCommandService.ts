@@ -101,15 +101,12 @@ export class WhisperCommandService {
     onPartial?: (text: string) => void,
     bufferedAudio = false,
     onCaptureFinished?: () => Promise<void>,
-    endpointGate?: Promise<void>,
   ): Promise<WhisperCommandResult | null> {
     if (this.busy) {throw new Error('Whisper is already listening or processing.');}
     this.busy = true;
     const cancellationId = this.cancellationId;
     try {
-      const result = await this.captureCommand(
-        timeoutMs, onPartial, cancellationId, bufferedAudio, onCaptureFinished, endpointGate,
-      );
+      const result = await this.captureCommand(timeoutMs, onPartial, cancellationId, bufferedAudio, onCaptureFinished);
       return cancellationId === this.cancellationId ? result : null;
     } finally {
       this.busy = false;
@@ -122,7 +119,6 @@ export class WhisperCommandService {
     cancellationId: number,
     bufferedAudio: boolean,
     onCaptureFinished?: () => Promise<void>,
-    endpointGate?: Promise<void>,
   ): Promise<WhisperCommandResult | null> {
     const module = this.module;
     if (!module) {
@@ -164,13 +160,6 @@ export class WhisperCommandService {
     let stopped = false;
     let sawSpeechAt = 0;
     let lastSpeechAt = 0;
-    let endpointEnabled = endpointGate === undefined;
-    endpointGate?.then(() => {
-      endpointEnabled = true;
-      // Our activation feedback can register as speech. Give the user a full
-      // endpoint window after it ends instead of closing the capture at once.
-      if (sawSpeechAt > 0) {lastSpeechAt = Date.now();}
-    }).catch(() => undefined);
     let committedText = '';
     let finalText = '';
     let streamFailure: unknown;
@@ -238,7 +227,7 @@ export class WhisperCommandService {
           if (rms >= SPEECH_RMS_THRESHOLD) {
             if (!sawSpeechAt) {sawSpeechAt = now;}
             lastSpeechAt = now;
-          } else if (endpointEnabled && sawSpeechAt > 0 && sampleCount >= MIN_CAPTURE_SAMPLES &&
+          } else if (sawSpeechAt > 0 && sampleCount >= MIN_CAPTURE_SAMPLES &&
             now - lastSpeechAt >= ENDPOINT_SILENCE_MS) {
             requestStop();
           }
@@ -455,11 +444,5 @@ export const whisperCommandService = new WhisperCommandService();
 
 
 export function stripWakePhrase(text: string): string {
-  return text.trim()
-    .replace(/^(?:(?:hey|hi|okay|ok)[, ]+)?live\s*kit\b[,.!? ]*/i, '')
-    // Buffered wake capture intentionally remains active while the app says
-    // “Listening”, so discard that prompt when Whisper hears the speaker.
-    .replace(/^(?:listening\b[,.!? ]*)+/i, '')
-    .replace(/[,.!?; ]+listening\b[,.!? ]*$/i, '')
-    .trim();
+  return text.trim().replace(/^(?:(?:hey|hi|okay|ok)[, ]+)?live\s*kit\b[,.!? ]*/i, '').trim();
 }

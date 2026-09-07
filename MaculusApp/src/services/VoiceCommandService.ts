@@ -311,74 +311,40 @@ export class VoiceCommandService {
 
     this.commandBusy = true;
     const directCapture = detection.name === 'barge_in' || detection.name === 'followup';
-    const bufferedCapture = detection.bufferedAudio === true && !directCapture;
     const captureSession = this.sessionId;
     this.safetyInterrupted = false;
     this.reserveConversationWindow(this.effectiveQuietMs());
     this.setStatus('wake_detected');
     this.onTranscript?.('');
-    this.setDiagnostic(bufferedCapture
-      ? 'Wake detected. Keep speaking while the listening feedback plays.'
-      : 'Preparing the listening cue. Speak when it finishes.');
+    this.setDiagnostic('Preparing the listening cue. Speak when it finishes.');
     if (!directCapture) {Vibration.vibrate([0, 60]);}
     try {
+      // Discard wake pre-roll before audible prompts so neither the wake phrase
+      // nor our own speech/cue reaches command transcription.
+      await MaculusVoiceCommand.pauseForTts();
       tts.stop();
       await soundCueService.stopAll();
-      const sessionIsActive = () => this.enabled && !this.safetyInterrupted && captureSession === this.sessionId;
-      let releaseEndpointGate: (() => void) | undefined;
-      const endpointGate = bufferedCapture
-        ? new Promise<void>(resolve => {releaseEndpointGate = resolve;})
-        : undefined;
-
-      if (!bufferedCapture) {
-        await MaculusVoiceCommand.pauseForTts();
-        if (!sessionIsActive()) {return;}
-        await soundCueService.playActivation();
-        if (!sessionIsActive()) {return;}
-        if (!await tts.speakPrompt('Listening', sessionIsActive)) {return;}
-        if (!sessionIsActive()) {return;}
-        this.setStatus('command_listening');
-        this.setDiagnostic('Listening. Speak now.');
-      }
-
+      if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+      if (!await tts.speakPrompt('Listening', () => this.enabled && !this.safetyInterrupted && captureSession === this.sessionId)) {return;}
+      if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+      await soundCueService.playActivation();
+      if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
+      this.setStatus('command_listening');
+      this.setDiagnostic('Listening. Speak now.');
       // Whisper and FSMN VAD run locally through ExecuTorch. No Apple speech
       // daemon or network connection participates in command recognition.
-      const capturePromise = whisperCommandService.listenForCommandOnce(
+      const result: WhisperCommandResult | null = await whisperCommandService.listenForCommandOnce(
         COMMAND_TIMEOUT_MS,
         text => this.handlePartialTranscript({text, isFinal: false}),
-        bufferedCapture,
+        false,
         async () => {
-          if (!sessionIsActive()) {return;}
+          if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
           this.setStatus('processing');
+          if (!await tts.speakPrompt('Processing', () => this.enabled && !this.safetyInterrupted && captureSession === this.sessionId)) {return;}
+          if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {return;}
           await soundCueService.startProcessing();
-          if (!sessionIsActive()) {return;}
-          await tts.speakPrompt('Processing', sessionIsActive);
         },
-        endpointGate,
       );
-      // Feedback runs concurrently with buffered microphone consumption. Mark
-      // an early native/Whisper failure as observed until we await it below.
-      capturePromise.catch(() => undefined);
-
-      if (bufferedCapture) {
-        try {
-          if (!sessionIsActive()) {whisperCommandService.interrupt();}
-          if (sessionIsActive()) {await soundCueService.playActivation();}
-          if (sessionIsActive()) {
-            this.setStatus('command_listening');
-            this.setDiagnostic('Listening. Keep speaking naturally.');
-            await tts.speakPrompt('Listening', sessionIsActive);
-          }
-        } catch (error) {
-          whisperCommandService.interrupt();
-          await capturePromise.catch(() => undefined);
-          throw error;
-        } finally {
-          releaseEndpointGate?.();
-        }
-      }
-
-      const result: WhisperCommandResult | null = await capturePromise;
       console.log('[Voice] Command transcript result:', result);
       if (!this.enabled || this.safetyInterrupted || captureSession !== this.sessionId) {
         this.commandBusy = false;

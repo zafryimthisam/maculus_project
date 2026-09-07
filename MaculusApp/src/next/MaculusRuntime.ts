@@ -780,16 +780,15 @@ export class MaculusRuntime {
     detections: Detection[],
     now: number,
   ): Promise<PersonEmbedding[]> => {
-    if (!reIdService.isReady()) {
-      await reIdService.loadModel();
-    }
-    if (!reIdService.isReady() || now - this.lastReIdAt < REID_INTERVAL_MS) {return [];}
+    if (now - this.lastReIdAt < REID_INTERVAL_MS) {return [];}
     const personIndices = detections
       .map((detection, index) => ({ detection, index }))
       .filter(item => item.detection.label === 'person' && item.detection.score >= 0.5)
       .slice(0, 4)
       .map(item => item.index);
     if (personIndices.length === 0) {return [];}
+    if (!reIdService.isReady()) {await reIdService.loadModel();}
+    if (!reIdService.isReady()) {return [];}
     this.lastReIdAt = now;
     return reIdService.embedPeople(frame.base64, detections, personIndices);
   };
@@ -1093,8 +1092,10 @@ export class MaculusRuntime {
       // Route depth and the LFM projector must not be resident together on
       // memory-constrained phones. The next visual question reloads LFM lazily.
       await this.conversation.releaseModelForRouteGuidance();
+      if (!this.running || generation !== this.generation || !this.routeRequested || !this.state.model.supported) {return;}
       this.update({ conversationReady: false });
       await depthService.loadModel();
+      if (!this.running || generation !== this.generation || !this.routeRequested) {await depthService.release();}
     } catch (error) {
       console.warn('[Depth] Could not restore route depth after vision inference', error);
     }
