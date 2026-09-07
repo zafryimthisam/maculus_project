@@ -44,7 +44,7 @@ export default function MaculusNextApp(): React.JSX.Element {
   const sensorAge = state.sensor.lastValidAt === null ? Infinity :
     Math.max(0, readingTime - state.sensor.lastValidAt);
   const depthFresh = active && state.guidanceActive && depthAge <= 3000 &&
-    state.depthReading.source === state.cameraSource && state.depthReading.distanceCm !== null;
+    state.depthReading.source === state.cameraSource && state.depthReading.center !== null;
   const sensorFresh = active && sensorAge <= 3000 && state.sensor.distanceCm !== null &&
     ['healthy', 'warning', 'emergency'].includes(state.sensor.health);
   const busy = state.phase === 'starting' || state.phase === 'stopping' ||
@@ -181,9 +181,11 @@ export default function MaculusNextApp(): React.JSX.Element {
         </View>
 
         <View style={styles.connectionCard}>
-          <Text style={styles.cardLabel}>DISTANCE READINGS</Text>
+          <Text style={styles.cardLabel}>DEPTH CLEARANCE & DISTANCE</Text>
           <Text style={styles.cardBody}>
-            AI depth (frame centre): {depthFresh ? `${Math.round(state.depthReading.distanceCm!)} cm` : 'Unavailable / stale'}
+            AI relative clearance: {depthFresh
+              ? `Left ${Math.round(state.depthReading.left! * 100)}% · Center ${Math.round(state.depthReading.center! * 100)}% · Right ${Math.round(state.depthReading.right! * 100)}%`
+              : 'Unavailable / stale'}
           </Text>
           <Text style={styles.diagnosticText}>
             {depthFresh ? `${state.depthReading.source === 'pi' ? 'Pi camera' : 'Phone camera'} · ${(depthAge / 1000).toFixed(1)}s ago` : 'Start or resume the camera and wait for a fresh estimate.'}
@@ -195,7 +197,7 @@ export default function MaculusNextApp(): React.JSX.Element {
             {sensorFresh ? `${(sensorAge / 1000).toFixed(1)}s ago` : state.sensor.message}
           </Text>
           <Text style={styles.diagnosticText}>
-            AI depth is an indoor estimate. Aim the frame centre and sensor at the same flat surface.
+            Higher clearance means a more open-looking corridor; it is not a measurement in centimetres.
           </Text>
         </View>
 

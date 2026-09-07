@@ -44,7 +44,6 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
     }
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private var metric = false
     private var session: OrtSession? = null
     private var inputName: String = ""
     private var inputShape: LongArray = longArrayOf(1, 3, DEFAULT_INPUT_SIZE.toLong(), DEFAULT_INPUT_SIZE.toLong())
@@ -81,19 +80,14 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun loadDepthModel(promise: Promise) { executor.execute { loadDepthModelOnWorker(promise) } }
 
-    @ReactMethod
-    fun loadMetricDepthModel(promise: Promise) { executor.execute { loadDepthModelOnWorker(promise, true) } }
-
-    private fun loadDepthModelOnWorker(promise: Promise, useMetric: Boolean = false) {
+    private fun loadDepthModelOnWorker(promise: Promise) {
         try {
-            if (metric != useMetric) { session?.close(); session = null }
-            metric = useMetric
             if (session != null) {
                 promise.resolve(modelInfo(true))
                 return
             }
 
-            val modelBytes = reactApplicationContext.assets.open(if (metric) "depth_metric_indoor_uint8_256.onnx" else MODEL_ASSET).use { it.readBytes() }
+            val modelBytes = reactApplicationContext.assets.open(MODEL_ASSET).use { it.readBytes() }
             OrtSession.SessionOptions().use { opts ->
                 opts.setIntraOpNumThreads(2)
                 session = env.createSession(modelBytes, opts)
@@ -153,19 +147,19 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
             }
             reconcileOutputShape(output.size)
 
-            val nearMap = if (metric) output.map { if (it.isFinite() && it > 0) (1f - it / 4f).coerceIn(0f, 1f) else 0f }.toFloatArray() else normalizeNearMap(output)
+            val nearMap = normalizeNearMap(output)
             val response = Arguments.createMap()
             val grid = Arguments.createMap()
             val values = Arguments.createArray()
             for (y in 0 until 24) for (x in 0 until 32) {
                 val sx = ((x * 2 + 1) * outputWidth / 64).coerceAtMost(outputWidth - 1)
                 val sy = ((y * 2 + 1) * outputHeight / 48).coerceAtMost(outputHeight - 1)
-                val value = if (metric) output[sy * outputWidth + sx] else nearMap[sy * outputWidth + sx]
+                val value = nearMap[sy * outputWidth + sx]
                 values.pushDouble(if (value.isFinite()) value.toDouble() else 0.0)
             }
             grid.putInt("width", 32)
             grid.putInt("height", 24)
-            grid.putString("units", if (metric) "metres" else "relative-nearness")
+            grid.putString("units", "relative-nearness")
             grid.putArray("values", values)
             response.putMap("grid", grid)
             response.putInt("width", outputWidth)

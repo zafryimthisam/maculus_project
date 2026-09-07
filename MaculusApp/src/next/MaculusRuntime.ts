@@ -8,10 +8,8 @@ import {
   normalizePiUrl,
   setPiUrl,
 } from '../api/piClient';
-import { LocalRoutePlanner, Point3 } from './LocalRoutePlanner';
-import { estimateSpatialFrame } from '../services/SpatialService';
+import { TargetAwareLocalPlanner } from './TargetAwareLocalPlanner';
 import { depthService } from '../services/DepthService';
-import { centerDepthCm } from './depthReading';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
 import { deviceMotionService } from '../services/DeviceMotionService';
@@ -21,7 +19,7 @@ import { reIdService } from '../services/ReIdService';
 import { knownPersonService, normalizePersonName, parseSpelledPersonName } from '../services/KnownPersonService';
 import { soundCueService } from '../services/SoundCueService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
-import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
+import { CapturedFrame, ConversationTurn, DepthEstimation, Detection, PersonEmbedding } from '../types';
 import { ConversationService, VisionDescriptionResult } from './ConversationService';
 import {
   INITIAL_NEXT_RUNTIME_STATE,
@@ -66,9 +64,8 @@ export class MaculusRuntime {
   private assistantGeneration = 0;
   private assistantBusy = false;
   private abortController: AbortController | null = null;
-  private routePlanner = new LocalRoutePlanner();
+  private routePlanner = new TargetAwareLocalPlanner();
   private routeRequested = false;
-  private routeTarget: { id: number; position: Point3 } | null = null;
   private lastRouteCue = '';
   private lastRouteCueAt = 0;
   private lastDepthAt = 0;
@@ -592,7 +589,7 @@ export class MaculusRuntime {
           continue;
         }
         this.lastFrameKey = frameKey;
-        let spatialUpdated = false;
+        let routeDepth: DepthEstimation | null = null;
         const frameReceivedAt = Date.now();
         let detections = await detectionService.detectObjects(frame.base64);
         const now = Date.now();
@@ -600,14 +597,7 @@ export class MaculusRuntime {
           this.lastDepthAt = now;
           const depth = await depthService.estimateDepth(frame.base64, detections);
           if (!this.running || generation !== this.generation) {break;}
-          this.update({ depthReading: {
-            distanceCm: centerDepthCm(depth?.grid), observedAt: frameReceivedAt, source: frame.source,
-          } });
-          if (depth?.grid && this.routeRequested) {
-            const spatial = await estimateSpatialFrame(frame, depth.grid, frameReceivedAt, this.abortController?.signal, detections);
-            if (spatial) {spatialUpdated = this.routePlanner.observe(spatial, Date.now());}
-            else {this.routePlanner.reset('Calibrated metric depth and camera tracking are unavailable.');}
-          }
+          routeDepth = depth;
           if (depth) {
             const nearByIndex = new Map(depth.objectDepths.map(item => [item.index, item.nearScore]));
             detections = detections.map((detection, index) => ({ ...detection, nearScore: nearByIndex.get(index) }));
@@ -631,10 +621,12 @@ export class MaculusRuntime {
           personEmbeddings: embeddings,
           cameraMoving,
         });
-        if (spatialUpdated) {
+        if (routeDepth) {
           const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId);
-          const position = target ? this.routePlanner.targetAt(target.cx, target.cy) : null;
-          this.routeTarget = target && position ? { id: target.id, position } : null;
+          const reading = this.routePlanner.observe(routeDepth, target, frame.source, frameReceivedAt);
+          this.update({ depthReading: reading ? { ...reading } : {
+            left: null, center: null, right: null, observedAt: frameReceivedAt, source: frame.source,
+          } });
         }
         const stabilizedDetections = previewDetections(snapshot);
         this.latestVisionObservation = {
@@ -691,11 +683,8 @@ export class MaculusRuntime {
       let routeCue = null;
       const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId && now - entity.lastSeenAt <= 750);
       if (this.routeRequested && this.guide.targetId !== null) {
-        const position = target && this.guide.status === 'tracking' && this.routeTarget?.id === target.id
-          ? this.routeTarget.position : null;
-        const safety = this.safety.getState();
-        const result = this.routePlanner.plan(position || { x: NaN, y: NaN, z: NaN }, now,
-          safety.health === 'healthy' && safety.lastValidAt !== null && now - safety.lastValidAt <= 750);
+        const result = this.routePlanner.plan(this.guide.status === 'tracking' ? target : undefined,
+          this.safety.getState(), now);
         if (now - this.lastRouteCueAt >= (result.instruction === this.lastRouteCue ? 6000 : 2000)) {
           routeCue = { key: `route:${now}`, kind: 'moved' as const, text: result.instruction, timestamp: now, speak: true };
           this.lastRouteCue = result.instruction; this.lastRouteCueAt = now;
@@ -809,7 +798,7 @@ export class MaculusRuntime {
       return;
     }
     if (this.state.model.supported) {
-      await depthService.loadModel(true);
+      await depthService.loadModel();
       if (!this.running || generation !== this.generation) {await depthService.release(); return;}
     }
     this.update({ conversationReady: this.conversation.isReady() });
@@ -928,9 +917,8 @@ export class MaculusRuntime {
       this.lastGoalAnalysisCandidates = '';
       this.lastGoalAnalysisAt = Date.now();
       this.routeRequested = /\b(?:guide|lead|take|navigate)\s+me\s+(?:to|towards?)\b/i.test(text);
-      if (this.state.model.supported) {await depthService.loadModel(true);}
+      if (this.state.model.supported) {await depthService.loadModel();}
       this.routePlanner.reset();
-      this.routeTarget = null;
       this.lastRouteCue = '';
       this.lastRouteCueAt = 0;
       this.update({ guidanceActive: true, guidanceGoal: requestedGoal, guidanceStatus: this.guide.status });

@@ -10,8 +10,6 @@ RCT_EXTERN_METHOD(detect:(NSString *)base64Jpeg
 @end
 
 @interface RCT_EXTERN_MODULE(MaculusDepth, NSObject)
-RCT_EXTERN_METHOD(loadMetricDepthModel:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(unloadDepthModel:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(loadDepthModel:(RCTPromiseResolveBlock)resolve
