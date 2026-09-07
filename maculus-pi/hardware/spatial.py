@@ -18,13 +18,13 @@ class SpatialTracker:
         self.calibration = None
         self.error = 'Measured camera calibration is required'
         try:
-            import cv2
-            import numpy as np
-            self.cv2, self.np = cv2, np
             raw = Path(calibration_path).read_bytes()
             data = json.loads(raw)
             if not data.get('validated') or not data.get('navigationValidated') or data.get('domain') != 'indoor':
                 raise ValueError('Indoor calibration has not been validated')
+            import cv2
+            import numpy as np
+            self.cv2, self.np = cv2, np
             self.k = np.asarray(data['cameraMatrix'], dtype=np.float64).reshape(3, 3)
             self.distortion = np.asarray(data['distortion'], dtype=np.float64)
             self.initial = np.asarray(data['cameraToFloor'], dtype=np.float64).reshape(4, 4)
