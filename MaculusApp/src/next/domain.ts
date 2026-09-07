@@ -99,6 +99,7 @@ export interface NextRuntimeState {
   piSensorAvailable: boolean;
   piLastSeenAt: number | null;
   sensor: SafetyState;
+  depthReading: { distanceCm: number | null; observedAt: number | null; source: CameraSource };
   voiceStatus: VoiceCommandStatus;
   lastUserTranscript: string;
   voiceDiagnostic: string;
@@ -163,6 +164,7 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   piSensorAvailable: false,
   piLastSeenAt: null,
   sensor: EMPTY_SAFETY_STATE,
+  depthReading: { distanceCm: null, observedAt: null, source: 'none' },
   voiceStatus: 'off',
   lastUserTranscript: '',
   voiceDiagnostic: 'Start a session, then say “Hey LiveKit.”',

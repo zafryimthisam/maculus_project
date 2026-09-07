@@ -11,6 +11,7 @@ import {
 import { LocalRoutePlanner, Point3 } from './LocalRoutePlanner';
 import { estimateSpatialFrame } from '../services/SpatialService';
 import { depthService } from '../services/DepthService';
+import { centerDepthCm } from './depthReading';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
 import { deviceMotionService } from '../services/DeviceMotionService';
@@ -598,6 +599,10 @@ export class MaculusRuntime {
         if (!this.state.descriptionInProgress && depthService.isReady() && now - this.lastDepthAt >= DEPTH_INTERVAL_MS) {
           this.lastDepthAt = now;
           const depth = await depthService.estimateDepth(frame.base64, detections);
+          if (!this.running || generation !== this.generation) {break;}
+          this.update({ depthReading: {
+            distanceCm: centerDepthCm(depth?.grid), observedAt: frameReceivedAt, source: frame.source,
+          } });
           if (depth?.grid && this.routeRequested) {
             const spatial = await estimateSpatialFrame(frame, depth.grid, frameReceivedAt, this.abortController?.signal, detections);
             if (spatial) {spatialUpdated = this.routePlanner.observe(spatial, Date.now());}
@@ -804,7 +809,7 @@ export class MaculusRuntime {
       return;
     }
     if (this.state.model.supported) {
-      await depthService.loadModel();
+      await depthService.loadModel(true);
       if (!this.running || generation !== this.generation) {await depthService.release(); return;}
     }
     this.update({ conversationReady: this.conversation.isReady() });
@@ -923,7 +928,7 @@ export class MaculusRuntime {
       this.lastGoalAnalysisCandidates = '';
       this.lastGoalAnalysisAt = Date.now();
       this.routeRequested = /\b(?:guide|lead|take|navigate)\s+me\s+(?:to|towards?)\b/i.test(text);
-      if (this.state.model.supported) {await depthService.loadModel(this.routeRequested);}
+      if (this.state.model.supported) {await depthService.loadModel(true);}
       this.routePlanner.reset();
       this.routeTarget = null;
       this.lastRouteCue = '';

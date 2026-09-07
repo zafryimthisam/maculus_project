@@ -33,6 +33,20 @@ export default function MaculusNextApp(): React.JSX.Element {
   const [piConnecting, setPiConnecting] = React.useState(false);
   const [whisperState, setWhisperState] = React.useState(whisperCommandService.getState());
   const active = state.phase !== 'idle' && state.phase !== 'error';
+  const [readingTime, setReadingTime] = React.useState(Date.now());
+  React.useEffect(() => {
+    if (!active) {return;}
+    const timer = setInterval(() => setReadingTime(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  const depthAge = state.depthReading.observedAt === null ? Infinity :
+    Math.max(0, readingTime - state.depthReading.observedAt);
+  const sensorAge = state.sensor.lastValidAt === null ? Infinity :
+    Math.max(0, readingTime - state.sensor.lastValidAt);
+  const depthFresh = active && state.guidanceActive && depthAge <= 3000 &&
+    state.depthReading.source === state.cameraSource && state.depthReading.distanceCm !== null;
+  const sensorFresh = active && sensorAge <= 3000 && state.sensor.distanceCm !== null &&
+    ['healthy', 'warning', 'emergency'].includes(state.sensor.health);
   const busy = state.phase === 'starting' || state.phase === 'stopping' ||
     (!active && whisperState.state === 'processing');
   const interactionBusy = state.descriptionInProgress || [
@@ -164,6 +178,25 @@ export default function MaculusNextApp(): React.JSX.Element {
           <Text style={styles.cardLabel}>OBSTACLE SAFETY</Text>
           <Text style={styles.safetyValue}>{sensorTitle(state.sensor.health)}</Text>
           <Text style={styles.cardBody}>{state.sensor.message}</Text>
+        </View>
+
+        <View style={styles.connectionCard}>
+          <Text style={styles.cardLabel}>DISTANCE READINGS</Text>
+          <Text style={styles.cardBody}>
+            AI depth (frame centre): {depthFresh ? `${Math.round(state.depthReading.distanceCm!)} cm` : 'Unavailable / stale'}
+          </Text>
+          <Text style={styles.diagnosticText}>
+            {depthFresh ? `${state.depthReading.source === 'pi' ? 'Pi camera' : 'Phone camera'} · ${(depthAge / 1000).toFixed(1)}s ago` : 'Start or resume the camera and wait for a fresh estimate.'}
+          </Text>
+          <Text style={styles.cardBody}>
+            Ultrasonic (Pi): {sensorFresh ? `${state.sensor.distanceCm!.toFixed(1)} cm` : 'Unavailable / stale'}
+          </Text>
+          <Text style={styles.diagnosticText}>
+            {sensorFresh ? `${(sensorAge / 1000).toFixed(1)}s ago` : state.sensor.message}
+          </Text>
+          <Text style={styles.diagnosticText}>
+            AI depth is an indoor estimate. Aim the frame centre and sensor at the same flat surface.
+          </Text>
         </View>
 
         <TouchableOpacity
