@@ -313,6 +313,7 @@ export class MaculusRuntime {
     const generation = this.generation;
     const assistantGeneration = ++this.assistantGeneration;
     this.assistantBusy = true;
+    const restoreRouteDepth = await this.suspendDepthForVision();
     const observation = this.currentVisionObservation();
     const snapshot = observation?.snapshot || this.scene.getSnapshot();
     const canUseVlm = Boolean(observation && this.conversation.isVisionReady());
@@ -346,6 +347,7 @@ export class MaculusRuntime {
       this.speech.speakConversation(result.text, `describe:${snapshot.revision}:${Date.now()}`);
     } finally {
       await soundCueService.stopProcessing();
+      await this.restoreDepthAfterVision(restoreRouteDepth, generation);
       if (
         this.running &&
         generation === this.generation &&
@@ -378,6 +380,8 @@ export class MaculusRuntime {
         this.speech.endConversationTurn();
       }
       this.activeGuidanceGoal = null;
+      this.routeRequested = false;
+      depthService.release().catch(error => console.warn('[Depth] Release failed', error));
       this.guide.reset();
       this.ambient.reset();
     }
@@ -791,15 +795,12 @@ export class MaculusRuntime {
   };
 
   private initializeOptionalModels = async (generation: number): Promise<void> => {
-    // Depth is optional and runs serially with detector inference at a bounded rate.
+    // Keep depth unloaded until route guidance needs it. The VLM and its
+    // projector need this memory headroom when the first visual request arrives.
     await this.prepareModelAssets();
     if (!this.running || generation !== this.generation) {
       await this.conversation.destroy();
       return;
-    }
-    if (this.state.model.supported) {
-      await depthService.loadModel();
-      if (!this.running || generation !== this.generation) {await depthService.release(); return;}
     }
     this.update({ conversationReady: this.conversation.isReady() });
   };
@@ -917,7 +918,6 @@ export class MaculusRuntime {
       this.lastGoalAnalysisCandidates = '';
       this.lastGoalAnalysisAt = Date.now();
       this.routeRequested = /\b(?:guide|lead|take|navigate)\s+me\s+(?:to|towards?)\b/i.test(text);
-      if (this.state.model.supported) {await depthService.loadModel();}
       this.routePlanner.reset();
       this.lastRouteCue = '';
       this.lastRouteCueAt = 0;
@@ -943,6 +943,7 @@ export class MaculusRuntime {
       message: 'Maculus heard you and is checking the private vision AI…',
       voiceDiagnostic: 'Transcript and camera frame are being processed by the private vision AI.',
     });
+    const restoreRouteDepth = await this.suspendDepthForVision();
     await soundCueService.startProcessing();
     try {
       // Every non-control spoken turn receives a current camera frame, even
@@ -1008,6 +1009,7 @@ export class MaculusRuntime {
         assistantGeneration === this.assistantGeneration
       ) {
         await soundCueService.stopProcessing();
+        await this.restoreDepthAfterVision(restoreRouteDepth, generation);
         this.speech.endConversationTurn();
         this.assistantBusy = false;
         this.update({ descriptionInProgress: false });
@@ -1049,6 +1051,8 @@ export class MaculusRuntime {
           this.speech.endConversationTurn();
         }
         this.activeGuidanceGoal = null;
+        this.routeRequested = false;
+        depthService.release().catch(error => console.warn('[Depth] Release failed', error));
         this.guide.reset();
         this.update({ guidanceGoal: null, guidanceStatus: 'idle', descriptionInProgress: false });
         this.speech.speakSystem(hadGoal ? 'Goal finished. Tracking stopped.' : 'There is no active goal.');
@@ -1069,6 +1073,31 @@ export class MaculusRuntime {
       soundCueService.stopAll(),
     ]);
     this.speech.stop();
+  }
+
+  private async suspendDepthForVision(): Promise<boolean> {
+    const restore = this.routeRequested && this.state.model.supported;
+    if (depthService.isReady()) {
+      try {
+        await depthService.release();
+      } catch (error) {
+        console.warn('[Depth] Could not suspend depth for vision inference', error);
+      }
+    }
+    return restore;
+  }
+
+  private async restoreDepthAfterVision(restore: boolean, generation: number): Promise<void> {
+    if (!restore || !this.running || generation !== this.generation || !this.routeRequested) {return;}
+    try {
+      // Route depth and the LFM projector must not be resident together on
+      // memory-constrained phones. The next visual question reloads LFM lazily.
+      await this.conversation.releaseModelForRouteGuidance();
+      this.update({ conversationReady: false });
+      await depthService.loadModel();
+    } catch (error) {
+      console.warn('[Depth] Could not restore route depth after vision inference', error);
+    }
   }
 
   private currentVisionObservation(): VisionObservation | null {

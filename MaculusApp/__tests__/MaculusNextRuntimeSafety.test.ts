@@ -6,8 +6,44 @@ import {
   MaculusRuntime,
 } from '../src/next/MaculusRuntime';
 import { INITIAL_NEXT_RUNTIME_STATE } from '../src/next/domain';
+import { depthService } from '../src/services/DepthService';
 
 describe('MaculusNext runtime emergency AI interruption', () => {
+  it('does not preload depth into the memory reserved for private vision', async () => {
+    const runtime = new MaculusRuntime();
+    const testable = runtime as any;
+    testable.running = true;
+    testable.generation = 4;
+    testable.state = {...INITIAL_NEXT_RUNTIME_STATE, model: {...INITIAL_NEXT_RUNTIME_STATE.model, supported: true}};
+    testable.prepareModelAssets = jest.fn(async () => {});
+    testable.conversation = {isReady: () => false};
+    const loadDepth = jest.spyOn(depthService, 'loadModel');
+
+    await testable.initializeOptionalModels(4);
+
+    expect(loadDepth).not.toHaveBeenCalled();
+  });
+
+  it('releases the VLM before restoring depth for active route guidance', async () => {
+    const runtime = new MaculusRuntime();
+    const testable = runtime as any;
+    const releaseVision = jest.fn(async () => {});
+    testable.running = true;
+    testable.generation = 5;
+    testable.routeRequested = true;
+    testable.state = {...INITIAL_NEXT_RUNTIME_STATE, conversationReady: true};
+    testable.conversation = {releaseModelForRouteGuidance: releaseVision};
+    const loadDepth = jest.spyOn(depthService, 'loadModel').mockImplementation(async () => {
+      expect(releaseVision).toHaveBeenCalledTimes(1);
+      return {backend: 'test', available: true};
+    });
+
+    await testable.restoreDepthAfterVision(true, 5);
+
+    expect(loadDepth).toHaveBeenCalledTimes(1);
+    expect(runtime.getState().conversationReady).toBe(false);
+  });
+
   it('cancels in-progress local generation and invalidates its result', () => {
     const runtime = new MaculusRuntime();
     const cancel = jest.fn<() => Promise<void>>().mockResolvedValue();

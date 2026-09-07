@@ -103,6 +103,13 @@ export class ConversationService {
     this.scheduleIdleRelease();
   }
 
+  async releaseModelForRouteGuidance(): Promise<void> {
+    this.clearIdleTimer();
+    await this.initializationPromise?.catch(() => false);
+    this.ready = false;
+    await localLlmService.release();
+  }
+
   async describeFrame(
     imageBase64: string | null,
     scene: NextSceneSnapshot,
@@ -334,11 +341,11 @@ export function buildVisionPrompt(
   const verifiedObjects = scene.visibleEntities.length === 0
     ? 'No stable object detections are available.'
     : scene.visibleEntities.slice(0, 6).map(entity => {
-      const position = entity.zone === 'ahead' ? 'ahead' : `to the ${entity.zone}`;
+      const location = entity.zone === 'ahead' ? 'ahead' : `to the ${entity.zone}`;
       const label = entity.label === 'person' && entity.alias
         ? `${entity.alias} (anonymous session label for a person)`
         : entity.label;
-      return `${label} ${position}${entity.inPath ? ' overlapping the center view' : ''}`;
+      return `${label} ${location}${entity.inPath ? ' overlapping the center view' : ''}`;
     }).join('; ');
   const safetyRule = 'never give movement directions, call a path safe, estimate exact distance, claim a real identity, or infer sensitive traits. State uncertainty instead of guessing.';
   const goalContext = activeGuidanceGoal
