@@ -1,6 +1,6 @@
 import { Platform, NativeModules, DeviceEventEmitter } from 'react-native';
 import { AudioManager, AudioRecorder, decodeAudioData } from 'react-native-audio-api';
-import { WhisperCommandService } from '../src/services/WhisperCommandService';
+import { stripWakePhrase, WhisperCommandService } from '../src/services/WhisperCommandService';
 
 jest.mock('react-native-audio-api', () => ({
   decodeAudioData: jest.fn(),
@@ -134,6 +134,11 @@ describe('Whisper microphone handoff', () => {
     expect(NativeModules.MaculusVoiceCommand.stopCommandAudio).toHaveBeenCalledTimes(1);
     DeviceEventEmitter.emit('MaculusVoiceCommandAudio', {samples: Array(1600).fill(0.1)});
     expect(service.getState().capture?.buffers).toBe(2);
+  });
+
+  it('removes the captured listening prompt from either edge of a wake command', () => {
+    expect(stripWakePhrase('Hey LiveKit listening what is in front of me')).toBe('what is in front of me');
+    expect(stripWakePhrase('Hey LiveKit what is in front of me. Listening.')).toBe('what is in front of me');
   });
 
   it('configures an input-capable session and awaits activation before creating the recorder', async () => {

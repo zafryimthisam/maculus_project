@@ -115,18 +115,31 @@ describe('VoiceCommandService private Whisper capture', () => {
     expect(NativeModules.MaculusVoiceCommand.startBargeInMonitoring).not.toHaveBeenCalled();
   });
 
-  it('discards buffered wake audio and finishes listening prompts before recording', async () => {
+  it('captures buffered wake audio while activation and listening feedback play', async () => {
     const service = new VoiceCommandService() as any;
     service.enabled = true;
     service.onTurn = jest.fn();
     jest.spyOn(tts, 'isSpeaking').mockReturnValue(false);
     const prepare = jest.spyOn(tts, 'prepareForListening').mockResolvedValue();
-    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce').mockResolvedValueOnce({text: 'describe scene', confidence: null});
-    await service.handleWakeDetected({name: 'hey_livekit', bufferedAudio: true});
-    expect(listen).toHaveBeenCalledWith(expect.any(Number), expect.any(Function), false, expect.any(Function));
+    let finishCapture!: (value: {text: string; confidence: null}) => void;
+    let reportCaptureStarted!: () => void;
+    const captureStarted = new Promise<void>(resolve => {reportCaptureStarted = resolve;});
+    const listen = jest.spyOn(whisperCommandService, 'listenForCommandOnce').mockImplementationOnce(
+      () => {
+        reportCaptureStarted();
+        return new Promise(resolve => {finishCapture = resolve;});
+      },
+    );
+    const wake = service.handleWakeDetected({name: 'hey_livekit', bufferedAudio: true});
+    await captureStarted;
+    expect(listen).toHaveBeenCalledWith(
+      expect.any(Number), expect.any(Function), true, expect.any(Function), expect.any(Promise),
+    );
+    expect(NativeModules.MaculusVoiceCommand.pauseForTts).not.toHaveBeenCalled();
+    finishCapture({text: 'describe scene', confidence: null});
+    await wake;
     expect(prepare).not.toHaveBeenCalled();
     expect(NativeModules.MaculusSoundCue.playActivation).toHaveBeenCalledTimes(1);
-    expect(NativeModules.MaculusVoiceCommand.pauseForTts).toHaveBeenCalledTimes(1);
     expect(tts.speakPrompt).toHaveBeenCalledWith('Listening', expect.any(Function));
   });
 
