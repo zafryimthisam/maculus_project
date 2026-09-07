@@ -56,7 +56,13 @@ python3 main.py
 ```
 
 The example 0.025 m is valid only for a board whose squares you measured as
-25 mm. Calibration leaves `navigationValidated` false. Before enabling that
+25 mm. If the floor reference uses the four-sheet 50 mm board while the
+intrinsic views use the original 25 mm board, add `--floor-square-metres 0.05`.
+Keep the original `--square-metres 0.025`; changing it would mix the scales.
+The generated floor axes use camera-right, floor-up and horizontal camera-forward,
+independent of the checkerboard corner ordering.
+
+Calibration leaves `navigationValidated` false. Before enabling that
 field, supervised physical testing must verify estimated depth against measured
 distances, camera/body alignment, floor and body clearance, motion tracking,
 dynamic obstacles, and prompt stopping on stale data. Recalibrate if crop/lens

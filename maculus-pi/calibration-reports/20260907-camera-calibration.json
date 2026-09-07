@@ -1,0 +1,65 @@
+{
+  "resolution": [
+    640,
+    480
+  ],
+  "cameraMatrix": [
+    [
+      620.7755617170369,
+      0.0,
+      309.6709546968683
+    ],
+    [
+      0.0,
+      622.3272710212608,
+      249.69539060662277
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion": [
+    0.16392265226452207,
+    0.15767027967157637,
+    0.009329298223762217,
+    -0.005841962293347653,
+    -2.54250795026167
+  ],
+  "cameraToFloor": [
+    [
+      0.9973486066889017,
+      -0.07277195019859542,
+      6.938893903907228e-18,
+      0.0
+    ],
+    [
+      -0.06269188251914916,
+      -0.8592000284525086,
+      -0.5077844414448061,
+      1.315327765529875
+    ],
+    [
+      -0.03695246408444302,
+      -0.5064381051732795,
+      0.8614841617967137,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "reprojectionRmsPixels": 0.4379994830465858,
+  "floorReprojectionRmsPixels": 0.33406195044517517,
+  "usableViews": 15,
+  "squareMetres": 0.025,
+  "floorSquareMetres": 0.05,
+  "validated": true,
+  "navigationValidated": false,
+  "domain": "indoor",
+  "note": "Intrinsics measured. Metric depth, mounting and walking clearance still require supervised validation."
+}
