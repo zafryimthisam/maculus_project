@@ -48,7 +48,11 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
   private var activeDownloadedBytes: Int64 = 0
   private var completion: (resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock)?
   private var cancelled = false
-  private var memoryPressureUntil: Date?
+  // A UIKit memory warning is a request to purge reloadable resources, not a
+  // statement that this device can no longer run the model. React uses this
+  // monotonically increasing value to trim the idle VLM after the current
+  // user-initiated inference finishes.
+  private var memoryWarningSequence = 0
   private var verifiedInstalledFingerprints: [String: String] = [:]
   private lazy var session = URLSession(
     configuration: .default,
@@ -99,14 +103,8 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
 
   @objc private func memoryWarning() {
     queue.async {
-      self.memoryPressureUntil = Date().addingTimeInterval(60)
+      self.memoryWarningSequence += 1
       self.emitCapability()
-      self.queue.asyncAfter(deadline: .now() + 61) { [weak self] in
-        guard let self = self else { return }
-        if let until = self.memoryPressureUntil, until > Date() { return }
-        self.memoryPressureUntil = nil
-        self.emitCapability()
-      }
     }
   }
 
@@ -363,6 +361,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
       "capabilityReason": capability.reason.map { $0 as Any } ?? NSNull(),
       "thermalThrottled": thermal.throttled,
       "thermalState": thermal.name,
+      "memoryWarningSequence": memoryWarningSequence,
     ]
   }
 
@@ -390,6 +389,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
       "capabilityReason": capability.reason.map { $0 as Any } ?? NSNull(),
       "thermalThrottled": thermal.throttled,
       "thermalState": thermal.name,
+      "memoryWarningSequence": memoryWarningSequence,
     ])
   }
 
@@ -488,9 +488,6 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
   }
 
   private func assistantCapability() -> (supported: Bool, reason: String?) {
-    if let until = memoryPressureUntil, until > Date() {
-      return (false, "Memory pressure paused detailed vision and conversation.")
-    }
     if ProcessInfo.processInfo.physicalMemory < 4_000_000_000 {
       return (false, "This device has too little memory for the high-accuracy vision model.")
     }
@@ -505,7 +502,7 @@ final class MaculusModelManager: RCTEventEmitter, URLSessionDataDelegate {
     case .nominal: return ("nominal", false)
     case .fair: return ("fair", false)
     case .serious: return ("serious", true)
-    case .critical: return ("critical", false)
+    case .critical: return ("critical", true)
     @unknown default: return ("unknown", false)
     }
   }

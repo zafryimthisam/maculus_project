@@ -7,8 +7,55 @@ import {
 } from '../src/next/MaculusRuntime';
 import { INITIAL_NEXT_RUNTIME_STATE } from '../src/next/domain';
 import { depthService } from '../src/services/DepthService';
+import { modelAssetService, ModelAssetStatus } from '../src/services/ModelAssetService';
 
 describe('MaculusNext runtime emergency AI interruption', () => {
+  it('trims reloadable vision memory without cancelling an active answer', async () => {
+    const runtime = new MaculusRuntime();
+    const testable = runtime as any;
+    const setDeviceCapability = jest.fn();
+    const handleMemoryPressure = jest.fn();
+    const baseStatus: ModelAssetStatus = {
+      state: 'ready', path: '/model', projectorPath: '/projector',
+      downloadedBytes: 1, totalBytes: 1, metered: false,
+      visionSupported: true, conversationalSupported: true,
+      thermalState: 'nominal', memoryWarningSequence: 0,
+    };
+    let listener!: (status: ModelAssetStatus) => void;
+    const subscribe = jest.spyOn(modelAssetService, 'subscribe').mockImplementation(callback => {
+      listener = callback;
+      callback(baseStatus);
+      return () => {};
+    });
+    const initialize = jest.spyOn(modelAssetService, 'initialize').mockResolvedValue(baseStatus);
+    testable.conversation = { setDeviceCapability, handleMemoryPressure };
+    testable.assistantGeneration = 7;
+    testable.assistantBusy = true;
+    testable.state = {
+      ...INITIAL_NEXT_RUNTIME_STATE,
+      descriptionInProgress: true,
+      previewFrameBase64: 'jpeg',
+      previewFrameSource: 'device',
+    };
+
+    try {
+      await runtime.prepareModelAssets();
+      listener({ ...baseStatus, memoryWarningSequence: 1 });
+
+      expect(handleMemoryPressure).toHaveBeenCalledTimes(1);
+      expect(testable.assistantGeneration).toBe(7);
+      expect(testable.assistantBusy).toBe(true);
+      expect(runtime.getState()).toMatchObject({
+        descriptionInProgress: true,
+        previewFrameBase64: null,
+        previewFrameSource: 'none',
+      });
+    } finally {
+      subscribe.mockRestore();
+      initialize.mockRestore();
+    }
+  });
+
   it('does not preload depth into the memory reserved for private vision', async () => {
     const runtime = new MaculusRuntime();
     const testable = runtime as any;

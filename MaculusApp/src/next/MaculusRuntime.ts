@@ -74,6 +74,8 @@ export class MaculusRuntime {
   private lastRouteCue = '';
   private lastRouteCueAt = 0;
   private lastDepthAt = 0;
+  private thermalState = 'unknown';
+  private lastMemoryWarningSequence = 0;
   private lastReIdAt = 0;
   private lastFrameKey = '';
   private lastPiCameraAttemptAt = 0;
@@ -100,15 +102,32 @@ export class MaculusRuntime {
   async prepareModelAssets(): Promise<void> {
     if (!this.modelUnsubscribe) {
       this.modelUnsubscribe = modelAssetService.subscribe(status => {
+        this.thermalState = status.thermalState || 'unknown';
         this.conversation.setDeviceCapability(
           status.visionSupported !== false,
           Boolean(status.thermalThrottled),
         );
         this.update({ model: nextModelState(status) });
+        const memoryWarningSequence = status.memoryWarningSequence || 0;
+        if (memoryWarningSequence > this.lastMemoryWarningSequence) {
+          this.lastMemoryWarningSequence = memoryWarningSequence;
+          // Drop duplicate JPEG references immediately. The VLM context is
+          // released after an active user request finishes and can be loaded
+          // again on the next explicit request.
+          this.latestVisionObservation = null;
+          this.conversation.handleMemoryPressure();
+          this.update({
+            conversationReady: false,
+            previewFrameBase64: null,
+            previewResolution: null,
+            previewDetections: [],
+            previewFrameSource: 'none',
+            previewUpdatedAt: null,
+          });
+        }
         // Recovery enables an explicit request; never immediately reload the model
-        // which just triggered a memory warning.
+        // after a true device capability or critical-thermal pause.
         if (status.visionSupported === false) {
-          depthService.release().catch(error => console.warn("[Depth] Release failed", error));
           this.assistantGeneration += 1;
           this.assistantBusy = false;
           this.speech.endConversationTurn();
@@ -604,7 +623,7 @@ export class MaculusRuntime {
         this.lastFrameKey = frameKey;
         const frameReceivedAt = Date.now();
         const depthDue = !this.state.descriptionInProgress && depthService.isReady() &&
-          frameReceivedAt - this.lastDepthAt >= DEPTH_INTERVAL_MS;
+          frameReceivedAt - this.lastDepthAt >= depthIntervalForThermalState(this.thermalState);
         if (depthDue) {this.lastDepthAt = frameReceivedAt;}
         // Detection, depth, and phone motion sample the same frame window. This
         // removes the former detector-then-depth serialization on iPhone.
@@ -658,6 +677,10 @@ export class MaculusRuntime {
         previousFrameAt = now;
         this.publishScene(snapshot, smoothedFps);
         this.publishGuidance(snapshot);
+        const thermalFrameInterval = frameIntervalForThermalState(this.thermalState);
+        if (thermalFrameInterval > 0) {
+          await delay(Math.max(0, thermalFrameInterval - (Date.now() - frameReceivedAt)));
+        }
       } catch (error: any) {
         if (error?.name === 'AbortError') {break;}
         console.warn('[MaculusNext] Vision loop stopped:', error?.message || error);
@@ -991,7 +1014,11 @@ export class MaculusRuntime {
       }
       if (response.vision) {
         this.update({
-          conversationReady: response.vision.source === 'vision-language' || this.state.conversationReady,
+          // Memory-pressure cleanup may have released the context immediately
+          // after producing this answer. Report actual residency, not merely
+          // that the completed response came from the VLM.
+          conversationReady: this.conversation.isReady?.() ??
+            (response.vision.source === 'vision-language' || this.state.conversationReady),
           detailedDescription: response.vision.text,
           descriptionSource: response.vision.source,
           message: voiceVisionStatusMessage(response.vision),
@@ -1212,6 +1239,18 @@ function previewDetections(snapshot: NextSceneSnapshot): Detection[] {
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function depthIntervalForThermalState(thermalState: string): number {
+  if (thermalState === 'critical') {return 1000;}
+  if (thermalState === 'serious') {return 500;}
+  return DEPTH_INTERVAL_MS;
+}
+
+function frameIntervalForThermalState(thermalState: string): number {
+  if (thermalState === 'critical') {return 500;}
+  if (thermalState === 'serious') {return 200;}
+  return 0;
 }
 
 function nextModelState(status: ModelAssetStatus): NextRuntimeState['model'] {

@@ -42,6 +42,7 @@ export class ConversationService {
   private suspensionPromise: Promise<void> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private requestGeneration = 0;
+  private releaseAfterCurrentRequest = false;
 
   async initialize(): Promise<boolean> {
     this.clearIdleTimer();
@@ -67,6 +68,20 @@ export class ConversationService {
         await localLlmService.release();
       })().catch(error => console.warn('[MaculusNext] Memory cleanup failed:', error))
         .finally(() => {this.suspensionPromise = null;});
+    }
+  }
+
+  /**
+   * Purge the reloadable VLM in response to UIKit memory pressure without
+   * turning a recoverable warning into a capability outage. If a user request
+   * is already loading or generating, let it finish and release immediately
+   * afterward; the next explicit request may lazily load the model again.
+   */
+  handleMemoryPressure(): void {
+    this.clearIdleTimer();
+    this.releaseAfterCurrentRequest = true;
+    if (!this.initializationPromise && localLlmService.getState() === 'ready') {
+      this.releaseForMemoryPressure();
     }
   }
 
@@ -215,7 +230,10 @@ export class ConversationService {
         formatVisionFailureDetail(localLlmService.getLastError() || error?.message),
       );
     } finally {
-      if (generation === this.requestGeneration) {this.scheduleIdleRelease(options.selectTarget ? 5000 : 30000);}
+      if (generation === this.requestGeneration) {
+        if (this.releaseAfterCurrentRequest) {this.releaseForMemoryPressure();}
+        else {this.scheduleIdleRelease(options.selectTarget ? 5000 : 30000);}
+      }
     }
   }
 
@@ -292,6 +310,9 @@ export class ConversationService {
       return { text: answer };
     } catch {
       return { text: 'The on-device conversation model did not respond. Live safety monitoring is still active.' };
+    } finally {
+      if (this.releaseAfterCurrentRequest) {this.releaseForMemoryPressure();}
+      else {this.scheduleIdleRelease();}
     }
   }
 
@@ -319,6 +340,17 @@ export class ConversationService {
         .catch(error => console.warn('[MaculusNext] Idle model cleanup failed:', error))
         .finally(() => {this.suspensionPromise = null;});
     }, delayMs);
+  }
+
+  private releaseForMemoryPressure(): void {
+    if (!this.releaseAfterCurrentRequest || this.suspensionPromise) {return;}
+    const state = localLlmService.getState();
+    if (state === 'loading' || state === 'generating') {return;}
+    this.releaseAfterCurrentRequest = false;
+    this.ready = false;
+    this.suspensionPromise = localLlmService.release()
+      .catch(error => console.warn('[MaculusNext] Memory-pressure cleanup failed:', error))
+      .finally(() => {this.suspensionPromise = null;});
   }
 
   private rememberTurn(question: string, answer: string): void {

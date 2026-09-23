@@ -33,7 +33,7 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('unloads after a memory warning during loading and does not eagerly reload on recovery', async () => {
+  it('unloads after a critical thermal pause during loading and does not eagerly reload on recovery', async () => {
     const service = new ConversationService();
     jest.spyOn(modelAssetService, 'initialize').mockResolvedValue({
       state: 'ready', path: '/model', projectorPath: '/projector', visionSupported: true,
@@ -57,6 +57,27 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(release).toHaveBeenCalledTimes(1);
     service.setDeviceCapability(true, false);
     expect(load).toHaveBeenCalledTimes(1);
+    expect(service.isReady()).toBe(false);
+  });
+
+  it('finishes an active visual answer before releasing memory under pressure', async () => {
+    const service = readyService();
+    let state: ReturnType<typeof localLlmService.getState> = 'ready';
+    jest.spyOn(localLlmService, 'getState').mockImplementation(() => state);
+    const release = jest.spyOn(localLlmService, 'release').mockResolvedValue();
+    jest.spyOn(localLlmService, 'completeVision').mockImplementation(async () => {
+      state = 'generating';
+      service.handleMemoryPressure();
+      expect(release).not.toHaveBeenCalled();
+      state = 'ready';
+      return 'A doorway is visible ahead.';
+    });
+
+    const result = await service.describeFrame('image', scene(), healthySensor());
+    await Promise.resolve();
+
+    expect(result).toMatchObject({ source: 'vision-language', text: 'A doorway is visible ahead.' });
+    expect(release).toHaveBeenCalledTimes(1);
     expect(service.isReady()).toBe(false);
   });
 
@@ -182,7 +203,7 @@ describe('MaculusNext vision-language descriptions', () => {
     expect(textCompletion).not.toHaveBeenCalled();
   });
 
-  it('refreshes a cached memory pause on the next visual request', async () => {
+  it('refreshes a cached capability pause on the next visual request', async () => {
     const service = new ConversationService();
     (service as any).capabilitySupported = false;
     jest.spyOn(localLlmService, 'getState').mockReturnValue('unloaded');

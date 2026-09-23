@@ -16,6 +16,7 @@ export interface ModelAssetStatus {
   capabilityReason?: string;
   thermalThrottled?: boolean;
   thermalState?: string;
+  memoryWarningSequence?: number;
   message?: string;
 }
 
@@ -122,6 +123,9 @@ function normalize(status: ModelAssetStatus): ModelAssetStatus {
     capabilityReason: status.capabilityReason,
     thermalThrottled: Boolean(status.thermalThrottled),
     thermalState: status.thermalState || 'unknown',
+    memoryWarningSequence: Number.isFinite(status.memoryWarningSequence)
+      ? Math.max(0, Math.trunc(status.memoryWarningSequence!))
+      : 0,
     message: status.message,
   };
 }

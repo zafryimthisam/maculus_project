@@ -68,7 +68,13 @@ After a selection turn it unloads after five idle seconds; other visual turns
 allow thirty seconds for follow-ups. Reloading costs startup time on the next
 request, but continuous target tracking does not require the VLM to remain loaded.
 
-Memory warnings cancel inference and release the context after native work drains.
+Memory warnings no longer mark detailed vision as unsupported or impose a fixed
+pause. Maculus finishes an already-running user request, clears duplicate camera
+JPEG references, releases the reloadable VLM context after native work drains,
+and may load it lazily for the next explicit request. Thermal policy is graded:
+fair keeps user-facing work available, serious reduces VLM work and camera/depth
+cadence, and critical pauses detailed VLM/conversation while basic camera safety
+processing continues at a substantially reduced cadence.
 Capability is re-evaluated after the existing sixty-second cooldown; recovery
 does not eagerly reload the model. Per-work-item native autorelease pools reclaim
 temporary camera/inference objects, and old occluded person tracks and their
