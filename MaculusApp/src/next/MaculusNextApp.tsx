@@ -188,7 +188,9 @@ export default function MaculusNextApp(): React.JSX.Element {
               : 'Unavailable / stale'}
           </Text>
           <Text style={styles.diagnosticText}>
-            {depthFresh ? `${state.depthReading.source === 'pi' ? 'Pi camera' : 'Phone camera'} · ${(depthAge / 1000).toFixed(1)}s ago` : 'Start or resume the camera and wait for a fresh estimate.'}
+            {depthFresh
+              ? `${state.depthReading.source === 'pi' ? 'Pi camera' : 'Phone camera'} · ${(depthAge / 1000).toFixed(1)}s ago${state.depthReading.inferenceMs === null ? '' : ` · ${Math.round(state.depthReading.inferenceMs)} ms depth`}`
+              : 'Start or resume the camera and wait for a fresh estimate.'}
           </Text>
           <Text style={styles.cardBody}>
             Ultrasonic (Pi): {sensorFresh ? `${state.sensor.distanceCm!.toFixed(1)} cm` : 'Unavailable / stale'}
@@ -197,7 +199,7 @@ export default function MaculusNextApp(): React.JSX.Element {
             {sensorFresh ? `${(sensorAge / 1000).toFixed(1)}s ago` : state.sensor.message}
           </Text>
           <Text style={styles.diagnosticText}>
-            Higher clearance means a more open-looking corridor; it is not a measurement in centimetres.
+            Clearance summarizes a nine-lane temporal surface map; it is not a measurement in centimetres.
           </Text>
         </View>
 

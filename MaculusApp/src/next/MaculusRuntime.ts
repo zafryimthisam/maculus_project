@@ -1,4 +1,4 @@
-import { Vibration } from 'react-native';
+import { Platform, Vibration } from 'react-native';
 import {
   discoverPiUrl,
   fetchDistance,
@@ -19,7 +19,7 @@ import { reIdService } from '../services/ReIdService';
 import { knownPersonService, normalizePersonName, parseSpelledPersonName } from '../services/KnownPersonService';
 import { soundCueService } from '../services/SoundCueService';
 import { VoiceCommand, voiceCommandService, WAKE_WORD_LABEL } from '../services/VoiceCommandService';
-import { CapturedFrame, ConversationTurn, DepthEstimation, Detection, PersonEmbedding } from '../types';
+import { CapturedFrame, ConversationTurn, Detection, PersonEmbedding } from '../types';
 import { ConversationService, VisionDescriptionResult } from './ConversationService';
 import {
   INITIAL_NEXT_RUNTIME_STATE,
@@ -31,13 +31,17 @@ import { SafetyCoordinator } from './SafetyCoordinator';
 import { SessionSceneStore } from './SessionSceneStore';
 import { SpeechCoordinator } from './SpeechCoordinator';
 import { AmbientGuide, extractGuidanceGoal, GuidanceController } from './GuidanceController';
+import { attachDepthToDetections, SpatialDepthMemory } from './SpatialDepthMemory';
 export { extractGuidanceGoal, detectorLabelsForGoal } from './GuidanceController';
 
 type RuntimeListener = (state: NextRuntimeState) => void;
 
 const SENSOR_INTERVAL_MS = 250;
 const VISION_IDLE_MS = 70;
-const DEPTH_INTERVAL_MS = 1200;
+// The iPhone path is intentionally camera-rate rather than snapshot-rate. The
+// loop keeps no frame backlog, so a slower device naturally processes the most
+// recent frame at the rate it can sustain.
+const DEPTH_INTERVAL_MS = Platform.OS === 'ios' ? 100 : 250;
 const REID_INTERVAL_MS = 650;
 const PI_STALE_MS = 3000;
 const PI_CAMERA_RETRY_MS = 4000;
@@ -65,6 +69,7 @@ export class MaculusRuntime {
   private assistantBusy = false;
   private abortController: AbortController | null = null;
   private routePlanner = new TargetAwareLocalPlanner();
+  private spatialDepth = new SpatialDepthMemory();
   private routeRequested = false;
   private lastRouteCue = '';
   private lastRouteCueAt = 0;
@@ -168,6 +173,7 @@ export class MaculusRuntime {
     this.activeGuidanceGoal = null;
     this.routeRequested = false;
     this.routePlanner.reset();
+    this.spatialDepth.reset();
     this.guide.reset();
     this.ambient.reset();
     this.lastGoalAnalysisAt = 0;
@@ -298,6 +304,7 @@ export class MaculusRuntime {
     this.activeGuidanceGoal = null;
     this.routeRequested = false;
     this.routePlanner.reset();
+    this.spatialDepth.reset();
     this.guide.reset();
     this.ambient.reset();
     this.latestVisionObservation = null;
@@ -382,6 +389,8 @@ export class MaculusRuntime {
       this.activeGuidanceGoal = null;
       this.routeRequested = false;
       depthService.release().catch(error => console.warn('[Depth] Release failed', error));
+      this.routePlanner.reset();
+      this.spatialDepth.reset();
       this.guide.reset();
       this.ambient.reset();
     }
@@ -593,28 +602,31 @@ export class MaculusRuntime {
           continue;
         }
         this.lastFrameKey = frameKey;
-        let routeDepth: DepthEstimation | null = null;
         const frameReceivedAt = Date.now();
-        let detections = await detectionService.detectObjects(frame.base64);
+        const depthDue = !this.state.descriptionInProgress && depthService.isReady() &&
+          frameReceivedAt - this.lastDepthAt >= DEPTH_INTERVAL_MS;
+        if (depthDue) {this.lastDepthAt = frameReceivedAt;}
+        // Detection, depth, and phone motion sample the same frame window. This
+        // removes the former detector-then-depth serialization on iPhone.
+        const [rawDetections, routeDepth, motion] = await Promise.all([
+          detectionService.detectObjects(frame.base64),
+          depthDue ? depthService.estimateDepth(frame.base64, []) : Promise.resolve(null),
+          frame.source === 'device' ? deviceMotionService.sample() : Promise.resolve({
+            available: false, monitoring: false, moving: false, rotationRate: 0, acceleration: 0, sampledAt: frameReceivedAt,
+          }),
+        ]);
+        if (!this.running || generation !== this.generation) {break;}
+        const spatialDepth = routeDepth ? this.spatialDepth.observe(routeDepth, rawDetections, frame.source,
+          frameReceivedAt, motion) : null;
+        const detections = attachDepthToDetections(rawDetections, spatialDepth);
         const now = Date.now();
-        if (!this.state.descriptionInProgress && depthService.isReady() && now - this.lastDepthAt >= DEPTH_INTERVAL_MS) {
-          this.lastDepthAt = now;
-          const depth = await depthService.estimateDepth(frame.base64, detections);
-          if (!this.running || generation !== this.generation) {break;}
-          routeDepth = depth;
-          if (depth) {
-            const nearByIndex = new Map(depth.objectDepths.map(item => [item.index, item.nearScore]));
-            detections = detections.map((detection, index) => ({ ...detection, nearScore: nearByIndex.get(index) }));
-          }
-        }
         const embeddings = this.state.descriptionInProgress ? [] : await this.personEmbeddings(frame, detections, now);
-        const cameraMoving = frame.source === 'device'
-          ? (await deviceMotionService.sample()).moving
-          : false;
+        const cameraMoving = motion.moving;
         if (!this.running || generation !== this.generation) {break;}
         if (this.latestVisionObservation && this.latestVisionObservation.frame.source !== frame.source) {
           this.guide.invalidate();
           this.routePlanner.reset();
+          this.spatialDepth.reset();
           this.scene.reset();
           this.ambient.reset();
         }
@@ -625,11 +637,11 @@ export class MaculusRuntime {
           personEmbeddings: embeddings,
           cameraMoving,
         });
-        if (routeDepth) {
+        if (spatialDepth) {
           const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId);
-          const reading = this.routePlanner.observe(routeDepth, target, frame.source, frameReceivedAt);
-          this.update({ depthReading: reading ? { ...reading } : {
-            left: null, center: null, right: null, observedAt: frameReceivedAt, source: frame.source,
+          const reading = this.routePlanner.observe(spatialDepth, target, frame.source, frameReceivedAt);
+          this.update({ depthReading: reading ? { ...reading, inferenceMs: routeDepth?.inferenceMs ?? null } : {
+            left: null, center: null, right: null, observedAt: frameReceivedAt, source: frame.source, inferenceMs: null,
           } });
         }
         const stabilizedDetections = previewDetections(snapshot);
@@ -918,6 +930,7 @@ export class MaculusRuntime {
       this.lastGoalAnalysisAt = Date.now();
       this.routeRequested = /\b(?:guide|lead|take|navigate)\s+me\s+(?:to|towards?)\b/i.test(text);
       this.routePlanner.reset();
+      this.spatialDepth.reset();
       this.lastRouteCue = '';
       this.lastRouteCueAt = 0;
       this.update({ guidanceActive: true, guidanceGoal: requestedGoal, guidanceStatus: this.guide.status });
@@ -1052,6 +1065,8 @@ export class MaculusRuntime {
         this.activeGuidanceGoal = null;
         this.routeRequested = false;
         depthService.release().catch(error => console.warn('[Depth] Release failed', error));
+        this.routePlanner.reset();
+        this.spatialDepth.reset();
         this.guide.reset();
         this.update({ guidanceGoal: null, guidanceStatus: 'idle', descriptionInProgress: false });
         this.speech.speakSystem(hadGoal ? 'Goal finished. Tracking stopped.' : 'There is no active goal.');
@@ -1083,6 +1098,10 @@ export class MaculusRuntime {
         console.warn('[Depth] Could not suspend depth for vision inference', error);
       }
     }
+    // Never fuse a post-conversation frame with geometry captured before the
+    // model was suspended; the user or camera may have moved meanwhile.
+    this.spatialDepth.reset();
+    this.routePlanner.reset();
     return restore;
   }
 

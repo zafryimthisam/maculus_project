@@ -4,7 +4,9 @@ import onnxruntime_objc
 
 @objc(MaculusDepth)
 final class MaculusDepth: NSObject {
-  private let queue = DispatchQueue(label: "com.maculus.depth", qos: .utility, autoreleaseFrequency: .workItem)
+  // Route depth is latency-sensitive. A serial user-initiated queue prevents
+  // overlapping inferences while allowing iOS to prioritize the newest frame.
+  private let queue = DispatchQueue(label: "com.maculus.depth", qos: .userInitiated, autoreleaseFrequency: .workItem)
   private var session: ORTSession?
   private let inputSize = 256
   private var outputWidth = 518
@@ -57,6 +59,7 @@ final class MaculusDepth: NSObject {
   ) {
     queue.async {
       do {
+        let startedAt = CFAbsoluteTimeGetCurrent()
         guard let session = self.session else {
           throw MaculusNativeError.message("Depth model is not loaded")
         }
@@ -98,9 +101,10 @@ final class MaculusDepth: NSObject {
             ),
           ] as [String: Any]
         }
-        // Small spatial grid only; never bridge the full tensor to JavaScript.
-        let gridWidth = 32
-        let gridHeight = 24
+        // Preserve enough spatial structure for narrow obstacles and nine-lane
+        // surface reasoning without bridging the full model tensor.
+        let gridWidth = 64
+        let gridHeight = 48
         let grid = (0..<(gridWidth * gridHeight)).map { index -> Double in
           let x = min(self.outputWidth - 1, (index % gridWidth * 2 + 1) * self.outputWidth / (gridWidth * 2))
           let y = min(self.outputHeight - 1, (index / gridWidth * 2 + 1) * self.outputHeight / (gridHeight * 2))
@@ -116,6 +120,7 @@ final class MaculusDepth: NSObject {
           "centerNearScore": self.sample(map: nearMap, x1: 1.0 / 3.0, y1: 0, x2: 2.0 / 3.0, y2: 1),
           "rightNearScore": self.sample(map: nearMap, x1: 2.0 / 3.0, y1: 0, x2: 1, y2: 1),
           "objectDepths": objectDepths,
+          "inferenceMs": (CFAbsoluteTimeGetCurrent() - startedAt) * 1000,
         ])
       } catch {
         reject("DEPTH_ESTIMATE_ERROR", error.localizedDescription, error)
@@ -147,9 +152,15 @@ final class MaculusDepth: NSObject {
       throw MaculusNativeError.message("Depth model returned an empty tensor")
     }
     let finite = raw.filter(\.isFinite)
-    guard let minimum = finite.min(), let maximum = finite.max() else {
+    guard let absoluteMinimum = finite.min(), let absoluteMaximum = finite.max() else {
       throw MaculusNativeError.message("Depth model returned no finite values")
     }
+    // A few extreme pixels should not rescale the complete scene from frame to
+    // frame. Estimate robust 2nd/98th percentiles from a bounded sample.
+    let stride = max(1, finite.count / 4096)
+    let sample = Swift.stride(from: 0, to: finite.count, by: stride).map { finite[$0] }.sorted()
+    let minimum = sample.isEmpty ? absoluteMinimum : sample[Int(Double(sample.count - 1) * 0.02)]
+    let maximum = sample.isEmpty ? absoluteMaximum : sample[Int(Double(sample.count - 1) * 0.98)]
     let range = max(0.000001, maximum - minimum)
     let count = outputWidth * outputHeight
     return (0..<count).map { index in

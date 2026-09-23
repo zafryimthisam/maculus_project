@@ -97,6 +97,8 @@ export interface DepthEstimation {
   grid?: DepthGrid;
   width: number;
   height: number;
+  /** Native decode + preprocess + model + compact-grid latency, when reported. */
+  inferenceMs?: number;
   leftNearScore: number;
   centerNearScore: number;
   rightNearScore: number;
