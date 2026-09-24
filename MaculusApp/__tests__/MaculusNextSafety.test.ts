@@ -113,7 +113,7 @@ describe('Obstacle distance narration tolerance', () => {
 
   it('ignores inclusive five-centimeter jitter, even after the old repeat timer', () => {
     const safety = new SafetyCoordinator();
-    expect(ingest(safety, 80, 1000)?.text).toBe('Stop. Obstacle ahead.');
+    expect(ingest(safety, 80, 1000)?.text).toBe('Stop. Something is close. Turn slowly to scan for a clear path.');
     for (const [cm, at] of [[85, 8000], [80, 11000], [75, 18000], [84, 21000]]) {
       expect(ingest(safety, cm, at)).toBeNull();
       expect(safety.getState().message).toContain('80 centimeters');
@@ -125,7 +125,7 @@ describe('Obstacle distance narration tolerance', () => {
     const safety = new SafetyCoordinator();
     ingest(safety, 80, 1000);
     expect(ingest(safety, 83, 8000)).toBeNull();
-    expect(ingest(safety, 86, 11000)?.text).toBe('Stop. Obstacle ahead.');
+    expect(ingest(safety, 86, 11000)?.text).toBe('Stop. Something is close. Turn slowly to scan for a clear path.');
     expect(ingest(safety, 83, 18000)).toBeNull();
   });
 
@@ -159,7 +159,7 @@ describe('Obstacle distance narration tolerance', () => {
 it('latches stop alerts through jitter until two fresh readings reach 45cm', () => {
   const safety = new SafetyCoordinator();
   const sample = (cm: number, at: number) => safety.ingest({reading: reading({distance_cm: cm}), receivedAt: at});
-  expect(sample(40, 1000)?.text).toBe('Stop. Obstacle nearby.');
+  expect(sample(40, 1000)?.text).toBe('Stop. Something is very close.');
   sample(43, 1100);
   expect(safety.getState().health).toBe('emergency');
   sample(45, 1200);

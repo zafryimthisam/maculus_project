@@ -3,7 +3,7 @@ import type { VoiceCommandStatus } from '../services/VoiceCommandService';
 
 export type NextRuntimePhase = 'idle' | 'starting' | 'running' | 'degraded' | 'stopping' | 'error';
 export type SensorHealth = 'unknown' | 'healthy' | 'warning' | 'emergency' | 'stale' | 'fault';
-export type EntityVisibility = 'visible' | 'occluded';
+export type EntityVisibility = 'visible' | 'temporarily-missing' | 'occluded';
 export type NextModelAssetState = 'missing' | 'downloading' | 'paused' | 'ready' | 'error';
 export type PiConnectionState = 'unknown' | 'searching' | 'connected' | 'unavailable';
 
@@ -49,6 +49,8 @@ export interface SceneObservation {
 export interface NextSceneEntity {
   id: number;
   identityId?: number;
+  /** True only for a person matched to an explicitly saved profile. */
+  knownPerson?: boolean;
   label: string;
   alias?: string;
   confidence: number;

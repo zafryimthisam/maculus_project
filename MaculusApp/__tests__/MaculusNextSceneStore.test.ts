@@ -74,7 +74,7 @@ describe('MaculusNext SessionSceneStore', () => {
       store.update({frameKey: `delayed-${frame}`, timestamp: frame * 100, detections: [detection('person', 0.5)],
         personEmbeddings: [{detectionIndex: 0, embedding: [1, 0, 0]}]});
     }
-    expect(store.getSnapshot(300).visibleEntities[0].alias).toBe('Zafry');
+    expect(store.getSnapshot(300).visibleEntities[0]).toMatchObject({alias: 'Zafry', knownPerson: true});
     store.update({frameKey: 'away', timestamp: 3000, detections: []});
     store.update({frameKey: 'return-without-embedding', timestamp: 10000, detections: [detection('person', 0.8)]});
     for (let frame = 1; frame <= 3; frame++) {
@@ -108,6 +108,7 @@ describe('MaculusNext SessionSceneStore', () => {
     }
     const person = store.getSnapshot(300).visibleEntities.find(entity => entity.label === 'person');
     expect(person?.alias).toBe('Jordan');
+    expect(person?.knownPerson).toBe(false);
   });
 
   it('does not confirm a track by processing the same frame repeatedly', () => {
@@ -124,13 +125,21 @@ describe('MaculusNext SessionSceneStore', () => {
     expect(snapshot.entities[0].confirmed).toBe(false);
   });
 
-  it('retains occluded objects in session memory', () => {
+  it('retains temporarily missing and occluded objects in session memory', () => {
     const store = new SessionSceneStore(['Alex']);
     store.update({ frameKey: 'chair-1', timestamp: 100, detections: [detection('chair', 0.5)] });
     store.update({ frameKey: 'chair-2', timestamp: 200, detections: [detection('chair', 0.5)] });
     const hidden = store.update({ frameKey: 'empty', timestamp: 2500, detections: [] });
     expect(hidden.visibleEntities).toHaveLength(0);
-    expect(hidden.entities[0]).toMatchObject({ label: 'chair', visibility: 'occluded', confirmed: true });
+    expect(hidden.entities[0]).toMatchObject({ label: 'chair', visibility: 'temporarily-missing', confirmed: true });
+    let occluded = hidden;
+    const changes = [...hidden.changes];
+    for (let frame = 1; frame <= 4; frame += 1) {
+      occluded = store.update({frameKey: `still-empty-${frame}`, timestamp: 6000 + frame * 200, detections: []});
+      changes.push(...occluded.changes);
+    }
+    expect(occluded.entities[0]).toMatchObject({label: 'chair', visibility: 'occluded', confirmed: true});
+    expect(changes.find(change => change.kind === 'left')?.speak).toBe(false);
   });
 
   it('does not assume a distant similar chair is the old locked chair', () => {
@@ -217,6 +226,39 @@ describe('MaculusNext SessionSceneStore', () => {
     const changes = [...firstMiss.changes, ...secondMiss.changes, ...reacquired.changes];
     expect(changes.some(change => change.kind === 'left')).toBe(false);
     expect(changes.some(change => change.kind === 'entered')).toBe(false);
+  });
+
+  it('silently reconnects a static object after repeated YOLO misses', () => {
+    const store = new SessionSceneStore(['Alex']);
+    store.update({frameKey: 'stable-1', timestamp: 100, detections: [detection('chair', 0.5)]});
+    const confirmed = store.update({frameKey: 'stable-2', timestamp: 200, detections: [detection('chair', 0.5)]});
+    const trackId = confirmed.visibleEntities[0].id;
+    const changes = [];
+    for (let frame = 1; frame <= 8; frame += 1) {
+      changes.push(...store.update({
+        frameKey: `dropout-${frame}`, timestamp: 200 + frame * 500, detections: [],
+      }).changes);
+    }
+    const duringDropout = store.getSnapshot(4200);
+    expect(duringDropout.visibleEntities).toHaveLength(0);
+    expect(duringDropout.entities[0].visibility).toBe('temporarily-missing');
+    const reacquired = store.update({frameKey: 'stable-back', timestamp: 4700,
+      detections: [detection('chair', 0.51)]});
+    expect(reacquired.visibleEntities[0].id).toBe(trackId);
+    expect([...changes, ...reacquired.changes].some(change => change.kind === 'left')).toBe(false);
+    expect(reacquired.changes.some(change => change.kind === 'entered')).toBe(false);
+  });
+
+  it('predicts a moving track briefly instead of freezing it on one missed frame', () => {
+    const store = new SessionSceneStore(['Alex']);
+    store.update({frameKey: 'moving-1', timestamp: 100, detections: [detection('chair', 0.3)]});
+    const moving = store.update({frameKey: 'moving-2', timestamp: 600, detections: [detection('chair', 0.4)]});
+    const beforeMiss = moving.visibleEntities[0].cx;
+
+    const predicted = store.update({frameKey: 'moving-miss', timestamp: 1100, detections: []});
+
+    expect(predicted.visibleEntities[0].cx).toBeGreaterThan(beforeMiss);
+    expect(predicted.visibleEntities[0].visibility).toBe('visible');
   });
 
   it('smooths bounding-box jitter before publishing confirmed entities', () => {

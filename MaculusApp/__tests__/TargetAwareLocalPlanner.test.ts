@@ -66,7 +66,7 @@ test('stops at a close wall using depth even when YOLO detects nothing', () => {
   const result = planner.plan(undefined, sensor(), 1100, 'walk');
 
   expect(result).toMatchObject({ status: 'blocked', direction: null, mode: 'WAIT_FOR_CLEARANCE' });
-  expect(result.instruction).toBe('Stop. I cannot see a safe path.');
+  expect(result.instruction).toBe('Stop. Turn slowly to scan for a clear path.');
 });
 
 test('keeps moving through a depth-clear centre when YOLO labels a far desk there', () => {
@@ -115,7 +115,7 @@ test('stops immediately when the close sensor reports an obstacle', () => {
   planner.observe(depth(.25, .15, .3), undefined, 'pi', 1000);
 
   expect(planner.plan(undefined, sensor(80), 1100, 'walk')).toMatchObject({
-    status: 'blocked', instruction: 'Stop. Obstacle ahead.', direction: null,
+    status: 'blocked', instruction: 'Stop. Something is close. Turn slowly to scan for a clear path.', direction: null,
   });
 });
 
@@ -131,6 +131,6 @@ test('explains that an unavailable close obstacle sensor, not depth, caused the 
   expect(result).toMatchObject({ status: 'unavailable', mode: 'WAIT_FOR_CLEARANCE' });
   expect(result.reason).toContain('Ultrasonic');
   expect(result.instruction).toBe(
-    'Stop. The close obstacle sensor is not available. I cannot confirm the path is safe.',
+    'Stop. The close sensor is not ready. Scan around before moving.',
   );
 });

@@ -3,6 +3,11 @@ import { NextSceneEntity, NextSceneSnapshot, SceneChange } from './domain';
 
 export type GoalStatus = 'idle' | 'searching' | 'clarifying' | 'tracking' | 'lost';
 
+const FRESH_DETECTION_MS = 1500;
+const PERSON_TARGET_LOST_MS = 3500;
+const OBJECT_TARGET_LOST_MS = 6000;
+const AMBIENT_PERSON_LOST_MS = 4500;
+
 /** Session-only target ownership. A different detection must never silently replace a lost target. */
 export class GuidanceController {
   goal: string | null = null;
@@ -14,6 +19,7 @@ export class GuidanceController {
   private lastSpokenAt = 0;
   private lastNotice = '';
   private targetName = '';
+  private targetLostAfterMs = OBJECT_TARGET_LOST_MS;
   private targetIdentityId: number | null = null;
   private needsVisualSelection = false;
   private identityUncertain = false;
@@ -33,6 +39,7 @@ export class GuidanceController {
     this.lastSpokenAt = 0;
     this.lastNotice = '';
     this.targetName = '';
+    this.targetLostAfterMs = OBJECT_TARGET_LOST_MS;
     this.targetIdentityId = null;
     this.needsVisualSelection = false;
     this.identityUncertain = false;
@@ -59,7 +66,7 @@ export class GuidanceController {
     const direction = this.goal.match(/\b(left|right|ahead)\b/i)?.[1].toLowerCase();
     return scene.visibleEntities.filter(entity =>
       entity.id !== this.excludedId && entity.confirmed &&
-      scene.timestamp - entity.lastSeenAt <= 1200 &&
+      scene.timestamp - entity.lastSeenAt <= FRESH_DETECTION_MS &&
       (labels.includes(entity.label) || entity.alias?.toLowerCase() === this.goal?.toLowerCase()) &&
       (!matchDirection || !direction || entity.zone === direction),
     );
@@ -75,6 +82,7 @@ export class GuidanceController {
     this.targetArrivalSpoken = false;
     this.targetIdentityId = entity.identityId ?? null;
     this.targetName = entity.label === 'person' ? (entity.alias || 'The selected person') : `The ${entity.label}`;
+    this.targetLostAfterMs = entity.label === 'person' ? PERSON_TARGET_LOST_MS : OBJECT_TARGET_LOST_MS;
     this.status = 'tracking';
     this.lastSeenAt = entity.lastSeenAt;
     this.lastZone = null;
@@ -114,14 +122,16 @@ export class GuidanceController {
     if (target) {
       if (!this.identityUncertain) {this.lastSeenAt = target.lastSeenAt;}
     }
-    if (!target || this.identityUncertain) {this.status = 'lost';}
+    if ((!target && now - this.lastSeenAt >= this.targetLostAfterMs) || this.identityUncertain) {
+      this.status = 'lost';
+    }
     this.observeTargetArrival(target, scene, now);
   }
 
   /** Called only when the speaker is available, so cues cannot be consumed silently. */
   next(scene: NextSceneSnapshot, now: number): SceneChange | null {
     if (!this.goal) {return null;}
-    const fresh = scene.visibleEntities.filter(entity => now - entity.lastSeenAt <= 1200);
+    const fresh = scene.visibleEntities.filter(entity => now - entity.lastSeenAt <= FRESH_DETECTION_MS);
     if (this.targetId === null) {
       const candidates = this.candidates({ ...scene, timestamp: now });
       if (candidates.length === 1 && !this.needsVisualSelection && !this.selectionDeclined) {
@@ -146,7 +156,7 @@ export class GuidanceController {
     }
     const target = this.resolveTarget({ ...scene, visibleEntities: fresh }, now);
     if (!target) {
-      if (now - this.lastSeenAt < 1200) {return null;}
+      if (now - this.lastSeenAt < this.targetLostAfterMs) {return null;}
       this.status = 'lost';
       return this.notice(`${this.targetName} is out of view. Tracking paused.`, now, 'left');
     }
@@ -178,7 +188,7 @@ export class GuidanceController {
 
   private observeTargetArrival(target: NextSceneEntity | undefined, scene: NextSceneSnapshot, now: number): void {
     const otherObstacle = scene.visibleEntities.some(entity => entity.id !== this.targetId &&
-      now - entity.lastSeenAt <= 1200 && entity.inPath && (entity.nearScore >= 0.7 || entity.h >= 0.55));
+      now - entity.lastSeenAt <= FRESH_DETECTION_MS && entity.inPath && (entity.nearScore >= 0.7 || entity.h >= 0.55));
     const near = target && allowsSizeArrival(target.label) && !this.identityUncertain &&
       target.confirmed && target.confidence >= 0.7 && target.zone === 'ahead' &&
       target.cx >= 0.38 && target.cx <= 0.62 &&
@@ -193,7 +203,7 @@ export class GuidanceController {
       return;
     }
     if (target.lastSeenAt === this.targetObservationAt) {return;}
-    if (target.lastSeenAt - this.targetObservationAt > 1200) {
+    if (target.lastSeenAt - this.targetObservationAt > FRESH_DETECTION_MS) {
       this.targetNearSince = now;
       this.targetNearFrames = 0;
     }
@@ -202,10 +212,10 @@ export class GuidanceController {
   }
 
   private resolveTarget(scene: NextSceneSnapshot, now: number): NextSceneEntity | undefined {
-    let target = scene.visibleEntities.find(entity => entity.id === this.targetId && now - entity.lastSeenAt <= 1200);
+    let target = scene.visibleEntities.find(entity => entity.id === this.targetId && now - entity.lastSeenAt <= FRESH_DETECTION_MS);
     if (!target && this.targetIdentityId !== null) {
       target = scene.visibleEntities.find(entity =>
-        entity.identityId === this.targetIdentityId && now - entity.lastSeenAt <= 1200,
+        entity.identityId === this.targetIdentityId && now - entity.lastSeenAt <= FRESH_DETECTION_MS,
       );
       if (target) {this.targetId = target.id;}
     }
@@ -259,17 +269,39 @@ export function detectorLabelsForGoal(goal: string): string[] {
 export class AmbientGuide {
   private announced = new Map<number, number>();
   private people = new Map<number, { zone: NextSceneEntity['zone']; seenAt: number; outside: boolean }>();
+  private knownPeople = new Map<number, {
+    entityId: number;
+    name: string;
+    zone: NextSceneEntity['zone'];
+    seenAt: number;
+    outside: boolean;
+  }>();
   private lastSpokenAt = 0;
   private lastPathWarningAt = 0;
   private recentCues: number[] = [];
 
   reset(): void {
     this.people.clear();
+    this.knownPeople.clear();
     this.announced.clear(); this.lastSpokenAt = 0; this.lastPathWarningAt = 0; this.recentCues = [];
   }
 
   observe(scene: NextSceneSnapshot, now: number): void {
     for (const entity of scene.visibleEntities) {
+      if (entity.label === 'person' && entity.knownPerson && entity.alias) {
+        const identityKey = entity.identityId ?? entity.id;
+        const known = this.knownPeople.get(identityKey);
+        if (known) {
+          known.entityId = entity.id;
+          known.name = entity.alias;
+          known.seenAt = entity.lastSeenAt;
+        }
+        // A person can become known after their embedding arrives. Remove any
+        // earlier anonymous narration state so it cannot later announce that
+        // the same person left under a temporary session nickname.
+        this.people.delete(entity.id);
+        this.announced.delete(entity.id);
+      }
       const known = this.people.get(entity.id);
       if (known && entity.confirmed) {known.seenAt = entity.lastSeenAt;}
     }
@@ -291,9 +323,49 @@ export class AmbientGuide {
     mobilityActive: boolean = false,
   ): SceneChange | null {
     this.observe(scene, now);
-    const visible = scene.visibleEntities.filter(e => now - e.lastSeenAt <= 1200);
+    const visible = scene.visibleEntities.filter(e => now - e.lastSeenAt <= FRESH_DETECTION_MS);
+    const selectedIdentityId = scene.entities.find(entity => entity.id === selectedTargetId)?.identityId;
+    const visibleKnownPeople = visible.filter(entity => entity.label === 'person' && entity.knownPerson &&
+      entity.alias && entity.id !== selectedTargetId &&
+      (selectedIdentityId === undefined || entity.identityId !== selectedIdentityId));
+    if (now - this.lastSpokenAt >= 4000) {
+      for (const [identityKey, known] of this.knownPeople) {
+        const person = visibleKnownPeople.find(entity => (entity.identityId ?? entity.id) === identityKey);
+        let text = '';
+        let kind: SceneChange['kind'] = 'moved';
+        if (person && known.outside) {
+          text = `${known.name} is back ${position(person)}.`;
+          known.zone = person.zone;
+          known.outside = false;
+        } else if (person && person.zone !== known.zone) {
+          text = `${known.name} is now ${position(person)}.`;
+          known.zone = person.zone;
+        } else if (!person && !known.outside && now - known.seenAt >= AMBIENT_PERSON_LOST_MS) {
+          text = `${known.name} is out of view.`;
+          known.outside = true;
+          kind = 'left';
+        }
+        if (text) {
+          this.lastSpokenAt = now;
+          return {key: `known-person:${identityKey}:${now}`, entityId: known.entityId,
+            kind, text, timestamp: now, speak: true};
+        }
+      }
+      const newcomer = visibleKnownPeople.find(entity => !this.knownPeople.has(entity.identityId ?? entity.id));
+      if (newcomer) {
+        const identityKey = newcomer.identityId ?? newcomer.id;
+        const name = newcomer.alias!;
+        this.knownPeople.set(identityKey, {entityId: newcomer.id, name, zone: newcomer.zone,
+          seenAt: newcomer.lastSeenAt, outside: false});
+        this.lastSpokenAt = now;
+        return {key: `known-person:${identityKey}:first`, entityId: newcomer.id, kind: 'entered',
+          text: `${name} is here, ${friendlyPersonPosition(newcomer)}. I can track ${name} if you want.`,
+          timestamp: now, speak: true};
+      }
+    }
     // Walking mode is action-first. Only the depth/corridor planner may issue
     // route instructions; a detector box by itself is never a stop command.
+    // Saved-person identity cues above are descriptive and remain available.
     if (mobilityActive) {return null;}
     if (scene.pathBlocked && visible.some(e => e.inPath) && now - this.lastPathWarningAt > 12000) {
       this.lastSpokenAt = now;
@@ -303,7 +375,8 @@ export class AmbientGuide {
     // Retain the last *spoken* position, not transient frame events. This also
     // survives TTS/AI busy periods. Direction is relative to the camera; it
     // does not prove that the person, rather than the camera, moved.
-    const people = visible.filter(e => e.label === 'person' && e.confirmed && e.id !== selectedTargetId);
+    const people = visible.filter(e => e.label === 'person' && !e.knownPerson &&
+      e.confirmed && e.id !== selectedTargetId);
     this.people.delete(selectedTargetId ?? -1);
     if (now - this.lastSpokenAt >= 4000) {
       for (const [id, known] of this.people) {
@@ -314,7 +387,7 @@ export class AmbientGuide {
         if (person && (known.outside || person.zone !== known.zone)) {
           text = `${prefix} is ${known.outside ? 'back in view' : 'now'} ${position(person)}.`;
           known.zone = person.zone; known.outside = false;
-        } else if (!person && !known.outside && now - known.seenAt >= 2500) {
+        } else if (!person && !known.outside && now - known.seenAt >= AMBIENT_PERSON_LOST_MS) {
           text = `${prefix} is no longer in view.`;
           known.outside = true; kind = 'left';
         }
@@ -361,4 +434,8 @@ export class AmbientGuide {
 function ambientImportance(entity: NextSceneEntity): number {
   const landmark = /^(person|car|bus|truck|bicycle|motorcycle|bench|chair|couch)$/.test(entity.label);
   return Number(entity.inPath) * 4 + Number(landmark) * 2 + entity.w * entity.h + entity.confidence * 0.1;
+}
+
+function friendlyPersonPosition(entity: Pick<NextSceneEntity, 'zone'>): string {
+  return entity.zone === 'ahead' ? 'straight ahead' : `on your ${entity.zone}`;
 }

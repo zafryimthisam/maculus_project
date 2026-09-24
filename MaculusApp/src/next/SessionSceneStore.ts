@@ -21,6 +21,9 @@ type InternalTrack = NextSceneEntity & {
   pathCandidateHits: number;
   lastDetectionCx: number;
   lastDetectionCy: number;
+  velocityX: number;
+  velocityY: number;
+  lastPredictionAt: number;
   embedding?: number[];
   lastEmbedding?: number[];
   lastEmbeddingAt?: number;
@@ -36,9 +39,15 @@ type DetectionMatch = {
 
 const TRACK_SCORE = 0.3;
 const NEW_TRACK_SCORE = 0.5;
-const OCCLUSION_AFTER_MS = 1200;
-const OCCLUSION_AFTER_MISSES = 3;
-const ACTIVE_MATCH_MS = 5000;
+// A detector miss is not proof that an object disappeared. Keep the last box
+// briefly for a stable preview, then retain a silent track long enough for
+// YOLO to reconnect it without producing "gone" / "back" speech flicker.
+const PREDICTED_VISIBLE_MS = 1500;
+const PERSON_OCCLUSION_AFTER_MS = 3500;
+const OBJECT_OCCLUSION_AFTER_MS = 6000;
+const OCCLUSION_AFTER_MISSES = 4;
+const MAX_PENDING_OCCLUSION_MS = 12000;
+const ACTIVE_MATCH_MS = 7000;
 const OBJECT_REACQUIRE_MS = 30 * 60 * 1000;
 const CAMERA_MOTION_MIN_DELTA = 0.025;
 const CAMERA_MOTION_MAX_RESIDUAL = 0.03;
@@ -99,12 +108,14 @@ export class SessionSceneStore {
     for (const track of this.tracks.values()) {
       track.identityId = undefined;
       track.alias = undefined;
+      track.knownPerson = false;
     }
     for (const track of this.tracks.values()) {
       if (track.label !== 'person') {continue;}
       const identity = this.resolveIdentity(track.lastEmbedding, undefined, track.id);
       track.identityId = identity.id;
       track.alias = identity.alias;
+      track.knownPerson = identity.persistent;
     }
   }
 
@@ -136,6 +147,7 @@ export class SessionSceneStore {
           if (other.identityId === id) {
             other.identityId = undefined;
             other.alias = this.nextAlias();
+            other.knownPerson = false;
           }
         }
       }
@@ -152,7 +164,10 @@ export class SessionSceneStore {
     identity.persistent = true;
     track.identityId = identity.id;
     for (const other of this.tracks.values()) {
-      if (other.identityId === identity.id) {other.alias = name;}
+      if (other.identityId === identity.id) {
+        other.alias = name;
+        other.knownPerson = true;
+      }
     }
     const profile = { name, embedding: [...identity.embedding], samples: identity.samples, updatedAt: now };
     this.knownPeople = [profile, ...this.knownPeople.filter(item => item.name.toLocaleLowerCase() !== key &&
@@ -213,10 +228,24 @@ export class SessionSceneStore {
         continue;
       }
       track.misses += 1;
-      if (
-        track.misses < OCCLUSION_AFTER_MISSES &&
-        observation.timestamp - track.lastSeenAt < OCCLUSION_AFTER_MS
-      ) {continue;}
+      const missingFor = observation.timestamp - track.lastSeenAt;
+      if (!cameraMoving && missingFor <= PREDICTED_VISIBLE_MS) {
+        const predictionSeconds = Math.max(0, Math.min(0.5,
+          (observation.timestamp - track.lastPredictionAt) / 1000));
+        track.cx = clamp(track.cx + track.velocityX * predictionSeconds, track.w / 2, 1 - track.w / 2);
+        track.cy = clamp(track.cy + track.velocityY * predictionSeconds, track.h / 2, 1 - track.h / 2);
+      }
+      track.lastPredictionAt = observation.timestamp;
+      if (missingFor < PREDICTED_VISIBLE_MS) {continue;}
+      track.visibility = 'temporarily-missing';
+      const occlusionAfter = track.label === 'person'
+        ? PERSON_OCCLUSION_AFTER_MS
+        : OBJECT_OCCLUSION_AFTER_MS;
+      // Both time and repeated misses must agree. Frame-count alone varies
+      // greatly with device heat and inference rate and caused false exits.
+      if (((track.misses < OCCLUSION_AFTER_MISSES || missingFor < occlusionAfter) &&
+          missingFor < MAX_PENDING_OCCLUSION_MS) ||
+          observation.timestamp < this.cameraMotionSuppressUntil) {continue;}
       track.visibility = 'occluded';
       if (track.confirmed) {
         changes.push({
@@ -224,7 +253,9 @@ export class SessionSceneStore {
           kind: 'left',
           entityId: track.id,
           timestamp: observation.timestamp,
-          speak: track.wasInPath,
+          // Departure is a scene-memory event, not a walking command. Selected
+          // targets and ambient people have their own longer, cancellable cues.
+          speak: false,
           text: track.wasInPath
             ? `${displayName(track)} is no longer in the center path.`
             : `${displayName(track)} is no longer visible.`,
@@ -325,6 +356,7 @@ export class SessionSceneStore {
     const track: InternalTrack = {
       id: this.nextTrackId++,
       identityId: identity?.id,
+      knownPerson: identity?.persistent === true,
       label: detection.label,
       alias: identity?.alias,
       confidence: detection.score,
@@ -354,6 +386,9 @@ export class SessionSceneStore {
       pathCandidateHits: 0,
       lastDetectionCx: detection.cx,
       lastDetectionCy: detection.cy,
+      velocityX: 0,
+      velocityY: 0,
+      lastPredictionAt: now,
       embedding,
       lastEmbedding: embedding,
       lastEmbeddingAt: embedding ? now : undefined,
@@ -372,7 +407,15 @@ export class SessionSceneStore {
   ): SceneChange[] {
     const changes: SceneChange[] = [];
     const wasConfirmed = track.confirmed;
-    const wasOccluded = track.visibility === 'occluded';
+    const wasMissing = track.visibility !== 'visible';
+    const secondsSinceDetection = Math.max(0.05, (now - track.lastSeenAt) / 1000);
+    if (cameraMoving || secondsSinceDetection > 2) {
+      track.velocityX = 0;
+      track.velocityY = 0;
+    } else {
+      track.velocityX = ema(track.velocityX, (detection.cx - track.lastDetectionCx) / secondsSinceDetection, 0.3);
+      track.velocityY = ema(track.velocityY, (detection.cy - track.lastDetectionCy) / secondsSinceDetection, 0.3);
+    }
     track.hits += 1;
     track.misses = 0;
     track.lastSeenAt = now;
@@ -395,6 +438,7 @@ export class SessionSceneStore {
     }
     track.lastDetectionCx = detection.cx;
     track.lastDetectionCy = detection.cy;
+    track.lastPredictionAt = now;
     const detectedZone = zoneOf(track.cx);
     if (detectedZone !== track.zone) {
       if (track.zoneCandidate === detectedZone) {track.zoneCandidateHits += 1;}
@@ -426,7 +470,7 @@ export class SessionSceneStore {
       track.pathCandidateHits = 0;
     }
     track.wasInPath = track.inPath;
-    if (wasOccluded) {
+    if (wasMissing) {
       track.cx = detection.cx;
       track.cy = detection.cy;
       track.zone = zoneOf(detection.cx);
@@ -451,6 +495,7 @@ export class SessionSceneStore {
         identity.samples += 1;
         track.identityId = identity.id;
         track.alias = identity.alias;
+        track.knownPerson = identity.persistent;
       }
     }
 
@@ -625,6 +670,7 @@ function toPublicEntity(track: InternalTrack): NextSceneEntity {
   return {
     id: track.id,
     identityId: track.identityId,
+    knownPerson: track.knownPerson,
     label: track.label,
     alias: track.alias,
     confidence: track.confidence,
@@ -740,6 +786,10 @@ function blend(a: number[], b: number[]): number[] {
 
 function ema(previous: number, next: number, alpha: number): number {
   return previous * (1 - alpha) + next * alpha;
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
 }
 
 function median(values: number[]): number {

@@ -45,6 +45,7 @@ interface LaneAssessment {
 const LANE_COUNT = 9;
 const DEFAULT_DEPTH_STALE_MS = 1600;
 const RELATIVE_FORWARD_CLEARANCE_MIN = 0.42;
+const TARGET_STEERING_FRESH_MS = 1500;
 
 /**
  * Target bearing supplies intent. A temporally fused nine-lane surface map
@@ -111,16 +112,17 @@ export class TargetAwareLocalPlanner {
       return stop(
         'unavailable',
         'Ultrasonic reading is unavailable or stale.',
-        'Stop. The close obstacle sensor is not available. I cannot confirm the path is safe.',
+        'Stop. The close sensor is not ready. Scan around before moving.',
       );
     }
     if (sensor.health === 'emergency' || (sensor.distanceCm !== null && sensor.distanceCm <= 40)) {
-      return stop('blocked', 'Ultrasonic emergency stop.', 'Stop. Obstacle very close.');
+      return stop('blocked', 'Ultrasonic emergency stop.', 'Stop. Something is very close.');
     }
     if (sensor.health === 'warning' || sensor.obstacle) {
-      return stop('blocked', 'Close obstacle sensor reports a blocked path.', 'Stop. Obstacle ahead.');
+      return stop('blocked', 'Close obstacle sensor reports a blocked path.',
+        'Stop. Something is close. Turn slowly to scan for a clear path.');
     }
-    if (guidanceMode === 'target' && (!target || now - target.lastSeenAt > 750)) {
+    if (guidanceMode === 'target' && (!target || now - target.lastSeenAt > TARGET_STEERING_FRESH_MS)) {
       return stop('unavailable', 'Tracked target is lost.', 'Stop. I cannot see the target.');
     }
     if (!this.reading || !this.lanes.length) {
@@ -158,7 +160,8 @@ export class TargetAwareLocalPlanner {
       return { ...lane, direction, score, safe };
     }).filter(candidate => candidate.safe).sort((a, b) => b.score - a.score);
     if (!candidates.length) {
-      return stop('blocked', 'No traversable surface is sufficiently clear and stable.', 'Stop. I cannot see a safe path.');
+      return stop('blocked', 'No traversable surface is sufficiently clear and stable.',
+        'Stop. Turn slowly to scan for a clear path.');
     }
 
     const prior = this.previous;
@@ -343,15 +346,7 @@ function directionFor(centerX: number): RouteDirection {
 function obstaclePhrase(lane?: LaneAssessment): string {
   if (!lane?.obstacleLabel) {return 'The path ahead is blocked. ';}
   const article = /^[aeiou]/i.test(lane.obstacleLabel) ? 'An' : 'A';
-  const distance = lane.obstacleDistanceMetres !== undefined &&
-    (lane.obstacleDistanceConfidence ?? 0) >= 0.6
-    ? ` about ${roundedDistance(lane.obstacleDistanceMetres)} metres ahead`
-    : ' ahead';
-  return `${article} ${lane.obstacleLabel} is${distance}. `;
-}
-
-function roundedDistance(distance: number): string {
-  return (Math.round(distance * 4) / 4).toFixed(2).replace(/\.00$/, '').replace(/0$/, '');
+  return `${article} ${lane.obstacleLabel} is ahead. `;
 }
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));

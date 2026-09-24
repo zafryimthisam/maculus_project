@@ -231,6 +231,6 @@ export function nearbyObstacleText(scene: NextSceneSnapshot, now: number): strin
     .sort((a, b) => b.nearScore - a.nearScore || b.w * b.h - a.w * a.h);
   const best = candidates[0];
   if (!best || (candidates[1] && candidates[1].label !== best.label &&
-      best.nearScore - candidates[1].nearScore < 0.1)) {return 'Stop. Obstacle nearby.';}
-  return `Stop. ${/^[aeiou]/i.test(best.label) ? 'An' : 'A'} ${best.label} nearby.`;
+      best.nearScore - candidates[1].nearScore < 0.1)) {return 'Stop. Something is very close.';}
+  return `Stop. ${/^[aeiou]/i.test(best.label) ? 'An' : 'A'} ${best.label} is very close.`;
 }

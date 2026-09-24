@@ -65,10 +65,13 @@ describe('Persistent target guidance', () => {
     const guide = new GuidanceController();
     guide.start('person');
     guide.next(scene([entity(1, 'person')]), 10000);
-    const next = scene([entity(2, 'person', 'ahead', 13000)], 13000);
-    guide.observe(next, 13000);
-    expect(guide.next(next, 13000)?.text).toContain('out of view');
-    expect(guide.next(next, 16000)).toBeNull();
+    const brief = scene([entity(2, 'person', 'ahead', 13000)], 13000);
+    guide.observe(brief, 13000);
+    expect(guide.next(brief, 13000)).toBeNull();
+    const next = scene([entity(2, 'person', 'ahead', 14000)], 14000);
+    guide.observe(next, 14000);
+    expect(guide.next(next, 14000)?.text).toContain('out of view');
+    expect(guide.next(next, 17000)).toBeNull();
     expect(guide.targetId).toBe(1);
   });
   it('recovers the same persistent track after both short and long occlusions', () => {
@@ -76,10 +79,10 @@ describe('Persistent target guidance', () => {
     guide.start('chair');
     guide.next(scene([entity(1)]), 10000);
     guide.observe(scene([], 12000), 12000);
-    guide.next(scene([], 12000), 12000);
+    expect(guide.next(scene([], 12000), 12000)).toBeNull();
     const recovered = scene([entity(1, 'chair', 'left', 14000)], 14000);
     guide.observe(recovered, 14000);
-    expect(guide.next(recovered, 14000)?.text).toContain('back in view');
+    expect(guide.next(recovered, 14000)).toBeNull();
     const missing = scene([], 22000);
     guide.observe(missing, 22000);
     guide.next(missing, 22000);
@@ -123,13 +126,40 @@ describe('Persistent target guidance', () => {
 });
 
 describe('Outdoor ambient guidance', () => {
+  it('introduces a saved person once and uses short movement and return cues during walking', () => {
+    const guide = new AmbientGuide();
+    const zafra = (id: number, zone: NextSceneEntity['zone'], at: number) => ({
+      ...entity(id, 'person', zone, at), identityId: 44, alias: 'Zafra', knownPerson: true,
+    });
+
+    expect(guide.next(scene([zafra(1, 'left', 10000)]), 10000, false, null, true)?.text)
+      .toBe('Zafra is here, on your left. I can track Zafra if you want.');
+    expect(guide.next(scene([zafra(1, 'right', 15000)], 15000), 15000, false, null, true)?.text)
+      .toBe('Zafra is now to your right.');
+    expect(guide.next(scene([], 19000), 19000, false, null, true)).toBeNull();
+    expect(guide.next(scene([], 20000), 20000, false, null, true)?.text)
+      .toBe('Zafra is out of view.');
+    // A new track ID with the same saved identity is still a return, not a
+    // second first-observation introduction.
+    expect(guide.next(scene([zafra(9, 'ahead', 25000)], 25000), 25000, false, null, true)?.text)
+      .toBe('Zafra is back straight ahead.');
+  });
+
+  it('does not present a temporary session nickname as a saved person', () => {
+    const guide = new AmbientGuide();
+    const temporary = {...entity(1, 'person', 'left', 10000), alias: 'Alex', knownPerson: false};
+
+    expect(guide.next(scene([temporary]), 10000, false, null, true)).toBeNull();
+  });
+
   it('reports people entering, changing relative position, leaving and returning during a goal', () => {
     const guide = new AmbientGuide();
     expect(guide.next(scene([entity(1, 'person')]), 10000, true)?.text).toContain('Person to your left');
     expect(guide.next(scene([entity(1, 'person', 'right', 14000)], 14000), 14000, true)?.text).toContain('now to your right');
-    expect(guide.next(scene([], 18000), 18000, true)?.text).toContain('no longer in view');
-    expect(guide.next(scene([], 22000), 22000, true)).toBeNull();
-    expect(guide.next(scene([entity(1, 'person', 'ahead', 24000)], 24000), 24000, true)?.text).toContain('back in view straight ahead');
+    expect(guide.next(scene([], 18000), 18000, true)).toBeNull();
+    expect(guide.next(scene([], 19000), 19000, true)?.text).toContain('no longer in view');
+    expect(guide.next(scene([], 23000), 23000, true)).toBeNull();
+    expect(guide.next(scene([entity(1, 'person', 'ahead', 25000)], 25000), 25000, true)?.text).toContain('back in view straight ahead');
   });
   it('retains the last spoken position while speech is busy, but ignores brief occlusions', () => {
     const guide = new AmbientGuide();

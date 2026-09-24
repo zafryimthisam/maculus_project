@@ -45,7 +45,7 @@ describe('MaculusNext SpeechCoordinator', () => {
     const refresh = () => coordinator.updateProximity({health: 'emergency', obstacle: true, distanceCm: 50,
       lastValidAt: Date.now(), sequence: 1, message: ''}, scene);
     refresh();
-    expect(spoken.map(item => item.text)).toEqual(['Stop. Obstacle nearby.']);
+    expect(spoken.map(item => item.text)).toEqual(['Stop. Something is very close.']);
     jest.advanceTimersByTime(500);
     refresh();
     expect(spoken).toHaveLength(1);
@@ -89,10 +89,10 @@ describe('MaculusNext SpeechCoordinator', () => {
       inPath: true, cx: 0.5, cy: 0.5, w: 0.3, h: 0.7, nearScore: 0.9, firstSeenAt: 0,
       lastSeenAt: 10000, visibility: 'visible' as const};
     const scene: NextSceneSnapshot = {timestamp: 10000, revision: 1, entities: [person], visibleEntities: [person], changes: [], pathBlocked: true, description: ''};
-    expect(nearbyObstacleText(scene, 10000)).toBe('Stop. A person nearby.');
-    expect(nearbyObstacleText(scene, 12000)).toBe('Stop. Obstacle nearby.');
+    expect(nearbyObstacleText(scene, 10000)).toBe('Stop. A person is very close.');
+    expect(nearbyObstacleText(scene, 12000)).toBe('Stop. Something is very close.');
     scene.visibleEntities.push({...person, id: 2, label: 'chair', nearScore: 0.85});
-    expect(nearbyObstacleText(scene, 10000)).toBe('Stop. Obstacle nearby.');
+    expect(nearbyObstacleText(scene, 10000)).toBe('Stop. Something is very close.');
   });
 
   it('suppresses ambient object narration while an AI answer is speaking', async () => {

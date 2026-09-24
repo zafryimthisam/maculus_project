@@ -99,8 +99,8 @@ export class SafetyCoordinator {
         distanceCm,
         timestamp: now,
         text: emergency
-          ? 'Stop. Obstacle nearby.'
-          : 'Stop. Obstacle ahead.',
+          ? 'Stop. Something is very close.'
+          : 'Stop. Something is close. Turn slowly to scan for a clear path.',
       };
     }
 
@@ -128,7 +128,7 @@ export class SafetyCoordinator {
         kind: 'clear',
         distanceCm,
         timestamp: now,
-        text: 'The close obstacle is no longer detected. Pause and scan before moving.',
+        text: 'The close area looks clear again. Scan before moving.',
       };
     }
     return null;

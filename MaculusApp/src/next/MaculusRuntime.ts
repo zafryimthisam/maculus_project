@@ -787,9 +787,8 @@ export class MaculusRuntime {
       this.refreshGoalSelection().catch(error => console.warn('[MaculusNext] Goal review failed:', error));
     }
     if (this.speech.canSpeakScene() && this.safety.getState().health !== 'emergency') {
-      const ambient = this.ambient.next(snapshot, now, Boolean(this.activeGuidanceGoal), this.guide.targetId, true);
       let routeCue = null;
-      const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId && now - entity.lastSeenAt <= 750);
+      const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId && now - entity.lastSeenAt <= 1500);
       const targetRouteActive = this.routeRequested && this.guide.targetId !== null;
       {
         const result = this.routePlanner.plan(
@@ -817,6 +816,12 @@ export class MaculusRuntime {
       }
       const goalCue = this.guide.next(snapshot, now);
       const urgentRoute = routeCue?.text.startsWith('Stop.') ? routeCue : null;
+      // Do not consume a descriptive cue when a route or selected-target cue
+      // already owns this speech opportunity. AmbientGuide retains its state
+      // until the known-person announcement can actually be selected.
+      const ambient = urgentRoute || goalCue || routeCue
+        ? null
+        : this.ambient.next(snapshot, now, Boolean(this.activeGuidanceGoal), this.guide.targetId, true);
       const speakable = urgentRoute || goalCue || routeCue || ambient;
       if (speakable) {
         if (speakable === routeCue) {this.speech.speakMobility(speakable);}
