@@ -208,10 +208,6 @@ export class VoiceCommandService {
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private alwaysListening = false;
   private forwardAllTranscripts = false;
-  // Timestamp after which the next user turn must be preceded by the wake
-  // word. Reset on every successful turn when alwaysListening is on.
-  private followupWindowUntil = 0;
-  private followupWindowTimer: ReturnType<typeof setTimeout> | null = null;
   private onStatus: ((status: VoiceCommandStatus) => void) | null = null;
   private onTranscript: ((transcript: string) => void) | null = null;
   private onDiagnostic: ((message: string) => void) | null = null;
@@ -492,24 +488,11 @@ export class VoiceCommandService {
     MaculusVoiceCommand.stopBargeInMonitoring().catch(() => {});
     if (this.safetyInterrupted) {
       // An emergency cancellation must never be interpreted as the end of a
-      // conversational answer or reopen hands-free capture.
+      // conversational answer.
       this.safetyInterrupted = false;
-      this.followupWindowUntil = 0;
-      if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
-      this.followupWindowTimer = null;
-    } else if (this.alwaysListening && !this.wakeWordRequired() && tts.canOpenAutomaticFollowup()) {
-      this.followupWindowUntil = 0;
-      if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
-      this.followupWindowTimer = null;
-      // A completed conversational reply opens one direct capture. This gives
-      // Live Mode a natural follow-up turn without leaving an always-open mic.
-      this.handleWakeDetected({ name: 'followup', label: 'Follow-up', confidence: 1 })
-        .catch(error => {
-          console.warn('[Voice] Follow-up capture failed:', error);
-          this.scheduleWakeRecovery();
-        });
-      return;
     }
+    // Completed answers return only to the low-power wake-word listener. A
+    // new command capture must never start until “Hey LiveKit” is detected.
     MaculusVoiceCommand.resumeAfterTts()
       .then(() => {
         if (this.enabled && !this.commandBusy) {
@@ -569,9 +552,6 @@ export class VoiceCommandService {
     this.commandBusy = false;
     this.alwaysListening = false;
     this.forwardAllTranscripts = false;
-    this.followupWindowUntil = 0;
-    if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
-    this.followupWindowTimer = null;
     this.subscriptions.forEach(subscription => subscription.remove());
     this.subscriptions = [];
     this.ttsSubscription?.();
@@ -626,35 +606,18 @@ export class VoiceCommandService {
   finishGuidanceTurn(): void {
     if (this.isCommandCaptureActive()) {return;}
     this.conversationQuietUntil = 0;
-    this.followupWindowUntil = 0;
-    if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
-    this.followupWindowTimer = null;
   }
 
   /**
-   * In alwaysListening (Live Mode), open a short follow-up window during
-   * which the user can speak again without saying the wake word. Called
-   * by the hook after the LLM reply completes. The window auto-closes
-   * after FOLLOWUP_WINDOW_MS; the next user turn after that requires the
-   * wake word again.
+   * Compatibility entry point for older callers. Follow-up turns now close
+   * the conversation window and always require a fresh wake phrase.
    */
-  static readonly FOLLOWUP_WINDOW_MS = 12000;
-
   isAlwaysListening(): boolean {return this.alwaysListening;}
 
-  wakeWordRequired(now: number = Date.now()): boolean {
-    if (!this.alwaysListening) {return true;}
-    return now >= this.followupWindowUntil;
-  }
+  wakeWordRequired(): boolean {return true;}
 
   openFollowupWindow(): void {
-    if (!this.alwaysListening) {return;}
-    this.followupWindowUntil = Date.now() + VoiceCommandService.FOLLOWUP_WINDOW_MS;
-    if (this.followupWindowTimer) {clearTimeout(this.followupWindowTimer);}
-    this.followupWindowTimer = setTimeout(() => {
-      this.followupWindowUntil = 0;
-      this.followupWindowTimer = null;
-    }, VoiceCommandService.FOLLOWUP_WINDOW_MS);
+    this.finishGuidanceTurn();
   }
 }
 

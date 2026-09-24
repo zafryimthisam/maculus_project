@@ -1,4 +1,4 @@
-import { describe, expect, it, jest } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
   detectorLabelsForGoal,
   extractRememberPersonName,
@@ -10,6 +10,11 @@ import { depthService } from '../src/services/DepthService';
 import { modelAssetService, ModelAssetStatus } from '../src/services/ModelAssetService';
 
 describe('MaculusNext runtime emergency AI interruption', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+    (depthService as any).loaded = false;
+  });
   it('trims reloadable vision memory without cancelling an active answer', async () => {
     const runtime = new MaculusRuntime();
     const testable = runtime as any;
@@ -89,11 +94,45 @@ describe('MaculusNext runtime emergency AI interruption', () => {
       expect(releaseVision).toHaveBeenCalledTimes(1);
       return {backend: 'test', available: true};
     });
+    jest.spyOn(depthService, 'isReady').mockReturnValue(true);
 
     await testable.restoreDepthAfterVision(true, 5);
 
     expect(loadDepth).toHaveBeenCalledTimes(1);
     expect(runtime.getState().conversationReady).toBe(false);
+  });
+
+  it('retries a transient depth restore and estimates the next frame immediately', async () => {
+    jest.useFakeTimers();
+    const runtime = new MaculusRuntime();
+    const testable = runtime as any;
+    const releaseVision = jest.fn(async () => {});
+    testable.running = true;
+    testable.generation = 6;
+    testable.lastDepthAt = Date.now();
+    testable.state = {
+      ...INITIAL_NEXT_RUNTIME_STATE,
+      conversationReady: true,
+      guidanceActive: true,
+      cameraReady: true,
+    };
+    testable.conversation = {releaseModelForRouteGuidance: releaseVision};
+    const loadDepth = jest.spyOn(depthService, 'loadModel')
+      .mockResolvedValueOnce({backend: 'unavailable', available: false})
+      .mockImplementationOnce(async () => {
+        (depthService as any).loaded = true;
+        return {backend: 'test', available: true};
+      });
+    (depthService as any).loaded = false;
+    jest.spyOn(depthService, 'isUnavailable').mockReturnValue(false);
+
+    await testable.restoreDepthAfterVision(true, 6);
+    expect(loadDepth).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1000);
+
+    expect(loadDepth).toHaveBeenCalledTimes(2);
+    expect(releaseVision).toHaveBeenCalledTimes(2);
+    expect(testable.lastDepthAt).toBe(0);
   });
 
   it('cancels in-progress local generation and invalidates its result', () => {

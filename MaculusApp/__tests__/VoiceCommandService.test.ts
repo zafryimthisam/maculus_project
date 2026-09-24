@@ -90,16 +90,21 @@ describe('VoiceCommandService private Whisper capture', () => {
     expect(service.getStatus()).toBe('speaking');
   });
 
-  it.each([false, true])('opens follow-up capture only for eligible completed speech: %s', eligible => {
+  it('requires a new wake phrase after every completed answer', async () => {
     const service = new VoiceCommandService() as any;
     service.enabled = true;
     service.alwaysListening = true;
-    service.followupWindowUntil = Date.now() + 12000;
-    jest.spyOn(tts, 'canOpenAutomaticFollowup').mockReturnValue(eligible);
+    service.openFollowupWindow();
+    jest.spyOn(tts, 'canOpenAutomaticFollowup').mockReturnValue(true);
     service.handleWakeDetected = jest.fn(async () => {});
+
+    expect(service.wakeWordRequired()).toBe(true);
     service.handleTtsSpeakingChange(false);
-    expect(service.handleWakeDetected).toHaveBeenCalledTimes(eligible ? 1 : 0);
-    if (!eligible) {expect(NativeModules.MaculusVoiceCommand.resumeAfterTts).toHaveBeenCalled();}
+    await Promise.resolve();
+
+    expect(service.handleWakeDetected).not.toHaveBeenCalled();
+    expect(NativeModules.MaculusVoiceCommand.resumeAfterTts).toHaveBeenCalledTimes(1);
+    expect(service.getStatus()).toBe('wake_listening');
   });
 
   it('keeps the microphone paused throughout emergency speech', () => {

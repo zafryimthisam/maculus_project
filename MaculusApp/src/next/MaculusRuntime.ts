@@ -49,6 +49,8 @@ const PI_CAMERA_RETRY_MS = 4000;
 const PI_DISCOVERY_RETRY_MS = 5000;
 const PI_DISCOVERY_SETTLE_MS = 600;
 const PREVIEW_INTERVAL_MS = 350;
+const DEPTH_RECOVERY_INITIAL_MS = 1000;
+const DEPTH_RECOVERY_MAX_MS = 15000;
 const SENSOR_UNAVAILABLE_REASON = 'Ultrasonic reading is unavailable or stale.';
 const SENSOR_WALKING_REMINDER_MS = 15_000;
 const SENSOR_WALKING_REMINDER = 'Stop. Sensor unavailable.';
@@ -78,6 +80,9 @@ export class MaculusRuntime {
   private lastRouteCue = '';
   private lastRouteCueAt = 0;
   private lastDepthAt = 0;
+  private depthRestorePromise: Promise<void> | null = null;
+  private depthRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private depthRecoveryDelayMs = DEPTH_RECOVERY_INITIAL_MS;
   private thermalState = 'unknown';
   private lastMemoryWarningSequence = 0;
   private lastReIdAt = 0;
@@ -193,6 +198,7 @@ export class MaculusRuntime {
     this.safety.reset();
     this.scene.reset();
     this.assistantBusy = false;
+    this.clearDepthRecovery(true);
     this.lastDepthAt = 0;
     this.lastReIdAt = 0;
     this.lastFrameKey = '';
@@ -298,9 +304,9 @@ export class MaculusRuntime {
           // must not substitute parser or detector feedback.
           forwardAllTranscripts: true,
           onTurnComplete: () => {
-            if (this.activeGuidanceGoal && this.guide.status !== 'clarifying') {
-              voiceCommandService.finishGuidanceTurn();
-            } else {voiceCommandService.openFollowupWindow();}
+            // Every new question requires “Hey LiveKit”. The wake listener is
+            // re-armed by VoiceCommandService after this callback returns.
+            voiceCommandService.finishGuidanceTurn();
           },
           onTranscript: transcript => this.update({
             lastUserTranscript: transcript,
@@ -336,6 +342,7 @@ export class MaculusRuntime {
     this.update({ phase: 'stopping', message: 'Ending session and clearing temporary scene memory…' });
     this.running = false;
     this.generation += 1;
+    this.clearDepthRecovery(true);
     this.assistantGeneration += 1;
     this.assistantBusy = false;
     this.abortController?.abort();
@@ -430,6 +437,7 @@ export class MaculusRuntime {
       }
       this.activeGuidanceGoal = null;
       this.routeRequested = false;
+      this.clearDepthRecovery(true);
       depthService.release().catch(error => console.warn('[Depth] Release failed', error));
       this.routePlanner.reset();
       this.spatialDepth.reset();
@@ -649,6 +657,9 @@ export class MaculusRuntime {
       }
       try {
         const frame = await this.captureActiveFrame(this.abortController?.signal);
+        if (!this.state.descriptionInProgress && !depthService.isReady()) {
+          this.scheduleDepthRecovery(generation);
+        }
         const frameKey = capturedFrameKey(frame);
         if (frameKey === this.lastFrameKey) {
           this.publishGuidance(this.scene.getSnapshot());
@@ -1174,6 +1185,7 @@ export class MaculusRuntime {
   }
 
   private async cleanupServices(): Promise<void> {
+    this.clearDepthRecovery(true);
     await Promise.all([
       voiceCommandService.stop(),
       deviceCameraService.stop(),
@@ -1188,6 +1200,7 @@ export class MaculusRuntime {
 
   private async suspendDepthForVision(): Promise<boolean> {
     const restore = this.state.guidanceActive && this.state.cameraReady;
+    this.clearDepthRecovery(true);
     if (depthService.isReady()) {
       try {
         await depthService.release();
@@ -1205,17 +1218,69 @@ export class MaculusRuntime {
   private async restoreDepthAfterVision(restore: boolean, generation: number): Promise<void> {
     if (!restore || !this.running || generation !== this.generation ||
         !this.state.guidanceActive || !this.state.cameraReady) {return;}
+    if (this.depthRestorePromise) {return this.depthRestorePromise;}
+
+    const restorePromise = this.performDepthRestore(generation)
+      .finally(() => {
+        if (this.depthRestorePromise === restorePromise) {this.depthRestorePromise = null;}
+      });
+    this.depthRestorePromise = restorePromise;
+    return restorePromise;
+  }
+
+  private async performDepthRestore(generation: number): Promise<void> {
     try {
       // Route depth and the LFM projector must not be resident together on
       // memory-constrained phones. The next visual question reloads LFM lazily.
       await this.conversation.releaseModelForRouteGuidance?.();
-      if (!this.running || generation !== this.generation || !this.state.guidanceActive) {return;}
+      if (!this.canRestoreDepth(generation)) {return;}
       this.update({ conversationReady: false });
-      await depthService.loadModel();
-      if (!this.running || generation !== this.generation || !this.state.guidanceActive) {await depthService.release();}
+      const info = await depthService.loadModel();
+      if (!this.canRestoreDepth(generation)) {
+        if (depthService.isReady()) {await depthService.release();}
+        return;
+      }
+      if (info.available !== false && depthService.isReady()) {
+        this.clearDepthRecovery(true);
+        // Estimate on the very next camera frame instead of waiting for the
+        // interval left over from the released session.
+        this.lastDepthAt = 0;
+      } else {
+        this.scheduleDepthRecovery(generation);
+      }
     } catch (error) {
       console.warn('[Depth] Could not restore route depth after vision inference', error);
+      this.scheduleDepthRecovery(generation);
     }
+  }
+
+  private canRestoreDepth(generation: number): boolean {
+    return this.running && generation === this.generation &&
+      this.state.guidanceActive && this.state.cameraReady;
+  }
+
+  private scheduleDepthRecovery(generation: number): void {
+    if (!this.canRestoreDepth(generation) || depthService.isReady() ||
+        depthService.isUnavailable() || this.depthRecoveryTimer) {return;}
+    const delayMs = this.depthRecoveryDelayMs;
+    this.depthRecoveryDelayMs = Math.min(DEPTH_RECOVERY_MAX_MS, delayMs * 2);
+    this.depthRecoveryTimer = setTimeout(() => {
+      this.depthRecoveryTimer = null;
+      if (this.state.descriptionInProgress) {
+        this.scheduleDepthRecovery(generation);
+        return;
+      }
+      this.restoreDepthAfterVision(true, generation)
+        .catch(error => console.warn('[Depth] Automatic recovery failed:', error));
+    }, delayMs);
+  }
+
+  private clearDepthRecovery(resetDelay: boolean): void {
+    if (this.depthRecoveryTimer) {
+      clearTimeout(this.depthRecoveryTimer);
+      this.depthRecoveryTimer = null;
+    }
+    if (resetDelay) {this.depthRecoveryDelayMs = DEPTH_RECOVERY_INITIAL_MS;}
   }
 
   private currentVisionObservation(): VisionObservation | null {

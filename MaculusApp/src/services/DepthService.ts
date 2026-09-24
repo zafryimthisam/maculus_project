@@ -26,7 +26,7 @@ class DepthService {
 
   async loadModel(): Promise<DepthModelInfo> {
     if (this.releasingPromise) {await this.releasingPromise;}
-    if (this.loadingPromise) {await this.loadingPromise;}
+    if (this.loadingPromise) {return this.loadingPromise;}
     if (!MaculusDepth) {
       this.unavailable = true;
       return { backend: 'unavailable', available: false };
@@ -50,9 +50,10 @@ class DepthService {
       })
       .catch((error) => {
         this.loaded = false;
-        this.unavailable = true;
-        const code = error?.code || error?.message || 'unknown';
-        console.warn('[Depth] Disabled:', code);
+        this.unavailable = isPermanentDepthLoadError(error);
+        this.backend = 'unavailable';
+        const code = depthErrorText(error);
+        console.warn(this.unavailable ? '[Depth] Disabled:' : '[Depth] Load failed; retry allowed:', code);
         return { backend: 'unavailable', available: false };
       })
       .finally(() => {
@@ -81,9 +82,36 @@ class DepthService {
       return await MaculusDepth.estimateDepth(base64Jpeg, detections);
     } catch (error) {
       console.warn('[Depth] Estimate failed:', error);
+      if (isLostDepthSessionError(error)) {
+        // The native session may be released under memory pressure. Let the
+        // runtime reload it instead of remaining "ready" but returning null
+        // for every following frame.
+        this.loaded = false;
+        this.unavailable = false;
+        this.backend = 'unavailable';
+      }
       return null;
     }
   }
+}
+
+function depthErrorText(error: any): string {
+  return String(error?.code || error?.message || error || 'unknown');
+}
+
+function isPermanentDepthLoadError(error: any): boolean {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || error || '').toLowerCase();
+  return code === 'DEPTH_MODEL_MISSING' ||
+    /model[^\n]*(missing|not found)/.test(message) ||
+    /no such file|couldn.t be opened because there is no such file/.test(message);
+}
+
+function isLostDepthSessionError(error: any): boolean {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || error || '').toLowerCase();
+  return code === 'DEPTH_NOT_LOADED' ||
+    /depth model[^\n]*not loaded|depth session[^\n]*(missing|invalid|closed)/.test(message);
 }
 
 export const depthService = new DepthService();
