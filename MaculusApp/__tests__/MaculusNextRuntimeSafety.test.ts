@@ -383,4 +383,40 @@ describe('Goal handoff and cancellation', () => {
     expect(testable.speech.speakScene).not.toHaveBeenCalled();
     expect(testable.speech.speakMobility).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringMatching(/^Stop\./) }));
   });
+
+  it('speaks sensor loss once and gives only a short reminder if the user keeps walking', () => {
+    const { testable } = setup();
+    testable.routePlanner = { plan: jest.fn(() => ({
+      status: 'unavailable',
+      instruction: 'Stop. The close obstacle sensor is not available. I cannot confirm the path is safe.',
+      direction: null,
+      reason: 'Ultrasonic reading is unavailable or stale.',
+      mode: 'WAIT_FOR_CLEARANCE',
+    })) };
+    testable.latestMotion = { ...testable.latestMotion, moving: false, walking: false, stationary: true };
+    let now = 100_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      testable.publishGuidance(testable.scene.getSnapshot());
+      now += 6_000;
+      testable.publishGuidance(testable.scene.getSnapshot());
+      expect(testable.speech.speakMobility).toHaveBeenCalledTimes(1);
+      expect(testable.speech.speakMobility).toHaveBeenLastCalledWith(expect.objectContaining({
+        text: 'Stop. The close obstacle sensor is not available. I cannot confirm the path is safe.',
+      }));
+
+      testable.latestMotion = { ...testable.latestMotion, moving: true, walking: true, stationary: false };
+      now = 114_999;
+      testable.publishGuidance(testable.scene.getSnapshot());
+      expect(testable.speech.speakMobility).toHaveBeenCalledTimes(1);
+      now += 1;
+      testable.publishGuidance(testable.scene.getSnapshot());
+      expect(testable.speech.speakMobility).toHaveBeenCalledTimes(2);
+      expect(testable.speech.speakMobility).toHaveBeenLastCalledWith(expect.objectContaining({
+        text: 'Stop. Sensor unavailable.',
+      }));
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 });

@@ -49,6 +49,9 @@ const PI_CAMERA_RETRY_MS = 4000;
 const PI_DISCOVERY_RETRY_MS = 5000;
 const PI_DISCOVERY_SETTLE_MS = 600;
 const PREVIEW_INTERVAL_MS = 350;
+const SENSOR_UNAVAILABLE_REASON = 'Ultrasonic reading is unavailable or stale.';
+const SENSOR_WALKING_REMINDER_MS = 15_000;
+const SENSOR_WALKING_REMINDER = 'Stop. Sensor unavailable.';
 
 type VisionObservation = {
   frame: CapturedFrame;
@@ -128,6 +131,9 @@ export class MaculusRuntime {
             previewDetections: [],
             previewFrameSource: 'none',
             previewUpdatedAt: null,
+            depthPreviewGrid: null,
+            depthPreviewUpdatedAt: null,
+            depthPreviewSource: 'none',
           });
         }
         // Recovery enables an explicit request; never immediately reload the model
@@ -435,6 +441,11 @@ export class MaculusRuntime {
       guidanceGoal: active ? this.activeGuidanceGoal : null,
       guidanceStatus: this.guide.status,
       ...(!active ? { descriptionInProgress: false } : {}),
+      ...(!active ? {
+        depthPreviewGrid: null,
+        depthPreviewUpdatedAt: null,
+        depthPreviewSource: 'none' as const,
+      } : {}),
       message: active ? 'Walking guidance active' : 'Walking guidance paused; safety sensor remains active',
     });
     if (active) {
@@ -454,6 +465,9 @@ export class MaculusRuntime {
       previewDetections: enabled && observation ? observation.detections : [],
       previewFrameSource: enabled && observation ? observation.frame.source : 'none',
       previewUpdatedAt: enabled && observation ? observation.receivedAt : null,
+      depthPreviewGrid: null,
+      depthPreviewUpdatedAt: null,
+      depthPreviewSource: 'none',
     });
   }
 
@@ -687,9 +701,16 @@ export class MaculusRuntime {
         if (spatialDepth) {
           const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId);
           const reading = this.routePlanner.observe(spatialDepth, target, frame.source, frameReceivedAt);
-          this.update({ depthReading: reading ? { ...reading, inferenceMs: routeDepth?.inferenceMs ?? null } : {
-            left: null, center: null, right: null, observedAt: frameReceivedAt, source: frame.source, inferenceMs: null,
-          } });
+          this.update({
+            depthReading: reading ? { ...reading, inferenceMs: routeDepth?.inferenceMs ?? null } : {
+              left: null, center: null, right: null, observedAt: frameReceivedAt, source: frame.source, inferenceMs: null,
+            },
+            ...(this.state.previewEnabled ? {
+              depthPreviewGrid: spatialDepth.grid,
+              depthPreviewUpdatedAt: frameReceivedAt,
+              depthPreviewSource: frame.source,
+            } : {}),
+          });
         }
         const stabilizedDetections = previewDetections(snapshot);
         this.latestVisionObservation = {
@@ -758,13 +779,19 @@ export class MaculusRuntime {
           targetRouteActive ? 'target' : 'walk',
           this.latestMotion,
         );
-        const routeCueDelay = result.instruction === this.lastRouteCue
-          ? 6000
+        const repeatedInstruction = result.instruction === this.lastRouteCue;
+        const sensorUnavailable = result.reason === SENSOR_UNAVAILABLE_REASON;
+        const walkingReminderDue = repeatedInstruction && sensorUnavailable && this.latestMotion.walking &&
+          now - this.lastRouteCueAt >= SENSOR_WALKING_REMINDER_MS;
+        const routeCueDelay = repeatedInstruction
+          ? sensorUnavailable ? Number.POSITIVE_INFINITY : 6000
           : result.status === 'blocked' || result.status === 'unavailable' ? 0 : 800;
-        if (now - this.lastRouteCueAt >= routeCueDelay) {
+        if (walkingReminderDue || now - this.lastRouteCueAt >= routeCueDelay) {
           routeCue = { key: `route:${now}`, kind: result.status === 'ready' || result.status === 'arrived'
             ? 'moved' as const : 'path-blocked' as const,
-          text: result.instruction, timestamp: now, speak: true };
+          text: walkingReminderDue ? SENSOR_WALKING_REMINDER : result.instruction, timestamp: now, speak: true };
+          // Keep the canonical instruction here. A short walking reminder must
+          // not make the full explanation look like a new cue on the next frame.
           this.lastRouteCue = result.instruction; this.lastRouteCueAt = now;
         }
       }

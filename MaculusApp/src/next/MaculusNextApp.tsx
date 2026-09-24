@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { DepthPreview } from '../components/DepthPreview';
 import { DetectionPreview } from '../components/DetectionPreview';
 import { whisperCommandService } from '../services/WhisperCommandService';
 import { useMaculusRuntime } from './useMaculusRuntime';
@@ -198,6 +199,11 @@ export default function MaculusNextApp(): React.JSX.Element {
           <Text style={styles.diagnosticText}>
             {sensorFresh ? `${(sensorAge / 1000).toFixed(1)}s ago` : state.sensor.message}
           </Text>
+          {depthFresh && !sensorFresh && (
+            <Text style={styles.sensorLimitText}>
+              Visual depth can show possible space, but guidance stops when the close obstacle sensor cannot confirm nearby safety.
+            </Text>
+          )}
           <Text style={styles.diagnosticText}>
             Clearance summarizes a nine-lane temporal surface map; it is not a measurement in centimetres.
           </Text>
@@ -236,37 +242,67 @@ export default function MaculusNextApp(): React.JSX.Element {
               onPress={() => setGuidanceActive(!state.guidanceActive)}
             />
             <ActionButton
-              label={state.previewEnabled ? 'Hide camera preview' : 'Show camera preview'}
+              label={state.previewEnabled ? 'Hide visual previews' : 'Show camera and depth previews'}
               onPress={() => setPreviewEnabled(!state.previewEnabled)}
             />
           </View>
         )}
 
         {active && state.previewEnabled && (
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>LIVE DETECTION PREVIEW</Text>
-            <Text style={styles.previewSource} accessibilityLiveRegion="polite">
-              Source: {cameraSourceLabel(
-                state.previewFrameSource !== 'none' ? state.previewFrameSource : state.cameraSource,
+          <>
+            <View style={styles.card}>
+              <Text style={styles.cardLabel}>LIVE DETECTION PREVIEW</Text>
+              <Text style={styles.previewSource} accessibilityLiveRegion="polite">
+                Source: {cameraSourceLabel(
+                  state.previewFrameSource !== 'none' ? state.previewFrameSource : state.cameraSource,
+                )}
+              </Text>
+              {state.previewFrameBase64 ? (
+                <DetectionPreview
+                  frameBase64={state.previewFrameBase64}
+                  resolution={state.previewResolution}
+                  detections={state.previewDetections}
+                />
+              ) : (
+                <View style={styles.previewWaiting}>
+                  <Text style={styles.previewWaitingText}>
+                    Waiting for the next processed camera frame…
+                  </Text>
+                </View>
               )}
-            </Text>
-            {state.previewFrameBase64 ? (
-              <DetectionPreview
-                frameBase64={state.previewFrameBase64}
-                resolution={state.previewResolution}
-                detections={state.previewDetections}
-              />
-            ) : (
-              <View style={styles.previewWaiting}>
-                <Text style={styles.previewWaitingText}>
-                  Waiting for the next processed camera frame…
-                </Text>
-              </View>
-            )}
-            <Text style={styles.previewFootnote}>
-              Green boxes are the objects used by guidance. This private diagnostic preview never uploads a frame.
-            </Text>
-          </View>
+              <Text style={styles.previewFootnote}>
+                Green boxes are the objects used by guidance. This private diagnostic preview never uploads a frame.
+              </Text>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardLabel}>LIVE RELATIVE DEPTH PREVIEW</Text>
+              <Text style={styles.previewSource} accessibilityLiveRegion="polite">
+                Source: {cameraSourceLabel(
+                  state.depthPreviewSource !== 'none' ? state.depthPreviewSource : state.cameraSource,
+                )}
+              </Text>
+              {depthFresh && state.depthPreviewGrid ? (
+                <DepthPreview
+                  grid={state.depthPreviewGrid}
+                  clearance={{
+                    left: state.depthReading.left,
+                    center: state.depthReading.center,
+                    right: state.depthReading.right,
+                  }}
+                />
+              ) : (
+                <View style={styles.previewWaiting}>
+                  <Text style={styles.previewWaitingText}>
+                    Waiting for the next depth estimate…
+                  </Text>
+                </View>
+              )}
+              <Text style={styles.previewFootnote}>
+                Cool colors are farther away; warm colors are closer. This is relative depth, not distance in metres.
+              </Text>
+            </View>
+          </>
         )}
 
         <View style={styles.card}>
@@ -536,6 +572,7 @@ const styles = StyleSheet.create({
   previewWaiting: { minHeight: 180, borderRadius: 10, backgroundColor: '#020617', justifyContent: 'center', alignItems: 'center', padding: 20, marginTop: 4 },
   previewWaitingText: { color: '#b9c7d8', fontSize: 16, lineHeight: 23, textAlign: 'center' },
   previewFootnote: { color: '#9eb0c6', fontSize: 13, lineHeight: 19, marginTop: 2 },
+  sensorLimitText: { color: '#ffcf70', fontSize: 14, lineHeight: 20, marginTop: 8 },
   primaryButton: { minHeight: 68, borderRadius: 18, backgroundColor: '#2ed3b7', justifyContent: 'center', alignItems: 'center', padding: 16 },
   stopButton: { backgroundColor: '#ff6666' },
   disabledButton: { opacity: 0.55 },

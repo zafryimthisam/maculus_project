@@ -85,7 +85,11 @@ export class TargetAwareLocalPlanner {
       ({ status, reason, instruction, direction: null,
         mode: reason.includes('target') ? 'TARGET_LOST' : 'WAIT_FOR_CLEARANCE' });
     if (sensor.lastValidAt === null || now - sensor.lastValidAt > 750 || ['unknown', 'stale', 'fault'].includes(sensor.health)) {
-      return stop('unavailable', 'Ultrasonic reading is unavailable or stale.');
+      return stop(
+        'unavailable',
+        'Ultrasonic reading is unavailable or stale.',
+        'Stop. The close obstacle sensor is not available. I cannot confirm the path is safe.',
+      );
     }
     if (sensor.health === 'emergency' || (sensor.distanceCm !== null && sensor.distanceCm <= 40)) {
       return stop('blocked', 'Ultrasonic emergency stop.', 'Stop. Obstacle very close.');

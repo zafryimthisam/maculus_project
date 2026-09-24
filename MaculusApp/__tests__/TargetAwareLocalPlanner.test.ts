@@ -55,3 +55,19 @@ test('guides open walking without requiring an object target', () => {
   const walking = planner.plan(undefined, sensor(), 1150, 'walk', { moving: true, walking: true });
   expect(walking.instruction).toBe('Keep going forward.');
 });
+
+test('explains that an unavailable close obstacle sensor, not depth, caused the stop', () => {
+  const planner = new TargetAwareLocalPlanner();
+  planner.observe(depth(.25, .15, .3), undefined, 'device', 1000);
+  const unavailableSensor: SafetyState = {
+    health: 'stale', distanceCm: null, obstacle: false, lastValidAt: null, sequence: null, message: '',
+  };
+
+  const result = planner.plan(undefined, unavailableSensor, 1100, 'walk');
+
+  expect(result).toMatchObject({ status: 'unavailable', mode: 'WAIT_FOR_CLEARANCE' });
+  expect(result.reason).toContain('Ultrasonic');
+  expect(result.instruction).toBe(
+    'Stop. The close obstacle sensor is not available. I cannot confirm the path is safe.',
+  );
+});

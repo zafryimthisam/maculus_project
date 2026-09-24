@@ -1,4 +1,4 @@
-import { CameraSource, Detection, DistanceReading, PersonEmbedding } from '../types';
+import { CameraSource, DepthGrid, Detection, DistanceReading, PersonEmbedding } from '../types';
 import type { VoiceCommandStatus } from '../services/VoiceCommandService';
 
 export type NextRuntimePhase = 'idle' | 'starting' | 'running' | 'degraded' | 'stopping' | 'error';
@@ -107,6 +107,9 @@ export interface NextRuntimeState {
     source: CameraSource;
     inferenceMs: number | null;
   };
+  depthPreviewGrid: DepthGrid | null;
+  depthPreviewUpdatedAt: number | null;
+  depthPreviewSource: CameraSource;
   userMotion: {
     available: boolean;
     moving: boolean;
@@ -180,6 +183,9 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   piLastSeenAt: null,
   sensor: EMPTY_SAFETY_STATE,
   depthReading: { left: null, center: null, right: null, observedAt: null, source: 'none', inferenceMs: null },
+  depthPreviewGrid: null,
+  depthPreviewUpdatedAt: null,
+  depthPreviewSource: 'none',
   userMotion: {
     available: false,
     moving: false,
