@@ -59,6 +59,10 @@ export interface Detection {
   y2: number;
   /** Relative visual nearness from Depth Anything, 0..1. Not metric distance. */
   nearScore?: number;
+  /** Temporally stabilized metric depth at the object's physical footprint. */
+  distanceMetres?: number;
+  /** 0..1 confidence based on valid samples and agreement across frames. */
+  distanceConfidence?: number;
 }
 
 export interface ModelInfo {
@@ -78,12 +82,19 @@ export interface DepthModelInfo {
   outputHeight?: number;
   alreadyLoaded?: boolean;
   available?: boolean;
+  units?: 'relative-nearness' | 'metres';
+  modelName?: string;
+  domain?: 'indoor' | 'general';
 }
 
 export interface ObjectDepthScore {
   index: number;
   nearScore: number;
+  distanceMetres?: number;
+  confidence?: number;
 }
+
+export type DepthSurfaceKind = 'walkable' | 'obstacle' | 'drop-risk' | 'unknown';
 
 export interface DepthGrid {
   width: number;
@@ -103,6 +114,9 @@ export interface DepthEstimation {
   centerNearScore: number;
   rightNearScore: number;
   objectDepths: ObjectDepthScore[];
+  units?: 'relative-nearness' | 'metres';
+  modelName?: string;
+  domain?: 'indoor' | 'general';
 }
 
 export type Zone = 'left' | 'ahead' | 'right';

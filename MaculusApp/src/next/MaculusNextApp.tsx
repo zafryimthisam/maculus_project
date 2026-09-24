@@ -184,7 +184,7 @@ export default function MaculusNextApp(): React.JSX.Element {
         <View style={styles.connectionCard}>
           <Text style={styles.cardLabel}>DEPTH CLEARANCE & DISTANCE</Text>
           <Text style={styles.cardBody}>
-            AI relative clearance: {depthFresh
+            AI {state.depthReading.units === 'metres' ? 'metric corridor' : 'relative clearance'}: {depthFresh
               ? `Left ${Math.round(state.depthReading.left! * 100)}% · Center ${Math.round(state.depthReading.center! * 100)}% · Right ${Math.round(state.depthReading.right! * 100)}%`
               : 'Unavailable / stale'}
           </Text>
@@ -205,7 +205,9 @@ export default function MaculusNextApp(): React.JSX.Element {
             </Text>
           )}
           <Text style={styles.diagnosticText}>
-            Clearance summarizes a nine-lane temporal surface map; it is not a measurement in centimetres.
+            {state.depthReading.units === 'metres'
+              ? `Depth is estimated in metres. ${state.depthReading.calibrationMessage}.`
+              : 'Clearance summarizes a nine-lane temporal surface map; relative scores are not physical distance.'}
           </Text>
           <Text style={styles.cardBody}>
             iPhone motion: {state.userMotion.walking
@@ -276,7 +278,9 @@ export default function MaculusNextApp(): React.JSX.Element {
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.cardLabel}>LIVE RELATIVE DEPTH PREVIEW</Text>
+              <Text style={styles.cardLabel}>
+                {state.depthPreviewGrid?.units === 'metres' ? 'LIVE METRIC DEPTH & PATH PREVIEW' : 'LIVE RELATIVE DEPTH PREVIEW'}
+              </Text>
               <Text style={styles.previewSource} accessibilityLiveRegion="polite">
                 Source: {cameraSourceLabel(
                   state.depthPreviewSource !== 'none' ? state.depthPreviewSource : state.cameraSource,
@@ -285,6 +289,7 @@ export default function MaculusNextApp(): React.JSX.Element {
               {depthFresh && state.depthPreviewGrid ? (
                 <DepthPreview
                   grid={state.depthPreviewGrid}
+                  surfaces={state.depthPreviewSurfaces}
                   clearance={{
                     left: state.depthReading.left,
                     center: state.depthReading.center,
@@ -299,7 +304,9 @@ export default function MaculusNextApp(): React.JSX.Element {
                 </View>
               )}
               <Text style={styles.previewFootnote}>
-                Cool colors are farther away; warm colors are closer. This is relative depth, not distance in metres.
+                {state.depthPreviewGrid?.units === 'metres'
+                  ? 'Depth color is measured in metres. Green is expected floor, red is occupied, orange is a possible drop, and gray is unknown.'
+                  : 'Cool colors are farther away; warm colors are closer. Green is likely floor and red is occupied; relative depth is not metres.'}
               </Text>
             </View>
           </>

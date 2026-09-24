@@ -137,6 +137,7 @@ export class MaculusRuntime {
             previewFrameSource: 'none',
             previewUpdatedAt: null,
             depthPreviewGrid: null,
+            depthPreviewSurfaces: null,
             depthPreviewUpdatedAt: null,
             depthPreviewSource: 'none',
           });
@@ -451,6 +452,7 @@ export class MaculusRuntime {
       ...(!active ? { descriptionInProgress: false } : {}),
       ...(!active ? {
         depthPreviewGrid: null,
+        depthPreviewSurfaces: null,
         depthPreviewUpdatedAt: null,
         depthPreviewSource: 'none' as const,
       } : {}),
@@ -474,6 +476,7 @@ export class MaculusRuntime {
       previewFrameSource: enabled && observation ? observation.frame.source : 'none',
       previewUpdatedAt: enabled && observation ? observation.receivedAt : null,
       depthPreviewGrid: null,
+      depthPreviewSurfaces: null,
       depthPreviewUpdatedAt: null,
       depthPreviewSource: 'none',
     });
@@ -680,7 +683,7 @@ export class MaculusRuntime {
         ]);
         if (!this.running || generation !== this.generation) {break;}
         const spatialDepth = routeDepth ? this.spatialDepth.observe(routeDepth, rawDetections, frame.source,
-          frameReceivedAt, motion) : null;
+          frameReceivedAt, motion, frame.resolution) : null;
         const detections = attachDepthToDetections(rawDetections, spatialDepth);
         const now = Date.now();
         this.latestMotion = motion;
@@ -715,9 +718,12 @@ export class MaculusRuntime {
           this.update({
             depthReading: reading ? { ...reading, inferenceMs: routeDepth?.inferenceMs ?? null } : {
               left: null, center: null, right: null, observedAt: frameReceivedAt, source: frame.source, inferenceMs: null,
+              units: spatialDepth.grid.units, calibrated: spatialDepth.geometry.calibrated,
+              calibrationMessage: spatialDepth.geometry.message,
             },
             ...(this.state.previewEnabled ? {
               depthPreviewGrid: spatialDepth.grid,
+              depthPreviewSurfaces: spatialDepth.surfaces,
               depthPreviewUpdatedAt: frameReceivedAt,
               depthPreviewSource: frame.source,
             } : {}),
@@ -1370,6 +1376,8 @@ function previewDetections(snapshot: NextSceneSnapshot): Detection[] {
     x2: clamp01(entity.cx + entity.w / 2),
     y2: clamp01(entity.cy + entity.h / 2),
     nearScore: entity.nearScore,
+    distanceMetres: entity.distanceMetres,
+    distanceConfidence: entity.distanceConfidence,
   }));
 }
 

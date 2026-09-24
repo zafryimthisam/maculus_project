@@ -1,4 +1,4 @@
-import { depthPreviewColor, downsampleDepthGrid } from '../src/components/DepthPreview';
+import { depthPreviewColor, downsampleDepthGrid, downsampleSurfaces } from '../src/components/DepthPreview';
 import { DepthGrid } from '../src/types';
 
 test('downsamples relative depth while preserving nearby structure', () => {
@@ -22,4 +22,14 @@ test('returns no preview for malformed grids and clamps the color scale', () => 
   expect(depthPreviewColor(-1)).toBe(depthPreviewColor(0));
   expect(depthPreviewColor(2)).toBe(depthPreviewColor(1));
   expect(depthPreviewColor(0)).not.toBe(depthPreviewColor(1));
+});
+
+test('maps metric depth only for display and summarizes the path overlay', () => {
+  expect(downsampleDepthGrid({
+    width: 2, height: 2, units: 'metres', values: [0.35, 2, 4, 6],
+  }, 2, 2)).toEqual([1, expect.any(Number), expect.any(Number), 0]);
+  expect(downsampleSurfaces([
+    'walkable', 'walkable',
+    'obstacle', 'unknown',
+  ], 2, 2, 2, 2)).toEqual(['walkable', 'walkable', 'obstacle', 'unknown']);
 });

@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { DepthGrid } from '../types';
+import { DepthGrid, DepthSurfaceKind } from '../types';
 
 interface ClearanceSummary {
   left: number | null;
@@ -11,6 +11,7 @@ interface ClearanceSummary {
 interface Props {
   grid: DepthGrid | null;
   clearance: ClearanceSummary;
+  surfaces?: DepthSurfaceKind[] | null;
 }
 
 const PREVIEW_COLUMNS = 16;
@@ -42,7 +43,9 @@ export function downsampleDepthGrid(
       for (let y = y1; y < Math.min(y2, grid.height); y += 1) {
         for (let x = x1; x < Math.min(x2, grid.width); x += 1) {
           const value = grid.values[y * grid.width + x];
-          if (Number.isFinite(value)) {values.push(clamp01(value));}
+          if (Number.isFinite(value)) {
+            values.push(grid.units === 'metres' ? metricDepthToNear(value) : clamp01(value));
+          }
         }
       }
       values.sort((a, b) => a - b);
@@ -69,12 +72,50 @@ export function depthPreviewColor(value: number): string {
     Math.round(channel + (upper.rgb[index] - channel) * amount)));
 }
 
-export const DepthPreview: React.FC<Props> = ({ grid, clearance }) => {
+export function downsampleSurfaces(
+  surfaces: DepthSurfaceKind[],
+  width: number,
+  height: number,
+  columns: number = PREVIEW_COLUMNS,
+  rows: number = PREVIEW_ROWS,
+): DepthSurfaceKind[] {
+  if (surfaces.length !== width * height || width <= 0 || height <= 0) {return [];}
+  const result: DepthSurfaceKind[] = [];
+  for (let row = 0; row < rows; row += 1) {
+    const y1 = Math.floor(row * height / rows);
+    const y2 = Math.max(y1 + 1, Math.floor((row + 1) * height / rows));
+    for (let column = 0; column < columns; column += 1) {
+      const x1 = Math.floor(column * width / columns);
+      const x2 = Math.max(x1 + 1, Math.floor((column + 1) * width / columns));
+      const counts: Record<DepthSurfaceKind, number> = {
+        walkable: 0, obstacle: 0, 'drop-risk': 0, unknown: 0,
+      };
+      for (let y = y1; y < Math.min(y2, height); y += 1) {
+        for (let x = x1; x < Math.min(x2, width); x += 1) {counts[surfaces[y * width + x]] += 1;}
+      }
+      const total = Math.max(1, Object.values(counts).reduce((sum, count) => sum + count, 0));
+      result.push(
+        counts.obstacle / total >= 0.2 ? 'obstacle'
+          : counts['drop-risk'] / total >= 0.2 ? 'drop-risk'
+            : counts.walkable / total >= 0.45 ? 'walkable'
+              : 'unknown',
+      );
+    }
+  }
+  return result;
+}
+
+export const DepthPreview: React.FC<Props> = ({ grid, clearance, surfaces }) => {
   const cells = React.useMemo(() => grid ? downsampleDepthGrid(grid) : [], [grid]);
+  const surfaceCells = React.useMemo(() => grid && surfaces
+    ? downsampleSurfaces(surfaces, grid.width, grid.height)
+    : [], [grid, surfaces]);
   if (!grid || !cells.length) {return null;}
 
   const accessibilityLabel = [
-    'Relative depth preview. Cool colors are farther away and warm colors are closer.',
+    grid.units === 'metres'
+      ? 'Metric depth preview. Cool colors are farther away and warm colors are closer.'
+      : 'Relative depth preview. Cool colors are farther away and warm colors are closer.',
     clearance.left === null ? null : `Left clearance ${Math.round(clearance.left * 100)} percent.`,
     clearance.center === null ? null : `Center clearance ${Math.round(clearance.center * 100)} percent.`,
     clearance.right === null ? null : `Right clearance ${Math.round(clearance.right * 100)} percent.`,
@@ -89,27 +130,39 @@ export const DepthPreview: React.FC<Props> = ({ grid, clearance }) => {
       <View style={styles.raster} pointerEvents="none">
         {Array.from({ length: PREVIEW_ROWS }, (_, row) => (
           <View key={`row-${row}`} style={styles.row}>
-            {cells.slice(row * PREVIEW_COLUMNS, (row + 1) * PREVIEW_COLUMNS).map((value, column) => (
+            {cells.slice(row * PREVIEW_COLUMNS, (row + 1) * PREVIEW_COLUMNS).map((value, column) => {
+              const index = row * PREVIEW_COLUMNS + column;
+              return (
               <View
                 key={`${row}-${column}`}
                 style={[styles.cell, { backgroundColor: depthPreviewColor(value) }]}
-              />
-            ))}
+              >
+                {surfaceCells[index] && (
+                  <View style={[styles.surfaceOverlay, { backgroundColor: surfaceOverlayColor(surfaceCells[index]) }]} />
+                )}
+              </View>
+              );
+            })}
           </View>
         ))}
       </View>
-      <View style={[styles.divider, { left: '33.333%' }]} pointerEvents="none" />
-      <View style={[styles.divider, { left: '66.666%' }]} pointerEvents="none" />
+      <View style={[styles.divider, styles.leftDivider]} pointerEvents="none" />
+      <View style={[styles.divider, styles.rightDivider]} pointerEvents="none" />
       <View style={styles.laneLabels} pointerEvents="none">
         <LaneLabel label="LEFT" value={clearance.left} />
         <LaneLabel label="CENTER" value={clearance.center} />
         <LaneLabel label="RIGHT" value={clearance.right} />
       </View>
       <View style={styles.legend} pointerEvents="none">
-        <Text style={styles.legendText}>FARTHER</Text>
+        <Text style={styles.legendText}>{grid.units === 'metres' ? '6M+' : 'FARTHER'}</Text>
         <View style={styles.legendLine} />
-        <Text style={styles.legendText}>CLOSER</Text>
+        <Text style={styles.legendText}>{grid.units === 'metres' ? '0.35M' : 'CLOSER'}</Text>
       </View>
+      {surfaceCells.length > 0 && (
+        <View style={styles.surfaceLegend} pointerEvents="none">
+          <Text style={styles.surfaceLegendText}>GREEN FLOOR · RED BLOCKED · GRAY UNKNOWN</Text>
+        </View>
+      )}
     </View>
   );
 };
@@ -124,6 +177,17 @@ function LaneLabel({ label, value }: { label: string; value: number | null }): R
 
 function rgbString(rgb: number[]): string {
   return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
+function metricDepthToNear(distanceMetres: number): number {
+  return clamp01((6 - distanceMetres) / 5.65);
+}
+
+function surfaceOverlayColor(surface: DepthSurfaceKind): string {
+  if (surface === 'walkable') {return 'rgba(20, 190, 110, 0.34)';}
+  if (surface === 'obstacle') {return 'rgba(244, 50, 70, 0.65)';}
+  if (surface === 'drop-risk') {return 'rgba(255, 145, 20, 0.72)';}
+  return 'rgba(120, 130, 145, 0.2)';
 }
 
 const styles = StyleSheet.create({
@@ -147,12 +211,21 @@ const styles = StyleSheet.create({
   cell: {
     flex: 1,
   },
+  surfaceOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
   divider: {
     position: 'absolute',
     top: 0,
     bottom: 0,
     width: 2,
     backgroundColor: 'rgba(255, 255, 255, 0.82)',
+  },
+  leftDivider: {
+    left: '33.333%',
+  },
+  rightDivider: {
+    left: '66.666%',
   },
   laneLabels: {
     position: 'absolute',
@@ -182,6 +255,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+  },
+  surfaceLegend: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 25,
+    alignItems: 'center',
+  },
+  surfaceLegendText: {
+    color: '#FFFFFF',
+    fontSize: 8,
+    fontWeight: '900',
+    backgroundColor: 'rgba(2, 6, 23, 0.74)',
+    borderRadius: 3,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
   },
   legendLine: {
     flex: 1,

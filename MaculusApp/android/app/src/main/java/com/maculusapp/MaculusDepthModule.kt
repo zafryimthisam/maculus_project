@@ -31,20 +31,23 @@ import kotlin.math.sqrt
 /**
  * Optional Depth Anything V2 engine.
  *
- * This module returns relative near-scores only. It never reports metric
- * distances; centimeter distance remains owned by the ultrasonic sensor.
+ * Prefers the indoor metric checkpoint and retains the relative checkpoint as
+ * a fallback. The ultrasonic sensor remains the independent emergency layer.
  */
 class MaculusDepthModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     companion object {
         private const val TAG = "MaculusDepth"
-        private const val MODEL_ASSET = "depth_anything_v2_small_uint8_256.onnx"
+        private const val METRIC_MODEL_ASSET = "depth_metric_indoor_uint8_256.onnx"
+        private const val RELATIVE_MODEL_ASSET = "depth_anything_v2_small_uint8_256.onnx"
         private const val DEFAULT_INPUT_SIZE = 256
     }
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private var session: OrtSession? = null
+    private var metric = false
+    private var modelName = "Depth Anything V2 Small (relative fallback)"
     private var inputName: String = ""
     private var inputShape: LongArray = longArrayOf(1, 3, DEFAULT_INPUT_SIZE.toLong(), DEFAULT_INPUT_SIZE.toLong())
     private var inputType: OnnxJavaType = OnnxJavaType.UINT8
@@ -87,7 +90,17 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
                 return
             }
 
-            val modelBytes = reactApplicationContext.assets.open(MODEL_ASSET).use { it.readBytes() }
+            val selectedAsset = try {
+                reactApplicationContext.assets.open(METRIC_MODEL_ASSET).close()
+                metric = true
+                modelName = "Depth Anything V2 Metric Indoor Small"
+                METRIC_MODEL_ASSET
+            } catch (_: FileNotFoundException) {
+                metric = false
+                modelName = "Depth Anything V2 Small (relative fallback)"
+                RELATIVE_MODEL_ASSET
+            }
+            val modelBytes = reactApplicationContext.assets.open(selectedAsset).use { it.readBytes() }
             OrtSession.SessionOptions().use { opts ->
                 opts.setIntraOpNumThreads(2)
                 session = env.createSession(modelBytes, opts)
@@ -111,7 +124,7 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
         } catch (e: FileNotFoundException) {
             promise.reject(
                 "DEPTH_MODEL_MISSING",
-                "Depth model asset missing. Place $MODEL_ASSET in android/app/src/main/assets.",
+                "Depth model asset missing. Place $RELATIVE_MODEL_ASSET in android/app/src/main/assets.",
                 e
             )
         } catch (e: Exception) {
@@ -147,19 +160,22 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
             }
             reconcileOutputShape(output.size)
 
-            val nearMap = normalizeNearMap(output)
+            val nearMap = if (metric) FloatArray(output.size) { metricNearScore(output[it]) } else normalizeNearMap(output)
             val response = Arguments.createMap()
             val grid = Arguments.createMap()
             val values = Arguments.createArray()
-            for (y in 0 until 24) for (x in 0 until 32) {
-                val sx = ((x * 2 + 1) * outputWidth / 64).coerceAtMost(outputWidth - 1)
-                val sy = ((y * 2 + 1) * outputHeight / 48).coerceAtMost(outputHeight - 1)
-                val value = nearMap[sy * outputWidth + sx]
+            val gridWidth = 64
+            val gridHeight = 48
+            for (y in 0 until gridHeight) for (x in 0 until gridWidth) {
+                val sx = ((x * 2 + 1) * outputWidth / (gridWidth * 2)).coerceAtMost(outputWidth - 1)
+                val sy = ((y * 2 + 1) * outputHeight / (gridHeight * 2)).coerceAtMost(outputHeight - 1)
+                val index = sy * outputWidth + sx
+                val value = if (metric) output[index] else nearMap[index]
                 values.pushDouble(if (value.isFinite()) value.toDouble() else 0.0)
             }
-            grid.putInt("width", 32)
-            grid.putInt("height", 24)
-            grid.putString("units", "relative-nearness")
+            grid.putInt("width", gridWidth)
+            grid.putInt("height", gridHeight)
+            grid.putString("units", if (metric) "metres" else "relative-nearness")
             grid.putArray("values", values)
             response.putMap("grid", grid)
             response.putInt("width", outputWidth)
@@ -182,9 +198,18 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
                 val item = Arguments.createMap()
                 item.putInt("index", i)
                 item.putDouble("nearScore", sampleRegion(nearMap, innerX1, innerY1, innerX2, innerY2).toDouble())
+                if (metric) {
+                    sampleDistance(output, innerX1, y1 + (y2 - y1) * 0.55, innerX2, y1 + (y2 - y1) * 0.9)?.let {
+                        item.putDouble("distanceMetres", it.toDouble())
+                        item.putDouble("confidence", 0.45)
+                    }
+                }
                 objectDepths.pushMap(item)
             }
             response.putArray("objectDepths", objectDepths)
+            response.putString("units", if (metric) "metres" else "relative-nearness")
+            response.putString("modelName", modelName)
+            response.putString("domain", if (metric) "indoor" else "general")
             promise.resolve(response)
         } catch (e: Exception) {
             promise.reject("DEPTH_ESTIMATE_ERROR", e.message, e)
@@ -198,6 +223,10 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
         map.putInt("outputWidth", outputWidth)
         map.putInt("outputHeight", outputHeight)
         map.putBoolean("alreadyLoaded", alreadyLoaded)
+        map.putBoolean("available", true)
+        map.putString("units", if (metric) "metres" else "relative-nearness")
+        map.putString("modelName", modelName)
+        map.putString("domain", if (metric) "indoor" else "general")
         return map
     }
 
@@ -457,6 +486,24 @@ class MaculusDepthModule(reactContext: ReactApplicationContext) :
         for (i in 0 until take) sum += values[i]
         return (sum / take).coerceIn(0f, 1f)
     }
+
+    private fun sampleDistance(map: FloatArray, x1: Double, y1: Double, x2: Double, y2: Double): Float? {
+        val left = (min(x1, x2).coerceIn(0.0, 1.0) * outputWidth).toInt().coerceIn(0, outputWidth - 1)
+        val right = (max(x1, x2).coerceIn(0.0, 1.0) * outputWidth).toInt().coerceIn(left + 1, outputWidth)
+        val top = (min(y1, y2).coerceIn(0.0, 1.0) * outputHeight).toInt().coerceIn(0, outputHeight - 1)
+        val bottom = (max(y1, y2).coerceIn(0.0, 1.0) * outputHeight).toInt().coerceIn(top + 1, outputHeight)
+        val values = ArrayList<Float>()
+        for (y in top until bottom) for (x in left until right) {
+            val value = map[y * outputWidth + x]
+            if (value.isFinite() && value in 0.15f..20f) values.add(value)
+        }
+        if (values.isEmpty()) return null
+        values.sort()
+        return values[(values.size * 0.4).toInt().coerceIn(0, values.size - 1)]
+    }
+
+    private fun metricNearScore(distance: Float): Float =
+        if (distance.isFinite() && distance in 0.15f..20f) ((4f - distance) / 3.65f).coerceIn(0f, 1f) else 0f
 
     private fun com.facebook.react.bridge.ReadableMap.getDoubleOrDefault(name: String, defaultValue: Double): Double {
         return if (hasKey(name) && !isNull(name)) getDouble(name) else defaultValue

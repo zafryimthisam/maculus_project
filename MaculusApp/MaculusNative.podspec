@@ -17,6 +17,8 @@ Pod::Spec.new do |spec|
     'android/app/src/main/assets/yolo11s.tflite.provenance.json',
     'android/app/src/main/assets/coco-labels.txt',
     'android/app/src/main/assets/depth_anything_v2_small_uint8_256.onnx',
+    'android/app/src/main/assets/depth_metric_indoor_uint8_256.onnx',
+    'android/app/src/main/assets/depth_metric_indoor_uint8_256.provenance.json',
     'android/app/src/main/assets/person_reid_osnet_x0_25.onnx',
     'android/app/src/main/assets/person_reid_osnet_x0_25.onnx.sha256',
     'android/app/src/main/assets/wakeword/*.onnx',

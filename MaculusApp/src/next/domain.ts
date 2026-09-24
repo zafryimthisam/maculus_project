@@ -1,4 +1,4 @@
-import { CameraSource, DepthGrid, Detection, DistanceReading, PersonEmbedding } from '../types';
+import { CameraSource, DepthGrid, DepthSurfaceKind, Detection, DistanceReading, PersonEmbedding } from '../types';
 import type { VoiceCommandStatus } from '../services/VoiceCommandService';
 
 export type NextRuntimePhase = 'idle' | 'starting' | 'running' | 'degraded' | 'stopping' | 'error';
@@ -55,6 +55,8 @@ export interface NextSceneEntity {
   zone: 'left' | 'ahead' | 'right';
   inPath: boolean;
   nearScore: number;
+  distanceMetres?: number;
+  distanceConfidence?: number;
   firstSeenAt: number;
   lastSeenAt: number;
   visibility: EntityVisibility;
@@ -106,8 +108,12 @@ export interface NextRuntimeState {
     observedAt: number | null;
     source: CameraSource;
     inferenceMs: number | null;
+    units: 'relative-nearness' | 'metres' | null;
+    calibrated: boolean;
+    calibrationMessage: string;
   };
   depthPreviewGrid: DepthGrid | null;
+  depthPreviewSurfaces: DepthSurfaceKind[] | null;
   depthPreviewUpdatedAt: number | null;
   depthPreviewSource: CameraSource;
   userMotion: {
@@ -182,8 +188,12 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   piSensorAvailable: false,
   piLastSeenAt: null,
   sensor: EMPTY_SAFETY_STATE,
-  depthReading: { left: null, center: null, right: null, observedAt: null, source: 'none', inferenceMs: null },
+  depthReading: {
+    left: null, center: null, right: null, observedAt: null, source: 'none', inferenceMs: null,
+    units: null, calibrated: false, calibrationMessage: 'No camera geometry is active',
+  },
   depthPreviewGrid: null,
+  depthPreviewSurfaces: null,
   depthPreviewUpdatedAt: null,
   depthPreviewSource: 'none',
   userMotion: {

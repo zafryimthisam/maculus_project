@@ -8,7 +8,16 @@ export interface WalkingMotion {
   moving: boolean;
   walking: boolean;
 }
-export interface ClearanceReading { left: number; center: number; right: number; observedAt: number; source: CameraSource }
+export interface ClearanceReading {
+  left: number;
+  center: number;
+  right: number;
+  observedAt: number;
+  source: CameraSource;
+  units: 'relative-nearness' | 'metres';
+  calibrated: boolean;
+  calibrationMessage: string;
+}
 export interface TargetRouteResult {
   status: 'ready' | 'blocked' | 'arrived' | 'unavailable';
   instruction: string;
@@ -24,6 +33,9 @@ interface LaneAssessment {
   confidence: number;
   semanticRisk: number;
   approachRisk: number;
+  obstacleLabel?: string;
+  obstacleDistanceMetres?: number;
+  obstacleDistanceConfidence?: number;
 }
 
 const LANE_COUNT = 9;
@@ -31,7 +43,8 @@ const DEPTH_STALE_MS = 900;
 
 /**
  * Target bearing supplies intent. A temporally fused nine-lane surface map
- * ranks the locally visible routes; relative depth is never treated as metres.
+ * ranks body-width corridors. Metric and relative fallback grids retain their
+ * units and use separate clearance calculations.
  */
 export class TargetAwareLocalPlanner {
   private reading: ClearanceReading | null = null;
@@ -70,6 +83,9 @@ export class TargetAwareLocalPlanner {
       right: groupClearance(this.lanes.slice(6, 9)),
       observedAt,
       source,
+      units: spatial.grid.units,
+      calibrated: spatial.geometry.calibrated,
+      calibrationMessage: spatial.geometry.message,
     };
     return this.reading;
   }
@@ -138,6 +154,9 @@ export class TargetAwareLocalPlanner {
     }
     this.previousLaneX = choice.centerX;
     const centerClear = candidates.some(candidate => candidate.direction === 'center');
+    const centerObstacle = this.lanes.slice(3, 6)
+      .filter(lane => lane.obstacleLabel)
+      .sort((a, b) => b.semanticRisk - a.semanticRisk)[0];
     const approaching = choice.approachRisk >= 0.42;
     const instruction = direction === 'center'
       ? approaching
@@ -147,7 +166,7 @@ export class TargetAwareLocalPlanner {
           : motion.walking
             ? 'Keep going forward.'
             : 'Path ahead looks open. Move forward.'
-      : `${!centerClear ? 'The path ahead is blocked. ' : ''}Move a little to the ${direction}.`;
+      : `${!centerClear ? obstaclePhrase(centerObstacle) : ''}Move a little to the ${direction}.`;
     return {
       status: 'ready',
       reason: '',
@@ -168,12 +187,14 @@ function isSpatialFrame(value: SpatialDepthFrame | DepthEstimation): value is Sp
 
 function laneStats(spatial: SpatialDepthFrame, centerX: number, target?: NextSceneEntity): LaneAssessment {
   const { grid } = spatial;
+  const metric = grid.units === 'metres';
   const halfWidth = 0.105;
   const x1 = Math.max(0, Math.floor((centerX - halfWidth) * grid.width));
   const x2 = Math.min(grid.width, Math.ceil((centerX + halfWidth) * grid.width));
   const y1 = Math.floor(grid.height * 0.36);
   const y2 = Math.floor(grid.height * 0.92);
   const values: number[] = [];
+  const obstacleDistances: number[] = [];
   let confidence = 0;
   let walkable = 0;
   let obstacles = 0;
@@ -189,7 +210,10 @@ function laneStats(spatial: SpatialDepthFrame, centerX: number, target?: NextSce
       confidence += spatial.confidence[index];
       const surface = spatial.surfaces[index];
       if (surface === 'walkable') {walkable += 1;}
-      else if (surface === 'obstacle') {obstacles += 1;}
+      else if (surface === 'obstacle') {
+        obstacles += 1;
+        if (metric && Number.isFinite(grid.values[index])) {obstacleDistances.push(grid.values[index]);}
+      }
       else if (surface === 'drop-risk') {dropRisk += 1;}
       else {unknown += 1;}
     }
@@ -201,19 +225,33 @@ function laneStats(spatial: SpatialDepthFrame, centerX: number, target?: NextSce
   const near75 = values[Math.floor((values.length - 1) * 0.75)];
   const total = Math.max(1, walkable + obstacles + dropRisk + unknown);
   const surfaceSafety = walkable / total - obstacles / total * 0.3 - dropRisk / total * 1.4 - unknown / total * 0.18;
-  const laneObjects = spatial.objects.filter(object =>
-    object.x2 >= centerX - halfWidth && object.x1 <= centerX + halfWidth && object.y2 >= 0.28 &&
-    !matchesTarget(object, target));
+  const laneObjects = spatial.objects.filter(object => {
+    const footprintHalfWidth = Math.max(0.035, object.w * 0.3);
+    const intersectsFootprint = object.cx + footprintHalfWidth >= centerX - halfWidth &&
+      object.cx - footprintHalfWidth <= centerX + halfWidth;
+    const closeEnough = object.distanceMetres === undefined || object.distanceMetres <= 4;
+    return intersectsFootprint && object.y2 >= 0.42 && closeEnough && !matchesTarget(object, target);
+  });
   const semanticRisk = laneObjects.reduce((risk, object) => Math.max(risk, object.obstacleWeight), 0);
   const approachRisk = laneObjects.reduce((risk, object) => Math.max(risk,
     clamp01(Math.max(0, object.approachRate) * 1.6 + object.relativeMotion * 0.18) * object.obstacleWeight), 0);
+  const blockingObject = [...laneObjects].sort((a, b) => b.obstacleWeight - a.obstacleWeight)[0];
   return {
     centerX,
-    clearance: clamp01(1 - near75),
+    clearance: metric
+      ? obstacleDistances.length
+        ? clamp01((quantile(obstacleDistances, 0.2) - 0.45) / 2.55)
+        : clamp01(0.92 - dropRisk / total * 0.7 - unknown / total * 0.22)
+      : obstacles || dropRisk
+        ? clamp01(1 - near75)
+        : clamp01(0.9 - unknown / total * 0.25),
     groundSafety: clamp01(surfaceSafety - semanticRisk * 0.18),
     confidence: clamp01(confidence / values.length),
     semanticRisk,
     approachRisk,
+    obstacleLabel: blockingObject?.label,
+    obstacleDistanceMetres: blockingObject?.distanceMetres,
+    obstacleDistanceConfidence: blockingObject?.distanceConfidence,
   };
 }
 
@@ -237,4 +275,23 @@ function directionFor(centerX: number): RouteDirection {
   return centerX < 0.39 ? 'left' : centerX > 0.61 ? 'right' : 'center';
 }
 
+function obstaclePhrase(lane?: LaneAssessment): string {
+  if (!lane?.obstacleLabel) {return 'The path ahead is blocked. ';}
+  const article = /^[aeiou]/i.test(lane.obstacleLabel) ? 'An' : 'A';
+  const distance = lane.obstacleDistanceMetres !== undefined &&
+    (lane.obstacleDistanceConfidence ?? 0) >= 0.6
+    ? ` about ${roundedDistance(lane.obstacleDistanceMetres)} metres ahead`
+    : ' ahead';
+  return `${article} ${lane.obstacleLabel} is${distance}. `;
+}
+
+function roundedDistance(distance: number): string {
+  return (Math.round(distance * 4) / 4).toFixed(2).replace(/\.00$/, '').replace(/0$/, '');
+}
+
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+function quantile(values: number[], position: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * position)))] ?? 0;
+}

@@ -8,6 +8,8 @@ final class MaculusDepth: NSObject {
   // overlapping inferences while allowing iOS to prioritize the newest frame.
   private let queue = DispatchQueue(label: "com.maculus.depth", qos: .userInitiated, autoreleaseFrequency: .workItem)
   private var session: ORTSession?
+  private var metric = false
+  private var modelName = "Depth Anything V2 Small (relative fallback)"
   private let inputSize = 256
   private var outputWidth = 518
   private var outputHeight = 518
@@ -27,7 +29,17 @@ final class MaculusDepth: NSObject {
       do {
         let alreadyLoaded = self.session != nil
         if self.session == nil {
-          self.session = try MaculusORT.makeSession(resource: "depth_anything_v2_small_uint8_256")
+          if (try? MaculusResources.path("depth_metric_indoor_uint8_256", extension: "onnx")) != nil {
+            self.session = try MaculusORT.makeSession(resource: "depth_metric_indoor_uint8_256")
+            self.metric = true
+            self.modelName = "Depth Anything V2 Metric Indoor Small"
+            self.outputWidth = 64
+            self.outputHeight = 48
+          } else {
+            self.session = try MaculusORT.makeSession(resource: "depth_anything_v2_small_uint8_256")
+            self.metric = false
+            self.modelName = "Depth Anything V2 Small (relative fallback)"
+          }
         }
         resolve([
           "backend": "ONNX Runtime iOS",
@@ -36,6 +48,9 @@ final class MaculusDepth: NSObject {
           "outputHeight": self.outputHeight,
           "available": true,
           "alreadyLoaded": alreadyLoaded,
+          "units": self.metric ? "metres" : "relative-nearness",
+          "modelName": self.modelName,
+          "domain": self.metric ? "indoor" : "general",
         ])
       } catch {
         reject("DEPTH_MODEL_LOAD_ERROR", error.localizedDescription, error)
@@ -76,7 +91,12 @@ final class MaculusDepth: NSObject {
           shape: [1, self.inputSize, self.inputSize, 3]
         )
         self.updateOutputDimensions(shape: output.shape, count: output.values.count)
-        let nearMap = try self.normalize(output.values)
+        let depthMap = output.values.map { value in
+          value.isFinite && value > 0 ? value : (self.metric ? 20 : 0)
+        }
+        let nearMap = self.metric
+          ? depthMap.map { self.metricNearScore($0) }
+          : try self.normalize(depthMap)
         let objectDepths = detections.enumerated().map { index, detection in
           let cx = detection.maculusDouble("cx", fallback: 0.5)
           let cy = detection.maculusDouble("cy", fallback: 0.5)
@@ -86,11 +106,11 @@ final class MaculusDepth: NSObject {
           let y1 = detection.maculusDouble("y1", fallback: cy - height / 2)
           let x2 = detection.maculusDouble("x2", fallback: cx + width / 2)
           let y2 = detection.maculusDouble("y2", fallback: cy + height / 2)
-          let innerX1 = x1 + (x2 - x1) * 0.25
-          let innerY1 = y1 + (y2 - y1) * 0.25
-          let innerX2 = x2 - (x2 - x1) * 0.25
-          let innerY2 = y2 - (y2 - y1) * 0.25
-          return [
+          let innerX1 = x1 + (x2 - x1) * 0.22
+          let innerY1 = self.metric ? y1 + (y2 - y1) * 0.55 : y1 + (y2 - y1) * 0.22
+          let innerX2 = x2 - (x2 - x1) * 0.22
+          let innerY2 = self.metric ? y1 + (y2 - y1) * 0.9 : y2 - (y2 - y1) * 0.22
+          var item = [
             "index": index,
             "nearScore": self.sample(
               map: nearMap,
@@ -100,6 +120,13 @@ final class MaculusDepth: NSObject {
               y2: innerY2
             ),
           ] as [String: Any]
+          if self.metric, let distance = self.sampleDistance(
+            map: depthMap, x1: innerX1, y1: innerY1, x2: innerX2, y2: innerY2
+          ) {
+            item["distanceMetres"] = distance
+            item["confidence"] = 0.45
+          }
+          return item
         }
         // Preserve enough spatial structure for narrow obstacles and nine-lane
         // surface reasoning without bridging the full model tensor.
@@ -109,17 +136,23 @@ final class MaculusDepth: NSObject {
           let x = min(self.outputWidth - 1, (index % gridWidth * 2 + 1) * self.outputWidth / (gridWidth * 2))
           let y = min(self.outputHeight - 1, (index / gridWidth * 2 + 1) * self.outputHeight / (gridHeight * 2))
           let index = y * self.outputWidth + x
-          let value = nearMap[index]
+          let value = self.metric ? depthMap[index] : nearMap[index]
           return value.isFinite ? Double(value) : 0
         }
         resolve([
-          "grid": ["width": gridWidth, "height": gridHeight, "values": grid, "units": "relative-nearness"],
+          "grid": [
+            "width": gridWidth, "height": gridHeight, "values": grid,
+            "units": self.metric ? "metres" : "relative-nearness"
+          ],
           "width": self.outputWidth,
           "height": self.outputHeight,
           "leftNearScore": self.sample(map: nearMap, x1: 0, y1: 0, x2: 1.0 / 3.0, y2: 1),
           "centerNearScore": self.sample(map: nearMap, x1: 1.0 / 3.0, y1: 0, x2: 2.0 / 3.0, y2: 1),
           "rightNearScore": self.sample(map: nearMap, x1: 2.0 / 3.0, y1: 0, x2: 1, y2: 1),
           "objectDepths": objectDepths,
+          "units": self.metric ? "metres" : "relative-nearness",
+          "modelName": self.modelName,
+          "domain": self.metric ? "indoor" : "general",
           "inferenceMs": (CFAbsoluteTimeGetCurrent() - startedAt) * 1000,
         ])
       } catch {
@@ -196,5 +229,39 @@ final class MaculusDepth: NSObject {
     let count = max(1, values.count / 4)
     let sum = values.prefix(count).reduce(0, +)
     return Double((sum / Float(count)).clamped(to: 0...1))
+  }
+
+  private func sampleDistance(
+    map: [Float],
+    x1: Double,
+    y1: Double,
+    x2: Double,
+    y2: Double
+  ) -> Double? {
+    let left = Int(min(x1, x2).clamped(to: 0...1) * Double(outputWidth))
+      .clamped(to: 0...max(outputWidth - 1, 0))
+    let right = Int(max(x1, x2).clamped(to: 0...1) * Double(outputWidth))
+      .clamped(to: min(left + 1, outputWidth)...outputWidth)
+    let top = Int(min(y1, y2).clamped(to: 0...1) * Double(outputHeight))
+      .clamped(to: 0...max(outputHeight - 1, 0))
+    let bottom = Int(max(y1, y2).clamped(to: 0...1) * Double(outputHeight))
+      .clamped(to: min(top + 1, outputHeight)...outputHeight)
+    var values: [Float] = []
+    for y in top..<bottom {
+      for x in left..<right {
+        let index = y * outputWidth + x
+        if index < map.count, map[index].isFinite, map[index] >= 0.15, map[index] <= 20 {
+          values.append(map[index])
+        }
+      }
+    }
+    guard !values.isEmpty else { return nil }
+    values.sort()
+    return Double(values[Int(Double(values.count - 1) * 0.4)])
+  }
+
+  private func metricNearScore(_ distance: Float) -> Float {
+    guard distance.isFinite, distance >= 0.15, distance <= 20 else { return 0 }
+    return ((4 - distance) / 3.65).clamped(to: 0...1)
   }
 }

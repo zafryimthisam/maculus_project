@@ -292,15 +292,14 @@ export class AmbientGuide {
   ): SceneChange | null {
     this.observe(scene, now);
     const visible = scene.visibleEntities.filter(e => now - e.lastSeenAt <= 1200);
+    // Walking mode is action-first. Only the depth/corridor planner may issue
+    // route instructions; a detector box by itself is never a stop command.
+    if (mobilityActive) {return null;}
     if (scene.pathBlocked && visible.some(e => e.inPath) && now - this.lastPathWarningAt > 12000) {
       this.lastSpokenAt = now;
       this.lastPathWarningAt = now;
       return { key: `path:${now}`, kind: 'path-blocked', text: 'Possible obstacle ahead. Pause.', timestamp: now, speak: true };
     }
-    // Walking mode is action-first. The local planner names a relevant object
-    // only when it changes the safe action; general inventory remains available
-    // through the explicit scene-description command.
-    if (mobilityActive) {return null;}
     // Retain the last *spoken* position, not transient frame events. This also
     // survives TTS/AI busy periods. Direction is relative to the camera; it
     // does not prove that the person, rather than the camera, moved.

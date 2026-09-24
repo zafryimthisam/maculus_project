@@ -331,6 +331,8 @@ export class SessionSceneStore {
       zone,
       inPath,
       nearScore: detection.nearScore ?? detection.h,
+      distanceMetres: detection.distanceMetres,
+      distanceConfidence: detection.distanceConfidence,
       firstSeenAt: now,
       lastSeenAt: now,
       visibility: 'visible',
@@ -380,6 +382,14 @@ export class SessionSceneStore {
     track.w = ema(track.w, detection.w, 0.25);
     track.h = ema(track.h, detection.h, 0.25);
     track.nearScore = ema(track.nearScore, detection.nearScore ?? detection.h, 0.35);
+    if (detection.distanceMetres !== undefined && Number.isFinite(detection.distanceMetres)) {
+      track.distanceMetres = track.distanceMetres === undefined
+        ? detection.distanceMetres
+        : ema(track.distanceMetres, detection.distanceMetres, 0.35);
+      track.distanceConfidence = detection.distanceConfidence ?? track.distanceConfidence;
+    } else if (track.distanceConfidence !== undefined) {
+      track.distanceConfidence = Math.max(0, track.distanceConfidence - 0.12);
+    }
     track.lastDetectionCx = detection.cx;
     track.lastDetectionCy = detection.cy;
     const detectedZone = zoneOf(track.cx);
@@ -618,6 +628,8 @@ function toPublicEntity(track: InternalTrack): NextSceneEntity {
     zone: track.zone,
     inPath: track.inPath,
     nearScore: track.nearScore,
+    distanceMetres: track.distanceMetres,
+    distanceConfidence: track.distanceConfidence,
     firstSeenAt: track.firstSeenAt,
     lastSeenAt: track.lastSeenAt,
     visibility: track.visibility,
@@ -636,7 +648,10 @@ function describeEntities(entities: NextSceneEntity[], pathBlocked: boolean): st
   const ordered = [...entities].sort((a, b) => Number(b.inPath) - Number(a.inPath) || b.nearScore - a.nearScore);
   const items = ordered.slice(0, 5).map(entity => {
     const where = entity.zone === 'ahead' ? 'ahead' : `to the ${entity.zone}`;
-    return `${displayName(entity)} ${where}${entity.inPath ? ' in the center path' : ''}`;
+    const distance = entity.distanceMetres !== undefined && (entity.distanceConfidence ?? 0) >= 0.6
+      ? `, about ${roundedDistance(entity.distanceMetres)} metres away`
+      : '';
+    return `${displayName(entity)} ${where}${distance}${entity.inPath ? ' near the walking line' : ''}`;
   });
   return `${items.slice(0, 3).join(', ')}.${pathBlocked ? ' Possible obstacle ahead.' : ''}`;
 }
@@ -651,14 +666,25 @@ function zoneOf(cx: number): NextSceneEntity['zone'] {
 }
 
 function isInPath(box: Pick<Detection, 'cx' | 'w' | 'cy' | 'h'>): boolean {
-  const left = box.cx - box.w / 2;
-  const right = box.cx + box.w / 2;
+  // Navigation uses the object's lower physical footprint, not the complete
+  // visual box. A wide chair or cupboard beside the route must not block the
+  // center merely because its bounding box overlaps it.
+  const footprintHalfWidth = Math.max(0.035, box.w * 0.3);
+  const left = box.cx - footprintHalfWidth;
+  const right = box.cx + footprintHalfWidth;
   const bottom = box.cy + box.h / 2;
   return right >= 0.38 && left <= 0.62 && bottom >= 0.55;
 }
 
-function visualNear(entity: Pick<NextSceneEntity, 'nearScore' | 'h'>): boolean {
-  return entity.nearScore >= 0.7 || entity.h >= 0.55;
+function visualNear(entity: Pick<NextSceneEntity, 'nearScore' | 'h' | 'distanceMetres' | 'distanceConfidence'>): boolean {
+  if (entity.distanceMetres !== undefined && (entity.distanceConfidence ?? 0) >= 0.5) {
+    return entity.distanceMetres <= 2.5;
+  }
+  return entity.nearScore >= 0.72 || entity.h >= 0.6;
+}
+
+function roundedDistance(distance: number): string {
+  return (Math.round(distance * 4) / 4).toFixed(distance < 10 ? 2 : 0).replace(/\.00$/, '').replace(/0$/, '');
 }
 
 function personEnrollmentScore(track: InternalTrack): number {

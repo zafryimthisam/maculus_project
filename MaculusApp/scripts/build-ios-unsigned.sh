@@ -218,6 +218,8 @@ for model_name in \
   yolo11s.tflite.sha256 \
   yolo11s.tflite.provenance.json \
   depth_anything_v2_small_uint8_256.onnx \
+  depth_metric_indoor_uint8_256.onnx \
+  depth_metric_indoor_uint8_256.provenance.json \
   person_reid_osnet_x0_25.onnx \
   LFM_OPEN_LICENSE.txt \
   lfm2.5-vl-1.6b-q4_k_m.provenance.json \

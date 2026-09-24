@@ -1,6 +1,18 @@
-import { CameraSource, DepthEstimation, DepthGrid, Detection } from '../types';
+import {
+  CameraSource,
+  DepthEstimation,
+  DepthGrid,
+  DepthSurfaceKind,
+  Detection,
+} from '../types';
+import {
+  CameraGeometryProfile,
+  expectedFloorDepth,
+  geometryForFrame,
+  scaledIntrinsics,
+} from '../config/PiCameraGeometry';
 
-export type SurfaceKind = 'walkable' | 'obstacle' | 'drop-risk' | 'unknown';
+export type SurfaceKind = DepthSurfaceKind;
 
 export interface CameraMotionHint {
   moving: boolean;
@@ -12,6 +24,8 @@ export interface SemanticDepthObject {
   detectionIndex: number;
   label: string;
   nearScore: number;
+  distanceMetres?: number;
+  distanceConfidence?: number;
   /** Positive values mean that the object appears to be approaching. */
   approachRate: number;
   /** Image-relative motion after compensating for the estimated camera shift. */
@@ -38,11 +52,19 @@ export interface SpatialDepthFrame {
   horizontalShiftCells: number;
   verticalShiftCells: number;
   sceneChange: number;
+  geometry: {
+    calibrated: boolean;
+    navigationValidated: boolean;
+    profileId: string | null;
+    message: string;
+  };
 }
 
 interface PreviousObject {
   label: string;
   nearScore: number;
+  distanceMetres?: number;
+  distanceConfidence?: number;
   cx: number;
   cy: number;
   w: number;
@@ -63,8 +85,9 @@ const SOLID_LABELS = new Set([
 const FAST_DYNAMIC_LABELS = new Set(['person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'train', 'dog', 'cat']);
 
 /**
- * Maintains a short-lived, motion-compensated relative-depth memory. It does
- * not manufacture metric distance: every value remains relative nearness.
+ * Maintains a short-lived motion-compensated depth memory. Metric values remain
+ * metres throughout the planner. Relative fallback values remain explicitly
+ * relative and are never back-projected through the calibrated camera.
  */
 export class SpatialDepthMemory {
   private previousGrid: number[] | null = null;
@@ -73,6 +96,7 @@ export class SpatialDepthMemory {
   private width = 0;
   private height = 0;
   private source: CameraSource = 'none';
+  private units: DepthGrid['units'] | null = null;
   private observedAt = 0;
 
   reset(): void {
@@ -82,6 +106,7 @@ export class SpatialDepthMemory {
     this.width = 0;
     this.height = 0;
     this.source = 'none';
+    this.units = null;
     this.observedAt = 0;
   }
 
@@ -91,21 +116,28 @@ export class SpatialDepthMemory {
     source: CameraSource,
     observedAt: number,
     motion: CameraMotionHint = EMPTY_MOTION,
+    frameResolution?: string | null,
   ): SpatialDepthFrame | null {
     const input = depth.grid;
-    if (!validRelativeGrid(input)) {return null;}
-    if (source !== this.source || input.width !== this.width || input.height !== this.height ||
-        observedAt <= this.observedAt || observedAt - this.observedAt > 1500) {
+    if (!validDepthGrid(input)) {return null;}
+    if (source !== this.source || input.units !== this.units || input.width !== this.width ||
+        input.height !== this.height || observedAt <= this.observedAt || observedAt - this.observedAt > 1500) {
       this.reset();
     }
 
-    const raw = input.values.map(clamp01);
+    const metric = input.units === 'metres';
+    const valid = input.values.map(value => metric ? validMetricDepth(value) : Number.isFinite(value));
+    const raw = input.values.map((value, index) => metric
+      ? valid[index] ? value : 20
+      : clamp01(value));
+    const comparable = toNearMap(raw, input.units);
     const previous = this.previousGrid;
     const previousConfidence = this.previousConfidence;
-    const shift = previous
-      ? bestGridShift(raw, previous, input.width, input.height, motion.moving ? 3 : 2, motion.moving ? 2 : 1)
+    const previousComparable = previous ? toNearMap(previous, input.units) : null;
+    const shift = previousComparable
+      ? bestGridShift(comparable, previousComparable, input.width, input.height,
+        motion.moving ? 3 : 2, motion.moving ? 2 : 1)
       : { x: 0, y: 0 };
-    const aligned = previous ? alignDistribution(raw, previous) : raw;
     const fused = new Array<number>(raw.length);
     const confidence = new Array<number>(raw.length);
     let changeSum = 0;
@@ -120,32 +152,61 @@ export class SpatialDepthMemory {
           ? previousY * input.width + previousX
           : -1;
         if (!previous || previousIndex < 0) {
-          fused[index] = aligned[index];
-          confidence[index] = 0.45;
+          fused[index] = raw[index];
+          confidence[index] = valid[index] ? (metric ? 0.55 : 0.45) : 0;
           continue;
         }
         const prior = previous[previousIndex];
-        const delta = Math.abs(aligned[index] - prior);
-        const nearerNow = aligned[index] - prior > 0.14;
+        const current = raw[index];
+        const delta = metric
+          ? Math.abs(current - prior) / Math.max(0.35, Math.min(current, prior))
+          : Math.abs(current - prior);
+        const nearerNow = metric
+          ? prior - current > Math.max(0.18, prior * 0.1)
+          : current - prior > 0.14;
         const motionStrength = clamp01(motion.rotationRate / 2.5 + motion.acceleration / 4);
-        let alpha = motion.moving ? 0.68 : 0.38;
-        // React quickly to newly near structure; smooth small depth shimmer.
-        if (nearerNow) {alpha = 0.84;}
-        else if (delta > 0.3) {alpha = Math.max(alpha, 0.72);}
+        let alpha = motion.moving ? 0.7 : metric ? 0.45 : 0.4;
+        if (nearerNow) {alpha = 0.86;}
+        else if (delta > 0.3) {alpha = Math.max(alpha, 0.74);}
         alpha = clamp01(alpha + motionStrength * 0.1);
-        fused[index] = clamp01(prior * (1 - alpha) + aligned[index] * alpha);
-        const agreement = 1 - clamp01(delta * 2.2);
+        fused[index] = valid[index] ? prior * (1 - alpha) + current * alpha : prior;
+        const agreement = 1 - clamp01(delta * 1.8);
         const priorConfidence = previousConfidence?.[previousIndex] ?? 0.45;
-        confidence[index] = clamp01(priorConfidence * 0.68 + agreement * 0.32 - motionStrength * 0.08);
+        confidence[index] = valid[index]
+          ? clamp01(priorConfidence * 0.68 + agreement * 0.32 - motionStrength * 0.08)
+          : clamp01(priorConfidence - 0.2);
         changeSum += delta;
         compared += 1;
       }
     }
 
-    const objects = this.observeObjects(detections, fused, input.width, input.height, observedAt, shift.x, shift.y);
-    const surfaces = classifySurfaces(fused, confidence, input.width, input.height, objects);
+    const fusedNear = toNearMap(fused, input.units);
+    const objects = this.observeObjects(
+      detections, fused, fusedNear, input.units, input.width, input.height, observedAt, shift.x, shift.y,
+    );
+    const profile = metric ? geometryForFrame(source, frameResolution) : null;
+    const surfaces = classifySurfaces(
+      fused, fusedNear, input.units, confidence, input.width, input.height, objects, profile,
+    );
+    const geometry = profile ? {
+      calibrated: true,
+      navigationValidated: profile.navigationValidated,
+      profileId: profile.id,
+      message: profile.navigationValidated
+        ? 'Measured Pi camera geometry active'
+        : 'Measured Pi geometry active; supervised walking validation is still required',
+    } : {
+      calibrated: false,
+      navigationValidated: false,
+      profileId: null,
+      message: metric
+        ? source === 'pi'
+          ? 'Pi frame does not match the measured 640×480 calibration'
+          : 'Phone camera has metric depth but no fixed mounting calibration'
+        : 'Relative-depth fallback; physical camera geometry is unavailable',
+    };
     const result: SpatialDepthFrame = {
-      grid: { width: input.width, height: input.height, values: fused, units: 'relative-nearness' },
+      grid: { width: input.width, height: input.height, values: fused, units: input.units },
       confidence,
       surfaces,
       objects,
@@ -154,7 +215,8 @@ export class SpatialDepthMemory {
       cameraMoving: motion.moving,
       horizontalShiftCells: shift.x,
       verticalShiftCells: shift.y,
-      sceneChange: compared ? clamp01(changeSum / compared * 3) : 0,
+      sceneChange: compared ? clamp01(changeSum / compared * (metric ? 1.5 : 3)) : 0,
+      geometry,
     };
 
     this.previousGrid = fused;
@@ -162,6 +224,7 @@ export class SpatialDepthMemory {
     this.width = input.width;
     this.height = input.height;
     this.source = source;
+    this.units = input.units;
     this.observedAt = observedAt;
     return result;
   }
@@ -169,6 +232,8 @@ export class SpatialDepthMemory {
   private observeObjects(
     detections: Detection[],
     grid: number[],
+    nearMap: number[],
+    units: DepthGrid['units'],
     width: number,
     height: number,
     observedAt: number,
@@ -177,7 +242,15 @@ export class SpatialDepthMemory {
   ): SemanticDepthObject[] {
     const used = new Set<number>();
     const objects = detections.map((detection, detectionIndex): SemanticDepthObject => {
-      const nearScore = sampleBox(grid, width, height, detection);
+      const metricSample = units === 'metres' ? sampleMetricFootprint(grid, width, height, detection) : null;
+      const rawDistance = metricSample?.distance;
+      let nearScore = rawDistance === undefined
+        ? sampleRelativeObject(nearMap, width, height, detection)
+        : metricNearScore(rawDistance);
+      let distanceMetres = rawDistance;
+      // A single frame never earns spoken-distance confidence. Stable temporal
+      // agreement raises this above the 0.6 presentation threshold.
+      let distanceConfidence = metricSample?.coverage ? clamp01(0.25 + metricSample.coverage * 0.2) : undefined;
       let previousIndex = -1;
       let best = 0;
       this.previousObjects.forEach((candidate, index) => {
@@ -190,9 +263,24 @@ export class SpatialDepthMemory {
       const prior = previousIndex >= 0 && best >= 0.22 ? this.previousObjects[previousIndex] : undefined;
       if (prior) {used.add(previousIndex);}
       const elapsedSeconds = prior ? Math.max(0.08, (observedAt - prior.observedAt) / 1000) : 1;
+      if (distanceMetres !== undefined && prior?.distanceMetres !== undefined) {
+        const difference = Math.abs(distanceMetres - prior.distanceMetres);
+        const stable = difference <= Math.max(0.2, prior.distanceMetres * 0.18);
+        const closerQuickly = prior.distanceMetres - distanceMetres > Math.max(0.25, prior.distanceMetres * 0.16);
+        distanceMetres = prior.distanceMetres * (closerQuickly ? 0.3 : 0.62) +
+          distanceMetres * (closerQuickly ? 0.7 : 0.38);
+        distanceConfidence = stable
+          ? clamp01((prior.distanceConfidence ?? 0.35) + 0.22)
+          : clamp01((prior.distanceConfidence ?? 0.35) - 0.18);
+        nearScore = metricNearScore(distanceMetres);
+      }
       const area = detection.w * detection.h;
       const previousArea = prior ? prior.w * prior.h : area;
-      const depthApproach = prior ? (nearScore - prior.nearScore) / elapsedSeconds : 0;
+      const depthApproach = prior
+        ? units === 'metres' && distanceMetres !== undefined && prior.distanceMetres !== undefined
+          ? (prior.distanceMetres - distanceMetres) / (elapsedSeconds * Math.max(0.4, prior.distanceMetres))
+          : (nearScore - prior.nearScore) / elapsedSeconds
+        : 0;
       const sizeApproach = prior ? (Math.sqrt(area) - Math.sqrt(previousArea)) / elapsedSeconds : 0;
       const approachRate = Math.max(-1, Math.min(1, depthApproach * 0.72 + sizeApproach * 0.85));
       const cameraShift = horizontalShiftCells / Math.max(1, width);
@@ -209,6 +297,8 @@ export class SpatialDepthMemory {
         detectionIndex,
         label: detection.label,
         nearScore,
+        distanceMetres,
+        distanceConfidence,
         approachRate,
         relativeMotion,
         obstacleWeight: obstacleRisk,
@@ -225,6 +315,8 @@ export class SpatialDepthMemory {
     this.previousObjects = objects.map(object => ({
       label: object.label,
       nearScore: object.nearScore,
+      distanceMetres: object.distanceMetres,
+      distanceConfidence: object.distanceConfidence,
       cx: object.cx,
       cy: object.cy,
       w: object.w,
@@ -244,26 +336,35 @@ export function attachDepthToDetections(
   spatial: SpatialDepthFrame | null,
 ): Detection[] {
   if (!spatial) {return detections;}
-  const nearByIndex = new Map(spatial.objects.map(object => [object.detectionIndex, object.nearScore]));
-  return detections.map((detection, index) => ({ ...detection, nearScore: nearByIndex.get(index) }));
+  const depthByIndex = new Map(spatial.objects.map(object => [object.detectionIndex, object]));
+  return detections.map((detection, index) => {
+    const object = depthByIndex.get(index);
+    return object ? {
+      ...detection,
+      nearScore: object.nearScore,
+      distanceMetres: object.distanceMetres,
+      distanceConfidence: object.distanceConfidence,
+    } : detection;
+  });
 }
 
-function validRelativeGrid(grid?: DepthGrid): grid is DepthGrid {
-  return Boolean(grid && grid.units === 'relative-nearness' && grid.width >= 6 && grid.height >= 6 &&
-    grid.values.length === grid.width * grid.height && grid.values.every(Number.isFinite));
+function validDepthGrid(grid?: DepthGrid): grid is DepthGrid {
+  return Boolean(grid && (grid.units === 'relative-nearness' || grid.units === 'metres') &&
+    grid.width >= 6 && grid.height >= 6 && grid.values.length === grid.width * grid.height &&
+    grid.values.every(Number.isFinite));
 }
 
-function alignDistribution(current: number[], previous: number[]): number[] {
-  // Use the interquartile distribution so a newly near object occupying a
-  // modest image region is not mistaken for a global scale change.
-  const currentLow = quantile(current, 0.25);
-  const currentHigh = quantile(current, 0.75);
-  const previousLow = quantile(previous, 0.25);
-  const previousHigh = quantile(previous, 0.75);
-  const currentRange = Math.max(0.12, currentHigh - currentLow);
-  const previousRange = Math.max(0.12, previousHigh - previousLow);
-  const scale = Math.max(0.65, Math.min(1.55, previousRange / currentRange));
-  return current.map(value => clamp01((value - currentLow) * scale + previousLow));
+function validMetricDepth(value: number): boolean {
+  return Number.isFinite(value) && value >= 0.15 && value <= 20;
+}
+
+function toNearMap(values: number[], units: DepthGrid['units']): number[] {
+  return units === 'metres' ? values.map(metricNearScore) : values.map(clamp01);
+}
+
+function metricNearScore(distanceMetres: number): number {
+  if (!validMetricDepth(distanceMetres)) {return 0;}
+  return clamp01((4 - distanceMetres) / 3.65);
 }
 
 function bestGridShift(
@@ -285,8 +386,6 @@ function bestGridShift(
         }
       }
       const mean = count ? error / count : Number.POSITIVE_INFINITY;
-      // Prefer no motion when several shifts explain a textureless scene
-      // equally well; otherwise a flat wall would appear to move diagonally.
       const score = mean + (Math.abs(shiftX) + Math.abs(shiftY)) * 0.0005;
       if (score < bestError) {bestError = score; bestShift = { x: shiftX, y: shiftY };}
     }
@@ -296,62 +395,136 @@ function bestGridShift(
 
 function classifySurfaces(
   grid: number[],
+  nearMap: number[],
+  units: DepthGrid['units'],
   confidence: number[],
   width: number,
   height: number,
   objects: SemanticDepthObject[],
+  profile: CameraGeometryProfile | null,
 ): SurfaceKind[] {
   const surfaces = new Array<SurfaceKind>(grid.length).fill('unknown');
-  const nearThreshold = Math.max(0.55, quantile(grid, 0.72));
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      if (confidence[index] < 0.16) {continue;}
-      const left = grid[y * width + Math.max(0, x - 1)];
-      const right = grid[y * width + Math.min(width - 1, x + 1)];
-      const above = grid[Math.max(0, y - 1) * width + x];
-      const below = grid[Math.min(height - 1, y + 1) * width + x];
-      const horizontalGradient = Math.abs(right - left) / 2;
-      const verticalGradient = Math.abs(below - above) / 2;
-      const lowerFrame = (y + 0.5) / height;
-      if (lowerFrame >= 0.5 && verticalGradient > 0.2) {
-        surfaces[index] = 'drop-risk';
-      } else if (lowerFrame >= 0.28 && grid[index] >= nearThreshold &&
-          (horizontalGradient > 0.035 || verticalGradient > 0.035 || grid[index] > 0.78)) {
-        surfaces[index] = 'obstacle';
-      } else if (lowerFrame >= 0.5 && horizontalGradient < 0.16 && verticalGradient < 0.14) {
-        surfaces[index] = 'walkable';
+  if (units === 'metres' && profile) {
+    const intrinsics = scaledIntrinsics(profile, width, height);
+    for (let y = Math.floor(height * 0.32); y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (confidence[index] < 0.2 || !validMetricDepth(grid[index])) {continue;}
+        const floorDepth = expectedFloorDepth(profile, intrinsics, x + 0.5, y + 0.5);
+        if (floorDepth === null) {continue;}
+        const tolerance = Math.max(0.16, floorDepth * 0.16);
+        const difference = grid[index] - floorDepth;
+        if (Math.abs(difference) <= tolerance) {
+          surfaces[index] = 'walkable';
+        } else if (difference < -tolerance && grid[index] <= 5) {
+          surfaces[index] = 'obstacle';
+        } else if (difference > Math.max(0.4, floorDepth * 0.3)) {
+          surfaces[index] = 'drop-risk';
+        }
+      }
+    }
+  } else {
+    const rowBaselines = Array.from({ length: height }, (_, y) =>
+      quantile(nearMap.slice(y * width, (y + 1) * width), 0.5));
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (confidence[index] < 0.16) {continue;}
+        const left = nearMap[y * width + Math.max(0, x - 1)];
+        const right = nearMap[y * width + Math.min(width - 1, x + 1)];
+        const above = nearMap[Math.max(0, y - 1) * width + x];
+        const below = nearMap[Math.min(height - 1, y + 1) * width + x];
+        const horizontalGradient = Math.abs(right - left) / 2;
+        const verticalGradient = Math.abs(below - above) / 2;
+        const lowerFrame = (y + 0.5) / height;
+        const rowDifference = nearMap[index] - rowBaselines[y];
+        // A smooth surface that follows its row's floor profile is walkable
+        // even when it is physically close at the bottom of the image.
+        if (units === 'metres' && lowerFrame >= 0.3 && grid[index] <= 0.7) {
+          // Without fixed mounting geometry a very close metric surface cannot
+          // safely be called floor, so retain it as an obstacle.
+          surfaces[index] = 'obstacle';
+        } else if (lowerFrame >= 0.5 && Math.abs(rowDifference) <= 0.13 &&
+            horizontalGradient < 0.14 && verticalGradient < 0.16) {
+          surfaces[index] = 'walkable';
+        } else if (lowerFrame >= 0.3 && rowDifference > 0.14 &&
+            (horizontalGradient > 0.025 || verticalGradient > 0.025 || nearMap[index] > 0.82 ||
+              rowDifference > 0.28)) {
+          surfaces[index] = 'obstacle';
+        }
       }
     }
   }
 
-  // Object meaning overrides a visually smooth patch: a nearby person or chair
-  // remains an obstacle even if the depth decoder blurs its boundary.
+  // Object meaning is applied only to the lower physical footprint, never the
+  // entire detection rectangle. Large boxes must not erase visible floor.
   for (const object of objects) {
     if (object.obstacleWeight < 0.48) {continue;}
-    const x1 = Math.max(0, Math.floor(object.x1 * width));
-    const x2 = Math.min(width, Math.ceil(object.x2 * width));
-    const y1 = Math.max(0, Math.floor(object.y1 * height));
+    const insetX = object.w * 0.2;
+    const x1 = Math.max(0, Math.floor((object.x1 + insetX) * width));
+    const x2 = Math.min(width, Math.ceil((object.x2 - insetX) * width));
+    const y1 = Math.max(0, Math.floor((object.y1 + object.h * 0.68) * height));
     const y2 = Math.min(height, Math.ceil(object.y2 * height));
     for (let y = y1; y < y2; y += 1) {
-      for (let x = x1; x < x2; x += 1) {surfaces[y * width + x] = 'obstacle';}
+      for (let x = x1; x < x2; x += 1) {
+        const index = y * width + x;
+        const sameSurface = units === 'metres' && object.distanceMetres !== undefined
+          ? Math.abs(grid[index] - object.distanceMetres) <= Math.max(0.3, object.distanceMetres * 0.28)
+          : nearMap[index] >= object.nearScore - 0.16;
+        if (sameSurface) {surfaces[index] = 'obstacle';}
+      }
     }
   }
   return surfaces;
 }
 
-function sampleBox(grid: number[], width: number, height: number, box: Pick<Detection, 'x1' | 'y1' | 'x2' | 'y2'>): number {
-  const insetX = (box.x2 - box.x1) * 0.22;
-  const insetY = (box.y2 - box.y1) * 0.22;
-  const left = Math.max(0, Math.floor((box.x1 + insetX) * width));
-  const right = Math.min(width, Math.max(left + 1, Math.ceil((box.x2 - insetX) * width)));
-  const top = Math.max(0, Math.floor((box.y1 + insetY) * height));
-  const bottom = Math.min(height, Math.max(top + 1, Math.ceil((box.y2 - insetY) * height)));
+function sampleRelativeObject(
+  grid: number[], width: number, height: number,
+  box: Pick<Detection, 'x1' | 'y1' | 'x2' | 'y2'>,
+): number {
+  const values = sampleRegion(grid, width, height,
+    box.x1 + (box.x2 - box.x1) * 0.22,
+    box.y1 + (box.y2 - box.y1) * 0.22,
+    box.x2 - (box.x2 - box.x1) * 0.22,
+    box.y2 - (box.y2 - box.y1) * 0.22);
+  return values.length ? quantile(values, 0.75) : 0;
+}
+
+function sampleMetricFootprint(
+  grid: number[], width: number, height: number,
+  box: Pick<Detection, 'x1' | 'y1' | 'x2' | 'y2'>,
+): {distance: number; coverage: number} | null {
+  const boxWidth = box.x2 - box.x1;
+  const boxHeight = box.y2 - box.y1;
+  const values = sampleRegion(grid, width, height,
+    box.x1 + boxWidth * 0.22,
+    box.y1 + boxHeight * 0.55,
+    box.x2 - boxWidth * 0.22,
+    box.y1 + boxHeight * 0.9).filter(validMetricDepth);
+  if (!values.length) {return null;}
+  const expectedSamples = Math.max(1,
+    Math.ceil(boxWidth * 0.56 * width) * Math.ceil(boxHeight * 0.35 * height));
+  return {
+    // The 40th percentile is resistant to background leaks but remains
+    // conservative when the object's nearest visible surface matters.
+    distance: quantile(values, 0.4),
+    coverage: clamp01(values.length / expectedSamples),
+  };
+}
+
+function sampleRegion(
+  grid: number[], width: number, height: number,
+  x1: number, y1: number, x2: number, y2: number,
+): number[] {
+  const left = Math.max(0, Math.floor(Math.min(x1, x2) * width));
+  const right = Math.min(width, Math.max(left + 1, Math.ceil(Math.max(x1, x2) * width)));
+  const top = Math.max(0, Math.floor(Math.min(y1, y2) * height));
+  const bottom = Math.min(height, Math.max(top + 1, Math.ceil(Math.max(y1, y2) * height)));
   const values: number[] = [];
   for (let y = top; y < bottom; y += 1) {
     for (let x = left; x < right; x += 1) {values.push(grid[y * width + x]);}
   }
-  return values.length ? quantile(values, 0.75) : 0;
+  return values;
 }
 
 function obstacleWeight(label: string): number {
