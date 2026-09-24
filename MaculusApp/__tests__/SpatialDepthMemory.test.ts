@@ -108,6 +108,23 @@ test('semantic objects mark only their lower footprint instead of the full box',
   expect(frame.surfaces[9 * WIDTH + 9]).toBe('obstacle');
 });
 
+test('recognizes a smooth close frontal wall without needing an object detection', () => {
+  const frame = new SpatialDepthMemory().observe(
+    depth(Array(WIDTH * HEIGHT).fill(0.82)), [], 'pi', 1000,
+  )!;
+
+  expect(frame.objects).toHaveLength(0);
+  expect(frame.surfaces[6 * WIDTH + 9]).toBe('obstacle');
+});
+
+test('does not let a far YOLO box paint a blue depth corridor as blocked', () => {
+  const farDesk = {...chair, label: 'dining table', y1: 0.28, y2: 0.76, cy: 0.52, h: 0.48};
+  const frame = new SpatialDepthMemory().observe(depth(grid(0.16, 0.22)), [farDesk], 'pi', 1000)!;
+
+  expect(frame.objects[0].nearScore).toBeLessThan(0.58);
+  expect(frame.surfaces[8 * WIDTH + 9]).not.toBe('obstacle');
+});
+
 test('does not apply measured Pi floor geometry to an unvalidated metric scale', () => {
   const intrinsics = scaledIntrinsics(PI_CAMERA_GEOMETRY, WIDTH, HEIGHT);
   const floor = Array.from({length: HEIGHT}, (_row, y) => Array.from({length: WIDTH}, (_column, x) =>

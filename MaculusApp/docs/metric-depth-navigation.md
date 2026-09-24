@@ -15,6 +15,13 @@ mount, crop, rotation, or resolution requires a new calibration.
 
 ## Navigation interpretation
 
+- The nine-lane depth corridor owns every stop, forward, left, and right
+  decision. YOLO supplies names and motion meaning only after depth supports a
+  blockage; a detector box over a blue/far corridor cannot close that route.
+- Relative-depth walking evaluates the upper/middle body corridor separately
+  from the naturally close floor at the bottom of the frame. A smooth near
+  surface across that band is treated as a frontal wall even with no detected
+  object.
 - Expected floor depth is calculated for each ray from the measured camera
   transform. Points close to that plane are walkable floor.
 - Points significantly in front of the expected floor are obstacles.

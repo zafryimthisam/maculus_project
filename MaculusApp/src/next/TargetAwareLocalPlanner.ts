@@ -29,8 +29,11 @@ export interface TargetRouteResult {
 interface LaneAssessment {
   centerX: number;
   clearance: number;
+  /** Depth-only openness in the forward body corridor. */
+  forwardClearance: number;
   groundSafety: number;
   confidence: number;
+  blockedSurfaceRatio: number;
   semanticRisk: number;
   approachRisk: number;
   obstacleLabel?: string;
@@ -40,6 +43,7 @@ interface LaneAssessment {
 
 const LANE_COUNT = 9;
 const DEPTH_STALE_MS = 900;
+const RELATIVE_FORWARD_CLEARANCE_MIN = 0.42;
 
 /**
  * Target bearing supplies intent. A temporally fused nine-lane surface map
@@ -121,15 +125,22 @@ export class TargetAwareLocalPlanner {
       return { status: 'arrived', reason: '', instruction: 'The target is nearby. Stop here.', direction: null, mode: 'ARRIVED' };
     }
 
+    const desiredX = guidanceMode === 'target' && target ? target.cx : 0.5;
     const candidates = this.lanes.map(lane => {
       const direction = directionFor(lane.centerX);
-      const desiredX = guidanceMode === 'target' && target ? target.cx : 0.5;
       const alignment = 1 - Math.min(1, Math.abs(lane.centerX - desiredX) / 0.72);
       const stability = this.previousLaneX === null ? 0 : 1 - Math.min(1, Math.abs(lane.centerX - this.previousLaneX) * 4);
-      const score = alignment * 0.4 + lane.clearance * 0.27 + lane.groundSafety * 0.2 +
-        lane.confidence * 0.08 + stability * 0.05 - lane.semanticRisk * 0.24 - lane.approachRisk * 0.2;
-      const safe = lane.clearance >= 0.24 && lane.groundSafety >= 0.38 && lane.confidence >= 0.18 &&
-        lane.semanticRisk < 0.78 && lane.approachRisk < 0.55;
+      // Geometry owns the route decision. Detector meaning is deliberately a
+      // small tie-breaker after depth has proved that a lane is traversable;
+      // a YOLO box over blue/far depth must never steer the user by itself.
+      const score = lane.forwardClearance * 0.42 + lane.clearance * 0.2 + lane.groundSafety * 0.16 +
+        alignment * 0.15 + lane.confidence * 0.04 + stability * 0.03 -
+        lane.semanticRisk * 0.04 - lane.approachRisk * 0.06;
+      const minimumForwardClearance = this.reading?.units === 'metres'
+        ? 0.24
+        : RELATIVE_FORWARD_CLEARANCE_MIN;
+      const safe = lane.forwardClearance >= minimumForwardClearance && lane.clearance >= 0.24 &&
+        lane.groundSafety >= 0.3 && lane.confidence >= 0.18 && lane.blockedSurfaceRatio < 0.48;
       return { ...lane, direction, score, safe };
     }).filter(candidate => candidate.safe).sort((a, b) => b.score - a.score);
     if (!candidates.length) {
@@ -138,6 +149,15 @@ export class TargetAwareLocalPlanner {
 
     const prior = this.previous;
     let choice = candidates[0];
+    const intentChoice = [...candidates].sort((a, b) =>
+      Math.abs(a.centerX - desiredX) - Math.abs(b.centerX - desiredX))[0];
+    // Stay aligned with straight ahead (or the selected target) when that
+    // corridor is almost as open as the numerical best. Small confidence or
+    // detector-score differences must not create needless weaving.
+    if (intentChoice && intentChoice.forwardClearance >= choice.forwardClearance - 0.12 &&
+        intentChoice.clearance >= choice.clearance - 0.12) {
+      choice = intentChoice;
+    }
     let direction = choice.direction;
     if (direction !== this.previous) {
       if (direction !== this.pending) {this.pending = direction; this.pendingCount = 1;}
@@ -194,12 +214,17 @@ function laneStats(spatial: SpatialDepthFrame, centerX: number, target?: NextSce
   const y1 = Math.floor(grid.height * 0.36);
   const y2 = Math.floor(grid.height * 0.92);
   const values: number[] = [];
+  const forwardValues: number[] = [];
   const obstacleDistances: number[] = [];
   let confidence = 0;
   let walkable = 0;
   let obstacles = 0;
   let dropRisk = 0;
   let unknown = 0;
+  let forwardObstacles = 0;
+  let forwardDropRisk = 0;
+  let forwardUnknown = 0;
+  let forwardSamples = 0;
   for (let y = y1; y < y2; y += 1) {
     for (let x = x1; x < x2; x += 1) {
       const nx = (x + 0.5) / grid.width;
@@ -207,46 +232,71 @@ function laneStats(spatial: SpatialDepthFrame, centerX: number, target?: NextSce
       if (target && Math.abs(nx - target.cx) < target.w * 0.42 && Math.abs(ny - target.cy) < target.h * 0.42) {continue;}
       const index = y * grid.width + x;
       values.push(grid.values[index]);
+      const inForwardCorridor = ny >= 0.3 && ny <= 0.72;
+      if (inForwardCorridor) {
+        forwardValues.push(grid.values[index]);
+        forwardSamples += 1;
+      }
       confidence += spatial.confidence[index];
       const surface = spatial.surfaces[index];
       if (surface === 'walkable') {walkable += 1;}
       else if (surface === 'obstacle') {
         obstacles += 1;
+        if (inForwardCorridor) {forwardObstacles += 1;}
         if (metric && Number.isFinite(grid.values[index])) {obstacleDistances.push(grid.values[index]);}
       }
-      else if (surface === 'drop-risk') {dropRisk += 1;}
-      else {unknown += 1;}
+      else if (surface === 'drop-risk') {
+        dropRisk += 1;
+        if (inForwardCorridor) {forwardDropRisk += 1;}
+      }
+      else {
+        unknown += 1;
+        if (inForwardCorridor) {forwardUnknown += 1;}
+      }
     }
   }
   if (values.length < 12) {
-    return { centerX, clearance: 0, groundSafety: 0, confidence: 0, semanticRisk: 1, approachRisk: 1 };
+    return { centerX, clearance: 0, forwardClearance: 0, groundSafety: 0, confidence: 0,
+      blockedSurfaceRatio: 1, semanticRisk: 1, approachRisk: 1 };
   }
   values.sort((a, b) => a - b);
   const near75 = values[Math.floor((values.length - 1) * 0.75)];
+  const forwardNear = forwardValues.length ? quantile(forwardValues, 0.65) : near75;
   const total = Math.max(1, walkable + obstacles + dropRisk + unknown);
+  const forwardTotal = Math.max(1, forwardSamples);
+  const blockedSurfaceRatio = clamp01(
+    (forwardObstacles + forwardDropRisk * 1.35 + forwardUnknown * 0.12) / forwardTotal,
+  );
   const surfaceSafety = walkable / total - obstacles / total * 0.3 - dropRisk / total * 1.4 - unknown / total * 0.18;
   const laneObjects = spatial.objects.filter(object => {
     const footprintHalfWidth = Math.max(0.035, object.w * 0.3);
     const intersectsFootprint = object.cx + footprintHalfWidth >= centerX - halfWidth &&
       object.cx - footprintHalfWidth <= centerX + halfWidth;
-    const closeEnough = object.distanceMetres === undefined || object.distanceMetres <= 4;
-    return intersectsFootprint && object.y2 >= 0.42 && closeEnough && !matchesTarget(object, target);
+    const depthSupportsObject = metric
+      ? object.distanceMetres === undefined || object.distanceMetres <= 4
+      : object.isVeryClose || object.nearScore >= 0.58;
+    return intersectsFootprint && object.y2 >= 0.42 && depthSupportsObject && !matchesTarget(object, target);
   });
   const semanticRisk = laneObjects.reduce((risk, object) => Math.max(risk, object.obstacleWeight), 0);
   const approachRisk = laneObjects.reduce((risk, object) => Math.max(risk,
     clamp01(Math.max(0, object.approachRate) * 1.6 + object.relativeMotion * 0.18) * object.obstacleWeight), 0);
   const blockingObject = [...laneObjects].sort((a, b) => b.obstacleWeight - a.obstacleWeight)[0];
+  const forwardClearance = metric
+    ? obstacleDistances.length
+      ? clamp01((quantile(obstacleDistances, 0.2) - 0.45) / 2.55)
+      : clamp01(0.92 - blockedSurfaceRatio * 0.82)
+    : clamp01(1 - forwardNear);
   return {
     centerX,
     clearance: metric
       ? obstacleDistances.length
         ? clamp01((quantile(obstacleDistances, 0.2) - 0.45) / 2.55)
         : clamp01(0.92 - dropRisk / total * 0.7 - unknown / total * 0.22)
-      : obstacles || dropRisk
-        ? clamp01(1 - near75)
-        : clamp01(0.9 - unknown / total * 0.25),
-    groundSafety: clamp01(surfaceSafety - semanticRisk * 0.18),
+      : clamp01((1 - near75) * 0.62 + forwardClearance * 0.38 - blockedSurfaceRatio * 0.18),
+    forwardClearance,
+    groundSafety: clamp01(surfaceSafety),
     confidence: clamp01(confidence / values.length),
+    blockedSurfaceRatio,
     semanticRisk,
     approachRisk,
     obstacleLabel: blockingObject?.label,
@@ -268,7 +318,8 @@ function matchesTarget(object: SpatialDepthFrame['objects'][number], target?: Ne
 
 function groupClearance(lanes: LaneAssessment[]): number {
   return lanes.reduce((best, lane) => Math.max(best,
-    lane.clearance * 0.62 + lane.groundSafety * 0.28 + lane.confidence * 0.1 - lane.semanticRisk * 0.2), 0);
+    lane.forwardClearance * 0.5 + lane.clearance * 0.25 + lane.groundSafety * 0.2 +
+      lane.confidence * 0.05 - lane.blockedSurfaceRatio * 0.15), 0);
 }
 
 function directionFor(centerX: number): RouteDirection {

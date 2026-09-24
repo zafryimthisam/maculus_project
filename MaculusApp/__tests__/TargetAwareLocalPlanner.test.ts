@@ -1,6 +1,7 @@
 import { TargetAwareLocalPlanner } from '../src/next/TargetAwareLocalPlanner';
+import { SpatialDepthMemory } from '../src/next/SpatialDepthMemory';
 import { NextSceneEntity, SafetyState } from '../src/next/domain';
-import { DepthEstimation } from '../src/types';
+import { DepthEstimation, Detection } from '../src/types';
 
 const target = (cx = .5): NextSceneEntity => ({ id: 7, label: 'person', confidence: .9,
   zone: cx < .38 ? 'left' : cx > .62 ? 'right' : 'ahead', inPath: true, nearScore: .4,
@@ -32,9 +33,11 @@ test('reacquires forward path after avoidance and stops on lost target or ultras
   planner.plan(target(), sensor(), 1100);
   planner.observe(depth(.25, .15, .3), target(), 'pi', 1200);
   planner.plan(target(), sensor(), 1250);
-  expect(planner.plan(target(), sensor(), 1300).direction).toBe('center');
-  expect(planner.plan(undefined, sensor(), 1300).mode).toBe('TARGET_LOST');
-  expect(planner.plan(target(), sensor(39), 1300).instruction).toMatch(/^Stop/);
+  planner.observe(depth(.25, .15, .3), target(), 'pi', 1300);
+  planner.plan(target(), sensor(), 1350);
+  expect(planner.plan(target(), sensor(), 1400).direction).toBe('center');
+  expect(planner.plan(undefined, sensor(), 1400).mode).toBe('TARGET_LOST');
+  expect(planner.plan(target(), sensor(39), 1400).instruction).toMatch(/^Stop/);
 });
 
 test('downgrades unvalidated metric depth before calculating clearance', () => {
@@ -54,6 +57,34 @@ test('guides open walking without requiring an object target', () => {
 
   const walking = planner.plan(undefined, sensor(), 1150, 'walk', { moving: true, walking: true });
   expect(walking.instruction).toBe('Keep going forward.');
+});
+
+test('stops at a close wall using depth even when YOLO detects nothing', () => {
+  const planner = new TargetAwareLocalPlanner();
+  planner.observe(depth(.82, .84, .83), undefined, 'pi', 1000);
+
+  const result = planner.plan(undefined, sensor(), 1100, 'walk');
+
+  expect(result).toMatchObject({ status: 'blocked', direction: null, mode: 'WAIT_FOR_CLEARANCE' });
+  expect(result.instruction).toBe('Stop. I cannot see a safe path.');
+});
+
+test('keeps moving through a depth-clear centre when YOLO labels a far desk there', () => {
+  const planner = new TargetAwareLocalPlanner();
+  const memory = new SpatialDepthMemory();
+  const desk: Detection = {
+    label: 'dining table', score: .9, cx: .5, cy: .55, w: .28, h: .38,
+    x1: .36, y1: .36, x2: .64, y2: .74,
+  };
+  const spatial = memory.observe(depth(.28, .14, .3), [desk], 'pi', 1000)!;
+  const reading = planner.observe(spatial, undefined, 'pi', 1000)!;
+
+  const result = planner.plan(undefined, sensor(), 1100, 'walk');
+
+  expect(reading.center).toBeGreaterThan(reading.left);
+  expect(reading.center).toBeGreaterThan(reading.right);
+  expect(result).toMatchObject({ status: 'ready', direction: 'center', mode: 'FREE_WALK' });
+  expect(result.instruction).toBe('Path ahead looks open. Move forward.');
 });
 
 test('explains that an unavailable close obstacle sensor, not depth, caused the stop', () => {

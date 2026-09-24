@@ -482,6 +482,17 @@ function classifySurfaces(
   } else {
     const rowBaselines = Array.from({ length: height }, (_, y) =>
       quantile(nearMap.slice(y * width, (y + 1) * width), 0.5));
+    // A nearby wall can be smooth and uniform, which made the old row-only
+    // classifier call it floor. Measure the upper/middle depth in each column:
+    // floor normally becomes nearer toward the bottom, while a frontal wall
+    // remains near through this whole band.
+    const frontalNearByColumn = Array.from({ length: width }, (_, x) => {
+      const values: number[] = [];
+      for (let y = Math.floor(height * 0.28); y < Math.ceil(height * 0.56); y += 1) {
+        values.push(nearMap[y * width + x]);
+      }
+      return quantile(values, 0.55);
+    });
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const index = y * width + x;
@@ -494,13 +505,17 @@ function classifySurfaces(
         const verticalGradient = Math.abs(below - above) / 2;
         const lowerFrame = (y + 0.5) / height;
         const rowDifference = nearMap[index] - rowBaselines[y];
+        const frontalPlane = lowerFrame >= 0.3 && lowerFrame <= 0.82 &&
+          frontalNearByColumn[x] >= 0.62 && nearMap[index] >= frontalNearByColumn[x] - 0.18;
         // A smooth surface that follows its row's floor profile is walkable
         // even when it is physically close at the bottom of the image.
         if (rawMetricGrid && lowerFrame >= 0.3 && rawMetricGrid[index] <= 0.7) {
           // Without fixed mounting geometry a very close metric surface cannot
           // safely be called floor, so retain it as an obstacle.
           surfaces[index] = 'obstacle';
-        } else if (lowerFrame >= 0.5 && Math.abs(rowDifference) <= 0.13 &&
+        } else if (frontalPlane) {
+          surfaces[index] = 'obstacle';
+        } else if (lowerFrame >= 0.5 && rowDifference <= 0.13 &&
             horizontalGradient < 0.14 && verticalGradient < 0.16) {
           surfaces[index] = 'walkable';
         } else if (lowerFrame >= 0.3 && rowDifference > 0.14 &&
@@ -525,10 +540,10 @@ function classifySurfaces(
       for (let x = x1; x < x2; x += 1) {
         const index = y * width + x;
         const objectSurfaceDistance = object.footprintDistanceMetres ?? object.distanceMetres;
-        const sameSurface = object.isVeryClose ||
-          (units === 'metres' && objectSurfaceDistance !== undefined
-            ? Math.abs(grid[index] - objectSurfaceDistance) <= Math.max(0.3, objectSurfaceDistance * 0.28)
-            : nearMap[index] >= object.nearScore - 0.16);
+        const sameSurface = units === 'metres' && objectSurfaceDistance !== undefined
+          ? Math.abs(grid[index] - objectSurfaceDistance) <= Math.max(0.3, objectSurfaceDistance * 0.28)
+          : (object.isVeryClose && nearMap[index] >= 0.45) ||
+            (object.nearScore >= 0.58 && nearMap[index] >= Math.max(0.56, object.nearScore - 0.12));
         if (sameSurface) {surfaces[index] = 'obstacle';}
       }
     }
