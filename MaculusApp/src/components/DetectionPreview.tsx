@@ -159,10 +159,11 @@ export const DetectionPreview: React.FC<Props> = ({
           const width = Math.max(0.02, x2 - x1);
           const height = Math.max(0.02, y2 - y1);
           const score = Math.round(detection.score * 100);
-          const distance = detection.distanceMetres !== undefined &&
-            (detection.distanceConfidence ?? 0) >= 0.6
-            ? ` · ${(Math.round(detection.distanceMetres * 4) / 4).toFixed(2).replace(/\.00$/, '').replace(/0$/, '')}m`
-            : '';
+          const distance = detection.isVeryClose
+            ? ' · VERY CLOSE'
+            : detection.distanceMetres !== undefined && (detection.distanceConfidence ?? 0) >= 0.6
+              ? ` · ${(Math.round(detection.distanceMetres * 4) / 4).toFixed(2).replace(/\.00$/, '').replace(/0$/, '')}m`
+              : '';
 
           return (
             <View

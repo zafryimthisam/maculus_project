@@ -1,6 +1,15 @@
 import Foundation
 import React
+import UIKit
 import onnxruntime_objc
+
+private struct MaculusDepthImageLayout {
+  let image: UIImage
+  /** Visible source image inside the model's normalized output canvas. */
+  let contentRect: CGRect
+  let gridWidth: Int
+  let gridHeight: Int
+}
 
 @objc(MaculusDepth)
 final class MaculusDepth: NSObject {
@@ -79,12 +88,8 @@ final class MaculusDepth: NSObject {
           throw MaculusNativeError.message("Depth model is not loaded")
         }
         let image = try MaculusImage.decode(base64: base64Jpeg)
-        let scaled = MaculusImage.resized(
-          image,
-          width: self.inputSize,
-          height: self.inputSize
-        )
-        let rgb = try MaculusImage.rgbBytes(scaled)
+        let layout = self.prepareModelInput(image)
+        let rgb = try MaculusImage.rgbBytes(layout.image)
         let output = try MaculusORT.runUInt8(
           session: session,
           values: rgb,
@@ -94,9 +99,24 @@ final class MaculusDepth: NSObject {
         let depthMap = output.values.map { value in
           value.isFinite && value > 0 ? value : (self.metric ? 20 : 0)
         }
-        let nearMap = self.metric
+        let rawNearMap = self.metric
           ? depthMap.map { self.metricNearScore($0) }
           : try self.normalize(depthMap)
+        // Return a grid in the source frame's own orientation. Portrait phone
+        // frames are fitted into the fixed landscape metric graph and cropped
+        // back out here, so detector boxes and depth cells share coordinates.
+        let sourceDepthMap = self.remapToSource(
+          depthMap,
+          layout: layout,
+          mapWidth: self.outputWidth,
+          mapHeight: self.outputHeight
+        )
+        let sourceNearMap = self.remapToSource(
+          rawNearMap,
+          layout: layout,
+          mapWidth: self.outputWidth,
+          mapHeight: self.outputHeight
+        )
         let objectDepths = detections.enumerated().map { index, detection in
           let cx = detection.maculusDouble("cx", fallback: 0.5)
           let cy = detection.maculusDouble("cy", fallback: 0.5)
@@ -113,7 +133,9 @@ final class MaculusDepth: NSObject {
           var item = [
             "index": index,
             "nearScore": self.sample(
-              map: nearMap,
+              map: sourceNearMap,
+              width: layout.gridWidth,
+              height: layout.gridHeight,
               x1: innerX1,
               y1: innerY1,
               x2: innerX2,
@@ -121,34 +143,36 @@ final class MaculusDepth: NSObject {
             ),
           ] as [String: Any]
           if self.metric, let distance = self.sampleDistance(
-            map: depthMap, x1: innerX1, y1: innerY1, x2: innerX2, y2: innerY2
+            map: sourceDepthMap,
+            width: layout.gridWidth,
+            height: layout.gridHeight,
+            x1: innerX1,
+            y1: innerY1,
+            x2: innerX2,
+            y2: innerY2
           ) {
             item["distanceMetres"] = distance
             item["confidence"] = 0.45
           }
           return item
         }
-        // Preserve enough spatial structure for narrow obstacles and nine-lane
-        // surface reasoning without bridging the full model tensor.
-        let gridWidth = 64
-        let gridHeight = 48
-        let grid = (0..<(gridWidth * gridHeight)).map { index -> Double in
-          let x = min(self.outputWidth - 1, (index % gridWidth * 2 + 1) * self.outputWidth / (gridWidth * 2))
-          let y = min(self.outputHeight - 1, (index / gridWidth * 2 + 1) * self.outputHeight / (gridHeight * 2))
-          let index = y * self.outputWidth + x
-          let value = self.metric ? depthMap[index] : nearMap[index]
-          return value.isFinite ? Double(value) : 0
-        }
+        let gridWidth = layout.gridWidth
+        let gridHeight = layout.gridHeight
+        let compactMap = self.metric ? sourceDepthMap : sourceNearMap
+        let grid = compactMap.map { value in value.isFinite ? Double(value) : 0 }
         resolve([
           "grid": [
             "width": gridWidth, "height": gridHeight, "values": grid,
             "units": self.metric ? "metres" : "relative-nearness"
           ],
-          "width": self.outputWidth,
-          "height": self.outputHeight,
-          "leftNearScore": self.sample(map: nearMap, x1: 0, y1: 0, x2: 1.0 / 3.0, y2: 1),
-          "centerNearScore": self.sample(map: nearMap, x1: 1.0 / 3.0, y1: 0, x2: 2.0 / 3.0, y2: 1),
-          "rightNearScore": self.sample(map: nearMap, x1: 2.0 / 3.0, y1: 0, x2: 1, y2: 1),
+          "width": gridWidth,
+          "height": gridHeight,
+          "leftNearScore": self.sample(map: sourceNearMap, width: gridWidth, height: gridHeight,
+            x1: 0, y1: 0, x2: 1.0 / 3.0, y2: 1),
+          "centerNearScore": self.sample(map: sourceNearMap, width: gridWidth, height: gridHeight,
+            x1: 1.0 / 3.0, y1: 0, x2: 2.0 / 3.0, y2: 1),
+          "rightNearScore": self.sample(map: sourceNearMap, width: gridWidth, height: gridHeight,
+            x1: 2.0 / 3.0, y1: 0, x2: 1, y2: 1),
           "objectDepths": objectDepths,
           "units": self.metric ? "metres" : "relative-nearness",
           "modelName": self.modelName,
@@ -158,6 +182,81 @@ final class MaculusDepth: NSObject {
       } catch {
         reject("DEPTH_ESTIMATE_ERROR", error.localizedDescription, error)
       }
+    }
+  }
+
+  private func prepareModelInput(_ image: UIImage) -> MaculusDepthImageLayout {
+    let sourceWidth = CGFloat(image.cgImage?.width ?? Int(image.size.width))
+    let sourceHeight = CGFloat(image.cgImage?.height ?? Int(image.size.height))
+    let sourceAspect = max(0.01, sourceWidth / max(1, sourceHeight))
+    // The current metric graph was exported on a 4:3 tensor. Preserve an
+    // arbitrary source frame inside that canvas instead of stretching a
+    // portrait iPhone image to landscape.
+    let canvasAspect: CGFloat = metric ? 4.0 / 3.0 : 1
+    let contentRect: CGRect
+    if sourceAspect >= canvasAspect {
+      let height = canvasAspect / sourceAspect
+      contentRect = CGRect(x: 0, y: (1 - height) / 2, width: 1, height: height)
+    } else {
+      let width = sourceAspect / canvasAspect
+      contentRect = CGRect(x: (1 - width) / 2, y: 0, width: width, height: 1)
+    }
+
+    let format = UIGraphicsImageRendererFormat.default()
+    format.scale = 1
+    format.opaque = true
+    let square = UIGraphicsImageRenderer(
+      size: CGSize(width: inputSize, height: inputSize),
+      format: format
+    ).image { context in
+      // ImageNet mean becomes approximately zero after normalization and
+      // avoids adding a high-contrast artificial black border.
+      UIColor(red: 0.485, green: 0.456, blue: 0.406, alpha: 1).setFill()
+      context.cgContext.fill(CGRect(x: 0, y: 0, width: inputSize, height: inputSize))
+      image.draw(in: CGRect(
+        x: contentRect.minX * CGFloat(inputSize),
+        y: contentRect.minY * CGFloat(inputSize),
+        width: contentRect.width * CGFloat(inputSize),
+        height: contentRect.height * CGFloat(inputSize)
+      ))
+    }
+    let longestGridEdge = 64
+    let gridWidth: Int
+    let gridHeight: Int
+    if sourceAspect >= 1 {
+      gridWidth = longestGridEdge
+      gridHeight = max(12, Int((CGFloat(longestGridEdge) / sourceAspect).rounded()))
+    } else {
+      gridHeight = longestGridEdge
+      gridWidth = max(12, Int((CGFloat(longestGridEdge) * sourceAspect).rounded()))
+    }
+    return MaculusDepthImageLayout(
+      image: square,
+      contentRect: contentRect,
+      gridWidth: gridWidth,
+      gridHeight: gridHeight
+    )
+  }
+
+  private func remapToSource(
+    _ map: [Float],
+    layout: MaculusDepthImageLayout,
+    mapWidth: Int,
+    mapHeight: Int
+  ) -> [Float] {
+    guard mapWidth > 0, mapHeight > 0, map.count >= mapWidth * mapHeight else {
+      return [Float](repeating: 0, count: layout.gridWidth * layout.gridHeight)
+    }
+    return (0..<(layout.gridWidth * layout.gridHeight)).map { index in
+      let gridX = index % layout.gridWidth
+      let gridY = index / layout.gridWidth
+      let sourceU = (CGFloat(gridX) + 0.5) / CGFloat(layout.gridWidth)
+      let sourceV = (CGFloat(gridY) + 0.5) / CGFloat(layout.gridHeight)
+      let modelU = layout.contentRect.minX + sourceU * layout.contentRect.width
+      let modelV = layout.contentRect.minY + sourceV * layout.contentRect.height
+      let x = Int((modelU * CGFloat(mapWidth)).rounded(.down)).clamped(to: 0...(mapWidth - 1))
+      let y = Int((modelV * CGFloat(mapHeight)).rounded(.down)).clamped(to: 0...(mapHeight - 1))
+      return map[y * mapWidth + x]
     }
   }
 
@@ -204,23 +303,25 @@ final class MaculusDepth: NSObject {
 
   private func sample(
     map: [Float],
+    width: Int,
+    height: Int,
     x1: Double,
     y1: Double,
     x2: Double,
     y2: Double
   ) -> Double {
-    let left = Int(min(x1, x2).clamped(to: 0...1) * Double(outputWidth))
-      .clamped(to: 0...max(outputWidth - 1, 0))
-    let right = Int(max(x1, x2).clamped(to: 0...1) * Double(outputWidth))
-      .clamped(to: min(left + 1, outputWidth)...outputWidth)
-    let top = Int(min(y1, y2).clamped(to: 0...1) * Double(outputHeight))
-      .clamped(to: 0...max(outputHeight - 1, 0))
-    let bottom = Int(max(y1, y2).clamped(to: 0...1) * Double(outputHeight))
-      .clamped(to: min(top + 1, outputHeight)...outputHeight)
+    let left = Int(min(x1, x2).clamped(to: 0...1) * Double(width))
+      .clamped(to: 0...max(width - 1, 0))
+    let right = Int(max(x1, x2).clamped(to: 0...1) * Double(width))
+      .clamped(to: min(left + 1, width)...width)
+    let top = Int(min(y1, y2).clamped(to: 0...1) * Double(height))
+      .clamped(to: 0...max(height - 1, 0))
+    let bottom = Int(max(y1, y2).clamped(to: 0...1) * Double(height))
+      .clamped(to: min(top + 1, height)...height)
     var values: [Float] = []
     for y in top..<bottom {
       for x in left..<right {
-        let index = y * outputWidth + x
+        let index = y * width + x
         if index < map.count { values.append(map[index]) }
       }
     }
@@ -233,23 +334,25 @@ final class MaculusDepth: NSObject {
 
   private func sampleDistance(
     map: [Float],
+    width: Int,
+    height: Int,
     x1: Double,
     y1: Double,
     x2: Double,
     y2: Double
   ) -> Double? {
-    let left = Int(min(x1, x2).clamped(to: 0...1) * Double(outputWidth))
-      .clamped(to: 0...max(outputWidth - 1, 0))
-    let right = Int(max(x1, x2).clamped(to: 0...1) * Double(outputWidth))
-      .clamped(to: min(left + 1, outputWidth)...outputWidth)
-    let top = Int(min(y1, y2).clamped(to: 0...1) * Double(outputHeight))
-      .clamped(to: 0...max(outputHeight - 1, 0))
-    let bottom = Int(max(y1, y2).clamped(to: 0...1) * Double(outputHeight))
-      .clamped(to: min(top + 1, outputHeight)...outputHeight)
+    let left = Int(min(x1, x2).clamped(to: 0...1) * Double(width))
+      .clamped(to: 0...max(width - 1, 0))
+    let right = Int(max(x1, x2).clamped(to: 0...1) * Double(width))
+      .clamped(to: min(left + 1, width)...width)
+    let top = Int(min(y1, y2).clamped(to: 0...1) * Double(height))
+      .clamped(to: 0...max(height - 1, 0))
+    let bottom = Int(max(y1, y2).clamped(to: 0...1) * Double(height))
+      .clamped(to: min(top + 1, height)...height)
     var values: [Float] = []
     for y in top..<bottom {
       for x in left..<right {
-        let index = y * outputWidth + x
+        let index = y * width + x
         if index < map.count, map[index].isFinite, map[index] >= 0.15, map[index] <= 20 {
           values.append(map[index])
         }

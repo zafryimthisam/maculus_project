@@ -57,6 +57,7 @@ export interface NextSceneEntity {
   nearScore: number;
   distanceMetres?: number;
   distanceConfidence?: number;
+  isVeryClose?: boolean;
   firstSeenAt: number;
   lastSeenAt: number;
   visibility: EntityVisibility;

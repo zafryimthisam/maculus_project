@@ -62,7 +62,7 @@ test('resets temporal state when the camera source changes', () => {
   expect(pi!.confidence[0]).toBeCloseTo(0.45);
 });
 
-test('keeps metric object distances in metres and requires temporal agreement', () => {
+test('keeps unvalidated metric output internal and exposes relative navigation only', () => {
   const memory = new SpatialDepthMemory();
   const metric = (distance: number): DepthEstimation => ({
     grid: {width: WIDTH, height: HEIGHT, units: 'metres', values: Array(WIDTH * HEIGHT).fill(distance)},
@@ -71,12 +71,33 @@ test('keeps metric object distances in metres and requires temporal agreement', 
   const first = memory.observe(metric(2), [chair], 'device', 1000);
   expect(first!.objects[0].distanceConfidence).toBeLessThan(0.6);
   const second = memory.observe(metric(2.05), [chair], 'device', 1200);
-  expect(second!.grid.units).toBe('metres');
+  expect(second!.grid.units).toBe('relative-nearness');
+  expect(second!.grid.scaleValidated).toBe(false);
   expect(second!.objects[0].distanceMetres).toBeGreaterThan(1.9);
   expect(second!.objects[0].distanceMetres).toBeLessThan(2.1);
-  expect(second!.objects[0].distanceConfidence).toBeGreaterThanOrEqual(0.6);
+  expect(second!.objects[0].distanceConfidence).toBeLessThan(0.6);
+  expect(second!.objects[0].distanceReliable).toBe(false);
   const enriched = attachDepthToDetections([chair], second);
-  expect(enriched[0].distanceMetres).toBe(second!.objects[0].distanceMetres);
+  expect(enriched[0].distanceMetres).toBeUndefined();
+});
+
+test('treats a frame-filling person as very close when metric scale says otherwise', () => {
+  const memory = new SpatialDepthMemory();
+  const metric: DepthEstimation = {
+    grid: {width: WIDTH, height: HEIGHT, units: 'metres', values: Array(WIDTH * HEIGHT).fill(1.75)},
+    width: WIDTH, height: HEIGHT, leftNearScore: 0, centerNearScore: 0, rightNearScore: 0, objectDepths: [],
+  };
+  const closePerson: Detection = {
+    label: 'person', score: 0.94, cx: 0.5, cy: 0.5, w: 0.94, h: 0.96,
+    x1: 0.03, y1: 0.02, x2: 0.97, y2: 0.98,
+  };
+  const frame = memory.observe(metric, [closePerson], 'pi', 1000, undefined, '640x480')!;
+  const enriched = attachDepthToDetections([closePerson], frame);
+  expect(frame.objects[0]).toMatchObject({isVeryClose: true, distanceReliable: false});
+  expect(frame.objects[0].nearScore).toBeGreaterThanOrEqual(0.96);
+  expect(enriched[0]).toMatchObject({isVeryClose: true});
+  expect(enriched[0].distanceMetres).toBeUndefined();
+  expect(frame.surfaces[10 * WIDTH + 9]).toBe('obstacle');
 });
 
 test('semantic objects mark only their lower footprint instead of the full box', () => {
@@ -87,7 +108,7 @@ test('semantic objects mark only their lower footprint instead of the full box',
   expect(frame.surfaces[9 * WIDTH + 9]).toBe('obstacle');
 });
 
-test('uses measured Pi geometry to keep close floor walkable and raised structure occupied', () => {
+test('does not apply measured Pi floor geometry to an unvalidated metric scale', () => {
   const intrinsics = scaledIntrinsics(PI_CAMERA_GEOMETRY, WIDTH, HEIGHT);
   const floor = Array.from({length: HEIGHT}, (_row, y) => Array.from({length: WIDTH}, (_column, x) =>
     expectedFloorDepth(PI_CAMERA_GEOMETRY, intrinsics, x + 0.5, y + 0.5) ?? 8)).flat();
@@ -97,6 +118,8 @@ test('uses measured Pi geometry to keep close floor walkable and raised structur
   });
   const floorFrame = new SpatialDepthMemory().observe(metric(floor), [], 'pi', 1000, undefined, '640x480')!;
   expect(floorFrame.geometry.calibrated).toBe(true);
+  expect(floorFrame.geometry.distanceCalibrated).toBe(false);
+  expect(floorFrame.grid.units).toBe('relative-nearness');
   expect(floorFrame.surfaces[10 * WIDTH + 9]).toBe('walkable');
 
   const blocked = [...floor];
@@ -104,5 +127,5 @@ test('uses measured Pi geometry to keep close floor walkable and raised structur
     blocked[y * WIDTH + x] = floor[y * WIDTH + x] * 0.55;
   }
   const blockedFrame = new SpatialDepthMemory().observe(metric(blocked), [], 'pi', 1000, undefined, '640x480')!;
-  expect(blockedFrame.surfaces[9 * WIDTH + 9]).toBe('obstacle');
+  expect(blockedFrame.surfaces[9 * WIDTH + 9]).toBe('unknown');
 });

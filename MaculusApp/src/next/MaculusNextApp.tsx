@@ -182,7 +182,9 @@ export default function MaculusNextApp(): React.JSX.Element {
         </View>
 
         <View style={styles.connectionCard}>
-          <Text style={styles.cardLabel}>DEPTH CLEARANCE & DISTANCE</Text>
+          <Text style={styles.cardLabel}>
+            {state.depthReading.units === 'metres' ? 'DEPTH CLEARANCE & DISTANCE' : 'DEPTH CLEARANCE'}
+          </Text>
           <Text style={styles.cardBody}>
             AI {state.depthReading.units === 'metres' ? 'metric corridor' : 'relative clearance'}: {depthFresh
               ? `Left ${Math.round(state.depthReading.left! * 100)}% · Center ${Math.round(state.depthReading.center! * 100)}% · Right ${Math.round(state.depthReading.right! * 100)}%`
@@ -207,7 +209,7 @@ export default function MaculusNextApp(): React.JSX.Element {
           <Text style={styles.diagnosticText}>
             {state.depthReading.units === 'metres'
               ? `Depth is estimated in metres. ${state.depthReading.calibrationMessage}.`
-              : 'Clearance summarizes a nine-lane temporal surface map; relative scores are not physical distance.'}
+              : `Clearance summarizes a nine-lane temporal surface map; relative scores are not physical distance. ${state.depthReading.calibrationMessage}.`}
           </Text>
           <Text style={styles.cardBody}>
             iPhone motion: {state.userMotion.walking
@@ -279,7 +281,9 @@ export default function MaculusNextApp(): React.JSX.Element {
 
             <View style={styles.card}>
               <Text style={styles.cardLabel}>
-                {state.depthPreviewGrid?.units === 'metres' ? 'LIVE METRIC DEPTH & PATH PREVIEW' : 'LIVE RELATIVE DEPTH PREVIEW'}
+                {state.depthPreviewGrid?.units === 'metres' && state.depthPreviewGrid.scaleValidated === true
+                  ? 'LIVE METRIC DEPTH & PATH PREVIEW'
+                  : 'LIVE RELATIVE DEPTH & PATH PREVIEW'}
               </Text>
               <Text style={styles.previewSource} accessibilityLiveRegion="polite">
                 Source: {cameraSourceLabel(
@@ -304,9 +308,9 @@ export default function MaculusNextApp(): React.JSX.Element {
                 </View>
               )}
               <Text style={styles.previewFootnote}>
-                {state.depthPreviewGrid?.units === 'metres'
+                {state.depthPreviewGrid?.units === 'metres' && state.depthPreviewGrid.scaleValidated === true
                   ? 'Depth color is measured in metres. Green is expected floor, red is occupied, orange is a possible drop, and gray is unknown.'
-                  : 'Cool colors are farther away; warm colors are closer. Green is likely floor and red is occupied; relative depth is not metres.'}
+                  : 'Cool colors are farther away and warm colors are closer. Green is likely floor and red is occupied. Exact metres stay hidden until this camera is physically validated.'}
               </Text>
             </View>
           </>

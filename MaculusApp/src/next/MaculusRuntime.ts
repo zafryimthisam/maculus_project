@@ -1378,6 +1378,7 @@ function previewDetections(snapshot: NextSceneSnapshot): Detection[] {
     nearScore: entity.nearScore,
     distanceMetres: entity.distanceMetres,
     distanceConfidence: entity.distanceConfidence,
+    isVeryClose: entity.isVeryClose,
   }));
 }
 

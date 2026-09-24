@@ -61,8 +61,10 @@ export interface Detection {
   nearScore?: number;
   /** Temporally stabilized metric depth at the object's physical footprint. */
   distanceMetres?: number;
-  /** 0..1 confidence based on valid samples and agreement across frames. */
+  /** 0..1 confidence based on calibrated samples and agreement across frames. */
   distanceConfidence?: number;
+  /** Conservative visual/depth signal used when exact metric scale is unsafe. */
+  isVeryClose?: boolean;
 }
 
 export interface ModelInfo {
@@ -102,6 +104,9 @@ export interface DepthGrid {
   values: number[];
   /** Relative scores must never be back-projected as metres. */
   units: 'relative-nearness' | 'metres';
+  /** Exact metre labels are allowed only after physical camera validation. */
+  scaleValidated?: boolean;
+  calibrationId?: string | null;
 }
 
 export interface DepthEstimation {

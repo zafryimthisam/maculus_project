@@ -37,10 +37,10 @@ test('reacquires forward path after avoidance and stops on lost target or ultras
   expect(planner.plan(target(), sensor(39), 1300).instruction).toMatch(/^Stop/);
 });
 
-test('accepts metric depth without treating metres as normalized clearance', () => {
+test('downgrades unvalidated metric depth before calculating clearance', () => {
   const planner = new TargetAwareLocalPlanner();
   const metric = depth(.2, .2, .2); metric.grid!.units = 'metres';
-  expect(planner.observe(metric, target(), 'pi', 1000)).toMatchObject({units: 'metres'});
+  expect(planner.observe(metric, target(), 'pi', 1000)).toMatchObject({units: 'relative-nearness'});
   expect(planner.plan(target(), sensor(), 1100).status).toBe('blocked');
 });
 

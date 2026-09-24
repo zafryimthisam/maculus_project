@@ -2,8 +2,10 @@
 
 Maculus prefers the official Depth Anything V2 Metric Indoor Small checkpoint
 and falls back to the existing relative model if the metric asset is absent.
-The metric tensor remains in metres through temporal fusion and planning. Only
-the diagnostic color preview converts it to a display scale.
+The raw metric tensor remains internal until the exact camera source, crop, and
+resolution have a physically validated distance profile. An unvalidated tensor
+is converted to relative nearness before planning and never produces an exact
+metre label or a metric preview legend.
 
 The Pi camera profile was measured at 640×480 from 15 checkerboard views. Its
 intrinsics, distortion, 1.315 m mounting height, and camera-to-floor transform
@@ -20,9 +22,12 @@ mount, crop, rotation, or resolution requires a new calibration.
   conservative until confirmed.
 - Object semantics mark only the lower physical footprint. A complete YOLO box
   never blocks a route by itself.
-- Object distance uses a robust lower-interior sample, then temporal agreement.
-  The UI and scene description expose a distance only after confidence reaches
-  the stable threshold.
+- Collision distance samples the nearest substantial object surface separately
+  from the lower footprint used by path planning.
+- Temporal agreement cannot validate absolute accuracy. Exact metres require a
+  source-specific monotonic calibration in `src/config/DepthDistanceCalibration.ts`.
+- A frame-filling person or dynamic object is treated as very close when the
+  unvalidated metric model contradicts the visible object size.
 - The ultrasonic sensor remains the independent immediate close-range stop.
 
 ## Required supervised validation
@@ -32,3 +37,9 @@ supervised test confirms it. Before enabling unsupervised walking, measure
 targets at 0.5, 1, 1.5, 2, 3, and 5 metres; exercise side openings, furniture
 beside the route, glossy and dark floors, camera pans, source switching, and a
 continuous 10-minute thermal/memory run. Recalibrate after any mounting change.
+
+Record at least two additional held-out distances that are not calibration
+anchors. Add separate profiles for Pi landscape, iPhone portrait, and iPhone
+landscape. Set a profile's `validated` flag only when corrected held-out errors
+are acceptable throughout the navigation range; never derive one global scale
+factor from a single close image.

@@ -26,6 +26,21 @@ function detection(
 }
 
 describe('MaculusNext SessionSceneStore', () => {
+  it('describes a contradictory frame-filling person as very close instead of using false metres', () => {
+    const store = new SessionSceneStore(['Riley']);
+    const close = detection('person', 0.5, 0.94, {
+      w: 0.94, h: 0.96, x1: 0.03, y1: 0.02, x2: 0.97, y2: 0.98,
+      nearScore: 0.96, isVeryClose: true,
+    });
+    for (let frame = 1; frame <= 5; frame += 1) {
+      store.update({frameKey: `close-${frame}`, timestamp: frame * 100, detections: [close]});
+    }
+    const snapshot = store.getSnapshot(500);
+    expect(snapshot.description).toContain('very close');
+    expect(snapshot.description).not.toContain('metres away');
+    expect(snapshot.pathBlocked).toBe(true);
+  });
+
   it('keeps a random person alias for the whole session and reacquires by embedding', () => {
     const store = new SessionSceneStore(['Alex', 'Sam']);
     for (let frame = 1; frame <= 3; frame += 1) {

@@ -11,6 +11,10 @@ import {
   geometryForFrame,
   scaledIntrinsics,
 } from '../config/PiCameraGeometry';
+import {
+  calibrateDepthDistance,
+  distanceCalibrationForFrame,
+} from '../config/DepthDistanceCalibration';
 
 export type SurfaceKind = DepthSurfaceKind;
 
@@ -26,6 +30,9 @@ export interface SemanticDepthObject {
   nearScore: number;
   distanceMetres?: number;
   distanceConfidence?: number;
+  footprintDistanceMetres?: number;
+  distanceReliable: boolean;
+  isVeryClose: boolean;
   /** Positive values mean that the object appears to be approaching. */
   approachRate: number;
   /** Image-relative motion after compensating for the estimated camera shift. */
@@ -55,6 +62,8 @@ export interface SpatialDepthFrame {
   geometry: {
     calibrated: boolean;
     navigationValidated: boolean;
+    distanceCalibrated: boolean;
+    distanceCalibrationId: string | null;
     profileId: string | null;
     message: string;
   };
@@ -65,6 +74,8 @@ interface PreviousObject {
   nearScore: number;
   distanceMetres?: number;
   distanceConfidence?: number;
+  distanceReliable: boolean;
+  isVeryClose: boolean;
   cx: number;
   cy: number;
   w: number;
@@ -85,9 +96,9 @@ const SOLID_LABELS = new Set([
 const FAST_DYNAMIC_LABELS = new Set(['person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'train', 'dog', 'cat']);
 
 /**
- * Maintains a short-lived motion-compensated depth memory. Metric values remain
- * metres throughout the planner. Relative fallback values remain explicitly
- * relative and are never back-projected through the calibrated camera.
+ * Maintains a short-lived motion-compensated depth memory. Metric values stay
+ * internal until the physical camera scale is validated; otherwise the route
+ * planner receives explicit relative nearness and cannot mistake it for metres.
  */
 export class SpatialDepthMemory {
   private previousGrid: number[] | null = null;
@@ -126,9 +137,11 @@ export class SpatialDepthMemory {
     }
 
     const metric = input.units === 'metres';
+    const distanceProfile = metric ? distanceCalibrationForFrame(source, frameResolution) : null;
+    const distanceScaleValidated = metric && calibrateDepthDistance(1, distanceProfile).validated;
     const valid = input.values.map(value => metric ? validMetricDepth(value) : Number.isFinite(value));
     const raw = input.values.map((value, index) => metric
-      ? valid[index] ? value : 20
+      ? valid[index] ? calibrateDepthDistance(value, distanceProfile).metres : 20
       : clamp01(value));
     const comparable = toNearMap(raw, input.units);
     const previous = this.previousGrid;
@@ -183,30 +196,52 @@ export class SpatialDepthMemory {
     const fusedNear = toNearMap(fused, input.units);
     const objects = this.observeObjects(
       detections, fused, fusedNear, input.units, input.width, input.height, observedAt, shift.x, shift.y,
+      distanceScaleValidated,
     );
     const profile = metric ? geometryForFrame(source, frameResolution) : null;
+    const navigationUnits: DepthGrid['units'] = metric && !distanceScaleValidated
+      ? 'relative-nearness'
+      : input.units;
+    const navigationGrid = navigationUnits === 'relative-nearness' ? fusedNear : fused;
     const surfaces = classifySurfaces(
-      fused, fusedNear, input.units, confidence, input.width, input.height, objects, profile,
+      navigationGrid, fusedNear, navigationUnits, confidence, input.width, input.height, objects,
+      distanceScaleValidated ? profile : null,
+      metric ? fused : null,
     );
     const geometry = profile ? {
       calibrated: true,
       navigationValidated: profile.navigationValidated,
+      distanceCalibrated: distanceScaleValidated,
+      distanceCalibrationId: distanceProfile?.id ?? null,
       profileId: profile.id,
-      message: profile.navigationValidated
-        ? 'Measured Pi camera geometry active'
-        : 'Measured Pi geometry active; supervised walking validation is still required',
+      message: distanceScaleValidated
+        ? profile.navigationValidated
+          ? 'Measured Pi camera geometry and distance scale active'
+          : 'Measured Pi geometry and distance scale active; supervised walking validation is still required'
+        : 'Measured Pi geometry found, but metric distance scale is not validated; using relative closeness',
     } : {
       calibrated: false,
       navigationValidated: false,
+      distanceCalibrated: distanceScaleValidated,
+      distanceCalibrationId: distanceProfile?.id ?? null,
       profileId: null,
       message: metric
-        ? source === 'pi'
-          ? 'Pi frame does not match the measured 640×480 calibration'
-          : 'Phone camera has metric depth but no fixed mounting calibration'
+        ? distanceScaleValidated
+          ? 'Validated camera distance scale active without fixed floor geometry'
+          : source === 'pi'
+            ? 'Pi frame or metric scale is not validated; using relative closeness'
+            : 'Phone camera metric scale is not validated; using relative closeness'
         : 'Relative-depth fallback; physical camera geometry is unavailable',
     };
     const result: SpatialDepthFrame = {
-      grid: { width: input.width, height: input.height, values: fused, units: input.units },
+      grid: {
+        width: input.width,
+        height: input.height,
+        values: navigationGrid,
+        units: navigationUnits,
+        scaleValidated: distanceScaleValidated,
+        calibrationId: distanceProfile?.id ?? null,
+      },
       confidence,
       surfaces,
       objects,
@@ -239,18 +274,27 @@ export class SpatialDepthMemory {
     observedAt: number,
     horizontalShiftCells: number,
     verticalShiftCells: number,
+    distanceScaleValidated: boolean,
   ): SemanticDepthObject[] {
     const used = new Set<number>();
     const objects = detections.map((detection, detectionIndex): SemanticDepthObject => {
-      const metricSample = units === 'metres' ? sampleMetricFootprint(grid, width, height, detection) : null;
-      const rawDistance = metricSample?.distance;
+      const footprintSample = units === 'metres' ? sampleMetricFootprint(grid, width, height, detection) : null;
+      const nearestSample = units === 'metres' ? sampleMetricNearestSurface(grid, width, height, detection) : null;
+      const rawDistance = nearestSample?.distance ?? footprintSample?.distance;
+      const visualVeryClose = visuallyVeryClose(detection);
+      const metricVeryClose = rawDistance !== undefined && rawDistance <= 0.65;
+      const distanceContradiction = visualVeryClose && rawDistance !== undefined && rawDistance > 1;
+      const isVeryClose = visualVeryClose || metricVeryClose;
       let nearScore = rawDistance === undefined
         ? sampleRelativeObject(nearMap, width, height, detection)
         : metricNearScore(rawDistance);
+      if (isVeryClose) {nearScore = Math.max(nearScore, 0.96);}
       let distanceMetres = rawDistance;
       // A single frame never earns spoken-distance confidence. Stable temporal
       // agreement raises this above the 0.6 presentation threshold.
-      let distanceConfidence = metricSample?.coverage ? clamp01(0.25 + metricSample.coverage * 0.2) : undefined;
+      const sampleCoverage = nearestSample?.coverage ?? footprintSample?.coverage ?? 0;
+      let distanceConfidence = sampleCoverage ? clamp01(0.25 + sampleCoverage * 0.2) : undefined;
+      let distanceReliable = distanceScaleValidated && !distanceContradiction;
       let previousIndex = -1;
       let best = 0;
       this.previousObjects.forEach((candidate, index) => {
@@ -272,7 +316,12 @@ export class SpatialDepthMemory {
         distanceConfidence = stable
           ? clamp01((prior.distanceConfidence ?? 0.35) + 0.22)
           : clamp01((prior.distanceConfidence ?? 0.35) - 0.18);
+        distanceReliable = distanceReliable && prior.distanceReliable;
         nearScore = metricNearScore(distanceMetres);
+        if (isVeryClose) {nearScore = Math.max(nearScore, 0.96);}
+      }
+      if (!distanceReliable && distanceConfidence !== undefined) {
+        distanceConfidence = Math.min(distanceConfidence, distanceContradiction ? 0.1 : 0.45);
       }
       const area = detection.w * detection.h;
       const previousArea = prior ? prior.w * prior.h : area;
@@ -299,6 +348,9 @@ export class SpatialDepthMemory {
         nearScore,
         distanceMetres,
         distanceConfidence,
+        footprintDistanceMetres: footprintSample?.distance,
+        distanceReliable,
+        isVeryClose,
         approachRate,
         relativeMotion,
         obstacleWeight: obstacleRisk,
@@ -317,6 +369,8 @@ export class SpatialDepthMemory {
       nearScore: object.nearScore,
       distanceMetres: object.distanceMetres,
       distanceConfidence: object.distanceConfidence,
+      distanceReliable: object.distanceReliable,
+      isVeryClose: object.isVeryClose,
       cx: object.cx,
       cy: object.cy,
       w: object.w,
@@ -342,8 +396,9 @@ export function attachDepthToDetections(
     return object ? {
       ...detection,
       nearScore: object.nearScore,
-      distanceMetres: object.distanceMetres,
-      distanceConfidence: object.distanceConfidence,
+      distanceMetres: object.distanceReliable ? object.distanceMetres : undefined,
+      distanceConfidence: object.distanceReliable ? object.distanceConfidence : undefined,
+      isVeryClose: object.isVeryClose,
     } : detection;
   });
 }
@@ -402,6 +457,7 @@ function classifySurfaces(
   height: number,
   objects: SemanticDepthObject[],
   profile: CameraGeometryProfile | null,
+  rawMetricGrid: number[] | null,
 ): SurfaceKind[] {
   const surfaces = new Array<SurfaceKind>(grid.length).fill('unknown');
   if (units === 'metres' && profile) {
@@ -440,7 +496,7 @@ function classifySurfaces(
         const rowDifference = nearMap[index] - rowBaselines[y];
         // A smooth surface that follows its row's floor profile is walkable
         // even when it is physically close at the bottom of the image.
-        if (units === 'metres' && lowerFrame >= 0.3 && grid[index] <= 0.7) {
+        if (rawMetricGrid && lowerFrame >= 0.3 && rawMetricGrid[index] <= 0.7) {
           // Without fixed mounting geometry a very close metric surface cannot
           // safely be called floor, so retain it as an obstacle.
           surfaces[index] = 'obstacle';
@@ -468,9 +524,11 @@ function classifySurfaces(
     for (let y = y1; y < y2; y += 1) {
       for (let x = x1; x < x2; x += 1) {
         const index = y * width + x;
-        const sameSurface = units === 'metres' && object.distanceMetres !== undefined
-          ? Math.abs(grid[index] - object.distanceMetres) <= Math.max(0.3, object.distanceMetres * 0.28)
-          : nearMap[index] >= object.nearScore - 0.16;
+        const objectSurfaceDistance = object.footprintDistanceMetres ?? object.distanceMetres;
+        const sameSurface = object.isVeryClose ||
+          (units === 'metres' && objectSurfaceDistance !== undefined
+            ? Math.abs(grid[index] - objectSurfaceDistance) <= Math.max(0.3, objectSurfaceDistance * 0.28)
+            : nearMap[index] >= object.nearScore - 0.16);
         if (sameSurface) {surfaces[index] = 'obstacle';}
       }
     }
@@ -510,6 +568,39 @@ function sampleMetricFootprint(
     distance: quantile(values, 0.4),
     coverage: clamp01(values.length / expectedSamples),
   };
+}
+
+function sampleMetricNearestSurface(
+  grid: number[], width: number, height: number,
+  box: Pick<Detection, 'x1' | 'y1' | 'x2' | 'y2'>,
+): {distance: number; coverage: number} | null {
+  const boxWidth = box.x2 - box.x1;
+  const boxHeight = box.y2 - box.y1;
+  const values = sampleRegion(grid, width, height,
+    box.x1 + boxWidth * 0.18,
+    box.y1 + boxHeight * 0.12,
+    box.x2 - boxWidth * 0.18,
+    box.y1 + boxHeight * 0.82).filter(validMetricDepth);
+  if (!values.length) {return null;}
+  const expectedSamples = Math.max(1,
+    Math.ceil(boxWidth * 0.64 * width) * Math.ceil(boxHeight * 0.7 * height));
+  return {
+    // A low, non-minimum percentile represents the nearest substantial
+    // surface without letting one noisy pixel claim an emergency distance.
+    distance: quantile(values, 0.18),
+    coverage: clamp01(values.length / expectedSamples),
+  };
+}
+
+export function visuallyVeryClose(box: Pick<Detection, 'label' | 'w' | 'h'>): boolean {
+  const area = Math.max(0, box.w) * Math.max(0, box.h);
+  if (box.label === 'person') {
+    return area >= 0.4 || box.w >= 0.72 || (box.h >= 0.88 && box.w >= 0.38);
+  }
+  if (FAST_DYNAMIC_LABELS.has(box.label)) {
+    return area >= 0.46 || Math.max(box.w, box.h) >= 0.88;
+  }
+  return area >= 0.58;
 }
 
 function sampleRegion(

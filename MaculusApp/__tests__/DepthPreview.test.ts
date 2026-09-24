@@ -26,10 +26,19 @@ test('returns no preview for malformed grids and clamps the color scale', () => 
 
 test('maps metric depth only for display and summarizes the path overlay', () => {
   expect(downsampleDepthGrid({
-    width: 2, height: 2, units: 'metres', values: [0.35, 2, 4, 6],
+    width: 2, height: 2, units: 'metres', scaleValidated: true, values: [0.35, 2, 4, 6],
   }, 2, 2)).toEqual([1, expect.any(Number), expect.any(Number), 0]);
   expect(downsampleSurfaces([
     'walkable', 'walkable',
     'obstacle', 'unknown',
   ], 2, 2, 2, 2)).toEqual(['walkable', 'walkable', 'obstacle', 'unknown']);
+});
+
+test('renders unvalidated metric tensors as relative contrast without metre assumptions', () => {
+  const values = downsampleDepthGrid({
+    width: 2, height: 2, units: 'metres', scaleValidated: false, values: [1.5, 1.7, 1.8, 2],
+  }, 2, 2);
+  expect(values[0]).toBe(1);
+  expect(values[3]).toBe(0);
+  expect(values[0]).toBeGreaterThan(values[2]);
 });

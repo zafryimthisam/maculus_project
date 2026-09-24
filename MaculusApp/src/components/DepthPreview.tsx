@@ -32,6 +32,7 @@ export function downsampleDepthGrid(
       columns <= 0 || rows <= 0) {
     return [];
   }
+  const displayValues = depthDisplayValues(grid);
   const result: number[] = [];
   for (let row = 0; row < rows; row += 1) {
     const y1 = Math.floor(row * grid.height / rows);
@@ -42,9 +43,9 @@ export function downsampleDepthGrid(
       const values: number[] = [];
       for (let y = y1; y < Math.min(y2, grid.height); y += 1) {
         for (let x = x1; x < Math.min(x2, grid.width); x += 1) {
-          const value = grid.values[y * grid.width + x];
+          const value = displayValues[y * grid.width + x];
           if (Number.isFinite(value)) {
-            values.push(grid.units === 'metres' ? metricDepthToNear(value) : clamp01(value));
+            values.push(clamp01(value));
           }
         }
       }
@@ -113,7 +114,7 @@ export const DepthPreview: React.FC<Props> = ({ grid, clearance, surfaces }) => 
   if (!grid || !cells.length) {return null;}
 
   const accessibilityLabel = [
-    grid.units === 'metres'
+    grid.units === 'metres' && grid.scaleValidated === true
       ? 'Metric depth preview. Cool colors are farther away and warm colors are closer.'
       : 'Relative depth preview. Cool colors are farther away and warm colors are closer.',
     clearance.left === null ? null : `Left clearance ${Math.round(clearance.left * 100)} percent.`,
@@ -154,9 +155,9 @@ export const DepthPreview: React.FC<Props> = ({ grid, clearance, surfaces }) => 
         <LaneLabel label="RIGHT" value={clearance.right} />
       </View>
       <View style={styles.legend} pointerEvents="none">
-        <Text style={styles.legendText}>{grid.units === 'metres' ? '6M+' : 'FARTHER'}</Text>
+        <Text style={styles.legendText}>{grid.units === 'metres' && grid.scaleValidated === true ? '6M+' : 'FARTHER'}</Text>
         <View style={styles.legendLine} />
-        <Text style={styles.legendText}>{grid.units === 'metres' ? '0.35M' : 'CLOSER'}</Text>
+        <Text style={styles.legendText}>{grid.units === 'metres' && grid.scaleValidated === true ? '0.35M' : 'CLOSER'}</Text>
       </View>
       {surfaceCells.length > 0 && (
         <View style={styles.surfaceLegend} pointerEvents="none">
@@ -181,6 +182,19 @@ function rgbString(rgb: number[]): string {
 
 function metricDepthToNear(distanceMetres: number): number {
   return clamp01((6 - distanceMetres) / 5.65);
+}
+
+function depthDisplayValues(grid: DepthGrid): number[] {
+  if (grid.units !== 'metres') {return grid.values.map(clamp01);}
+  if (grid.scaleValidated === true) {return grid.values.map(metricDepthToNear);}
+  const finite = grid.values.filter(value => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  if (!finite.length) {return grid.values.map(() => 0);}
+  const nearDepth = finite[Math.floor((finite.length - 1) * 0.05)];
+  const farDepth = finite[Math.floor((finite.length - 1) * 0.95)];
+  const range = Math.max(0.000001, farDepth - nearDepth);
+  return grid.values.map(value => Number.isFinite(value)
+    ? clamp01((farDepth - value) / range)
+    : 0);
 }
 
 function surfaceOverlayColor(surface: DepthSurfaceKind): string {
