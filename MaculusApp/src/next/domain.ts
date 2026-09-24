@@ -112,6 +112,7 @@ export interface NextRuntimeState {
     units: 'relative-nearness' | 'metres' | null;
     calibrated: boolean;
     calibrationMessage: string;
+    staleAfterMs: number;
   };
   depthPreviewGrid: DepthGrid | null;
   depthPreviewSurfaces: DepthSurfaceKind[] | null;
@@ -191,7 +192,7 @@ export const INITIAL_NEXT_RUNTIME_STATE: NextRuntimeState = {
   sensor: EMPTY_SAFETY_STATE,
   depthReading: {
     left: null, center: null, right: null, observedAt: null, source: 'none', inferenceMs: null,
-    units: null, calibrated: false, calibrationMessage: 'No camera geometry is active',
+    units: null, calibrated: false, calibrationMessage: 'No camera geometry is active', staleAfterMs: 1600,
   },
   depthPreviewGrid: null,
   depthPreviewSurfaces: null,

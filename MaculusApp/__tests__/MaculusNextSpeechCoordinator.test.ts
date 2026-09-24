@@ -145,6 +145,21 @@ describe('MaculusNext SpeechCoordinator', () => {
     });
   });
 
+  it('interrupts ordinary narration with a short action-first obstacle warning', async () => {
+    const coordinator = new SpeechCoordinator();
+    await coordinator.initialize();
+    coordinator.speakScene(sceneChange());
+
+    coordinator.speakSafety(warningAlert());
+
+    expect(spoken[spoken.length - 1]).toMatchObject({
+      text: 'Stop. Obstacle ahead.',
+      priority: 1,
+      interruption: 'immediate',
+      source: 'safety',
+    });
+  });
+
   it('marks a stop from the walking planner as urgent mobility guidance', async () => {
     const coordinator = new SpeechCoordinator();
     await coordinator.initialize();
@@ -184,7 +199,7 @@ function warningAlert(): SafetyAlert {
   return {
     key: 'warning:8',
     priority: 1,
-    text: 'Obstacle ahead, about 80 centimeters away.',
+    text: 'Stop. Obstacle ahead.',
     kind: 'warning',
     distanceCm: 80,
     timestamp: 1000,

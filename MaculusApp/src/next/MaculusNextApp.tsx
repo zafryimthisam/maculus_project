@@ -44,7 +44,7 @@ export default function MaculusNextApp(): React.JSX.Element {
     Math.max(0, readingTime - state.depthReading.observedAt);
   const sensorAge = state.sensor.lastValidAt === null ? Infinity :
     Math.max(0, readingTime - state.sensor.lastValidAt);
-  const depthFresh = active && state.guidanceActive && depthAge <= 3000 &&
+  const depthFresh = active && state.guidanceActive && depthAge <= state.depthReading.staleAfterMs &&
     state.depthReading.source === state.cameraSource && state.depthReading.center !== null;
   const sensorFresh = active && sensorAge <= 3000 && state.sensor.distanceCm !== null &&
     ['healthy', 'warning', 'emergency'].includes(state.sensor.health);
@@ -193,7 +193,9 @@ export default function MaculusNextApp(): React.JSX.Element {
           <Text style={styles.diagnosticText}>
             {depthFresh
               ? `${state.depthReading.source === 'pi' ? 'Pi camera' : 'Phone camera'} · ${(depthAge / 1000).toFixed(1)}s ago${state.depthReading.inferenceMs === null ? '' : ` · ${Math.round(state.depthReading.inferenceMs)} ms depth`}`
-              : 'Start or resume the camera and wait for a fresh estimate.'}
+              : active && state.guidanceActive
+                ? 'Depth is updating. Walking guidance is paused until a fresh estimate arrives.'
+                : 'Start or resume the camera and wait for a fresh estimate.'}
           </Text>
           <Text style={styles.cardBody}>
             Ultrasonic (Pi): {sensorFresh ? `${state.sensor.distanceCm!.toFixed(1)} cm` : 'Unavailable / stale'}

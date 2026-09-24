@@ -100,7 +100,7 @@ export class SafetyCoordinator {
         timestamp: now,
         text: emergency
           ? 'Stop. Obstacle nearby.'
-          : `Caution. Obstacle ahead, about ${rounded} centimeters away.`,
+          : 'Stop. Obstacle ahead.',
       };
     }
 

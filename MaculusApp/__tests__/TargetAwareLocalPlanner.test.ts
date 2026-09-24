@@ -87,6 +87,38 @@ test('keeps moving through a depth-clear centre when YOLO labels a far desk ther
   expect(result.instruction).toBe('Path ahead looks open. Move forward.');
 });
 
+test('keeps a strongly blue corridor open during a temporary floor-classification confidence dip', () => {
+  const planner = new TargetAwareLocalPlanner();
+  const spatial = new SpatialDepthMemory().observe(depth(.3, .12, .32), [], 'pi', 1000)!;
+  spatial.surfaces = spatial.surfaces.map((_surface, index) =>
+    Math.floor(index / spatial.grid.width) >= 18 ? 'walkable' : 'unknown');
+  planner.observe(spatial, undefined, 'pi', 1000);
+
+  expect(planner.plan(undefined, sensor(), 1100, 'walk')).toMatchObject({
+    status: 'ready', direction: 'center', mode: 'FREE_WALK',
+  });
+});
+
+test('uses the thermal freshness budget and reports depth updating instead of a blocked scene', () => {
+  const planner = new TargetAwareLocalPlanner();
+  planner.observe(depth(.25, .15, .3), undefined, 'pi', 1000, 2500);
+
+  expect(planner.plan(undefined, {...sensor(), lastValidAt: 3200}, 3200, 'walk').status).toBe('ready');
+  expect(planner.plan(undefined, {...sensor(), lastValidAt: 3600}, 3600, 'walk')).toMatchObject({
+    status: 'unavailable',
+    instruction: 'Stop. Depth guidance is updating.',
+  });
+});
+
+test('stops immediately when the close sensor reports an obstacle', () => {
+  const planner = new TargetAwareLocalPlanner();
+  planner.observe(depth(.25, .15, .3), undefined, 'pi', 1000);
+
+  expect(planner.plan(undefined, sensor(80), 1100, 'walk')).toMatchObject({
+    status: 'blocked', instruction: 'Stop. Obstacle ahead.', direction: null,
+  });
+});
+
 test('explains that an unavailable close obstacle sensor, not depth, caused the stop', () => {
   const planner = new TargetAwareLocalPlanner();
   planner.observe(depth(.25, .15, .3), undefined, 'device', 1000);

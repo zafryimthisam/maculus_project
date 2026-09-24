@@ -17,6 +17,7 @@ export interface ClearanceReading {
   units: 'relative-nearness' | 'metres';
   calibrated: boolean;
   calibrationMessage: string;
+  staleAfterMs: number;
 }
 export interface TargetRouteResult {
   status: 'ready' | 'blocked' | 'arrived' | 'unavailable';
@@ -42,7 +43,7 @@ interface LaneAssessment {
 }
 
 const LANE_COUNT = 9;
-const DEPTH_STALE_MS = 900;
+const DEFAULT_DEPTH_STALE_MS = 1600;
 const RELATIVE_FORWARD_CLEARANCE_MIN = 0.42;
 
 /**
@@ -74,6 +75,7 @@ export class TargetAwareLocalPlanner {
     target: NextSceneEntity | undefined,
     source: CameraSource,
     observedAt: number,
+    staleAfterMs: number = DEFAULT_DEPTH_STALE_MS,
   ): ClearanceReading | null {
     const spatial = isSpatialFrame(input)
       ? input
@@ -90,6 +92,7 @@ export class TargetAwareLocalPlanner {
       units: spatial.grid.units,
       calibrated: spatial.geometry.calibrated,
       calibrationMessage: spatial.geometry.message,
+      staleAfterMs: Math.max(1200, Math.min(3000, staleAfterMs)),
     };
     return this.reading;
   }
@@ -114,11 +117,17 @@ export class TargetAwareLocalPlanner {
     if (sensor.health === 'emergency' || (sensor.distanceCm !== null && sensor.distanceCm <= 40)) {
       return stop('blocked', 'Ultrasonic emergency stop.', 'Stop. Obstacle very close.');
     }
+    if (sensor.health === 'warning' || sensor.obstacle) {
+      return stop('blocked', 'Close obstacle sensor reports a blocked path.', 'Stop. Obstacle ahead.');
+    }
     if (guidanceMode === 'target' && (!target || now - target.lastSeenAt > 750)) {
       return stop('unavailable', 'Tracked target is lost.', 'Stop. I cannot see the target.');
     }
-    if (!this.reading || !this.lanes.length || now - this.reading.observedAt > DEPTH_STALE_MS) {
-      return stop('unavailable', 'Continuous relative depth is unavailable or stale.');
+    if (!this.reading || !this.lanes.length) {
+      return stop('unavailable', 'Continuous relative depth is unavailable.', 'Stop. Waiting for depth guidance.');
+    }
+    if (now - this.reading.observedAt > this.reading.staleAfterMs) {
+      return stop('unavailable', 'Continuous relative depth is unavailable or stale.', 'Stop. Depth guidance is updating.');
     }
     if (guidanceMode === 'target' && target && target.zone === 'ahead' && target.confirmed &&
         (target.nearScore >= 0.78 || Math.max(target.w, target.h) >= 0.65)) {
@@ -139,8 +148,13 @@ export class TargetAwareLocalPlanner {
       const minimumForwardClearance = this.reading?.units === 'metres'
         ? 0.24
         : RELATIVE_FORWARD_CLEARANCE_MIN;
-      const safe = lane.forwardClearance >= minimumForwardClearance && lane.clearance >= 0.24 &&
-        lane.groundSafety >= 0.3 && lane.confidence >= 0.18 && lane.blockedSurfaceRatio < 0.48;
+      const stronglyOpenRelativePath = this.reading?.units === 'relative-nearness' &&
+        lane.forwardClearance >= 0.62 && lane.clearance >= 0.5 &&
+        lane.groundSafety >= 0.08 && lane.blockedSurfaceRatio < 0.32;
+      const safe = lane.confidence >= 0.18 && (stronglyOpenRelativePath || (
+        lane.forwardClearance >= minimumForwardClearance && lane.clearance >= 0.24 &&
+        lane.groundSafety >= 0.3 && lane.blockedSurfaceRatio < 0.48
+      ));
       return { ...lane, direction, score, safe };
     }).filter(candidate => candidate.safe).sort((a, b) => b.score - a.score);
     if (!candidates.length) {

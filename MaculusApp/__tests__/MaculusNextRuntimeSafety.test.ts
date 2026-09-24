@@ -3,6 +3,7 @@ import {
   detectorLabelsForGoal,
   extractRememberPersonName,
   extractGuidanceGoal,
+  depthFreshnessForThermalState,
   MaculusRuntime,
 } from '../src/next/MaculusRuntime';
 import { INITIAL_NEXT_RUNTIME_STATE } from '../src/next/domain';
@@ -457,5 +458,14 @@ describe('Goal handoff and cancellation', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+});
+
+describe('depth freshness under thermal throttling', () => {
+  it('outlives the throttled inference cadence but remains bounded', () => {
+    expect(depthFreshnessForThermalState('nominal', 500)).toBe(1500);
+    expect(depthFreshnessForThermalState('serious', 800)).toBe(2100);
+    expect(depthFreshnessForThermalState('critical', 1000)).toBe(2900);
+    expect(depthFreshnessForThermalState('critical', 5000)).toBe(3000);
   });
 });

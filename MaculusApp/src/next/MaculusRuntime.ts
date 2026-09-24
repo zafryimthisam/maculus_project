@@ -714,12 +714,15 @@ export class MaculusRuntime {
         });
         if (spatialDepth) {
           const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId);
-          const reading = this.routePlanner.observe(spatialDepth, target, frame.source, frameReceivedAt);
+          const staleAfterMs = depthFreshnessForThermalState(this.thermalState, routeDepth?.inferenceMs);
+          const reading = this.routePlanner.observe(
+            spatialDepth, target, frame.source, frameReceivedAt, staleAfterMs,
+          );
           this.update({
             depthReading: reading ? { ...reading, inferenceMs: routeDepth?.inferenceMs ?? null } : {
               left: null, center: null, right: null, observedAt: frameReceivedAt, source: frame.source, inferenceMs: null,
               units: spatialDepth.grid.units, calibrated: spatialDepth.geometry.calibrated,
-              calibrationMessage: spatialDepth.geometry.message,
+              calibrationMessage: spatialDepth.geometry.message, staleAfterMs,
             },
             ...(this.state.previewEnabled ? {
               depthPreviewGrid: spatialDepth.grid,
@@ -1390,6 +1393,17 @@ function depthIntervalForThermalState(thermalState: string): number {
   if (thermalState === 'critical') {return 1000;}
   if (thermalState === 'serious') {return 500;}
   return DEPTH_INTERVAL_MS;
+}
+
+export function depthFreshnessForThermalState(thermalState: string, inferenceMs?: number): number {
+  const measuredInference = Number.isFinite(inferenceMs)
+    ? Math.max(100, Math.min(1600, inferenceMs!))
+    : 650;
+  // Freshness is measured from frame capture, so it must include inference
+  // time plus the thermally throttled interval before the next depth frame.
+  // Keep the bound finite so a lost native session still stops guidance.
+  return Math.max(1500, Math.min(3000,
+    depthIntervalForThermalState(thermalState) + measuredInference * 1.5 + 400));
 }
 
 function frameIntervalForThermalState(thermalState: string): number {

@@ -135,7 +135,11 @@ export class SpeechCoordinator {
     // the user is speaking, the VLM is thinking, or the AI is answering. The
     // <=40 cm priority-two stop alert is deliberately exempt.
     if (alert.priority < 2 && this.isConversationActive()) {return;}
-    this.speak(alert.text, alert.priority, 'safety', alert.key, alert.priority === 2);
+    // A walking warning starts with the action and interrupts ordinary scene
+    // narration. It still does not interrupt the user's active conversation
+    // unless it is the <=40 cm priority-two emergency handled above.
+    this.speak(alert.text, alert.priority, 'safety', alert.key,
+      alert.priority === 2 || alert.kind === 'warning');
   }
 
   speakScene(change: SceneChange): void {

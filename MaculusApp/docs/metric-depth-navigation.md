@@ -22,6 +22,9 @@ mount, crop, rotation, or resolution requires a new calibration.
   from the naturally close floor at the bottom of the frame. A smooth near
   surface across that band is treated as a frontal wall even with no detected
   object.
+- Depth freshness follows the measured inference time and iPhone thermal
+  cadence, bounded between 1.5 and 3 seconds. A lost session still stops
+  guidance, but a thermally slowed frame is not mislabeled as a blocked path.
 - Expected floor depth is calculated for each ray from the measured camera
   transform. Points close to that plane are walkable floor.
 - Points significantly in front of the expected floor are obstacles.
@@ -36,6 +39,8 @@ mount, crop, rotation, or resolution requires a new calibration.
 - A frame-filling person or dynamic object is treated as very close when the
   unvalidated metric model contradicts the visible object size.
 - The ultrasonic sensor remains the independent immediate close-range stop.
+  Spoken warnings are action-first and omit distance: `Stop. Obstacle ahead.`
+  The measured centimetres remain visible in diagnostics.
 
 ## Required supervised validation
 

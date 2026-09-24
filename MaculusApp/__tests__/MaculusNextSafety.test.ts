@@ -113,7 +113,7 @@ describe('Obstacle distance narration tolerance', () => {
 
   it('ignores inclusive five-centimeter jitter, even after the old repeat timer', () => {
     const safety = new SafetyCoordinator();
-    expect(ingest(safety, 80, 1000)?.text).toContain('80 centimeters');
+    expect(ingest(safety, 80, 1000)?.text).toBe('Stop. Obstacle ahead.');
     for (const [cm, at] of [[85, 8000], [80, 11000], [75, 18000], [84, 21000]]) {
       expect(ingest(safety, cm, at)).toBeNull();
       expect(safety.getState().message).toContain('80 centimeters');
@@ -125,7 +125,7 @@ describe('Obstacle distance narration tolerance', () => {
     const safety = new SafetyCoordinator();
     ingest(safety, 80, 1000);
     expect(ingest(safety, 83, 8000)).toBeNull();
-    expect(ingest(safety, 86, 11000)?.text).toContain('85 centimeters');
+    expect(ingest(safety, 86, 11000)?.text).toBe('Stop. Obstacle ahead.');
     expect(ingest(safety, 83, 18000)).toBeNull();
   });
 
