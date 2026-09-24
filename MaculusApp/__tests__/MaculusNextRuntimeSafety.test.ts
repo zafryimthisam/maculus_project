@@ -71,14 +71,19 @@ describe('MaculusNext runtime emergency AI interruption', () => {
     expect(loadDepth).not.toHaveBeenCalled();
   });
 
-  it('releases the VLM before restoring depth for active route guidance', async () => {
+  it('releases the VLM before restoring depth for active walking guidance', async () => {
     const runtime = new MaculusRuntime();
     const testable = runtime as any;
     const releaseVision = jest.fn(async () => {});
     testable.running = true;
     testable.generation = 5;
     testable.routeRequested = true;
-    testable.state = {...INITIAL_NEXT_RUNTIME_STATE, conversationReady: true};
+    testable.state = {
+      ...INITIAL_NEXT_RUNTIME_STATE,
+      conversationReady: true,
+      guidanceActive: true,
+      cameraReady: true,
+    };
     testable.conversation = {releaseModelForRouteGuidance: releaseVision};
     const loadDepth = jest.spyOn(depthService, 'loadModel').mockImplementation(async () => {
       expect(releaseVision).toHaveBeenCalledTimes(1);
@@ -301,7 +306,8 @@ describe('Goal handoff and cancellation', () => {
     testable.scene = { getSnapshot: () => snapshot };
     testable.currentVisionObservation = () => ({ frame: { base64: 'frame' }, snapshot, receivedAt: Date.now() });
     testable.speech = { speakConversation: jest.fn(), speakSystem: jest.fn(), beginConversationTurn: jest.fn(),
-      endConversationTurn: jest.fn(), canSpeakScene: () => true, isConversationActive: () => false, speakScene: jest.fn() };
+      endConversationTurn: jest.fn(), canSpeakScene: () => true, isConversationActive: () => false,
+      speakScene: jest.fn(), speakMobility: jest.fn() };
     testable.conversation = { respondWithMetadata: jest.fn(async () => ({
       text: 'A chair appears unoccupied on the left.',
       vision: { text: 'A chair appears unoccupied on the left.', source: 'vision-language', targetId: 1 },
@@ -367,13 +373,14 @@ describe('Goal handoff and cancellation', () => {
     expect(runtime.getState()).toMatchObject({ guidanceGoal: null, guidanceStatus: 'idle', descriptionInProgress: false });
   });
 
-  it('retains first sightings across a busy speaker without needing a movement event', () => {
+  it('keeps object inventory silent and speaks a walking safety cue when the speaker is free', () => {
     const { testable } = setup();
     testable.speech.canSpeakScene = () => false;
     testable.publishGuidance(testable.scene.getSnapshot());
     expect(testable.speech.speakScene).not.toHaveBeenCalled();
     testable.speech.canSpeakScene = () => true;
     testable.publishGuidance(testable.scene.getSnapshot());
-    expect(testable.speech.speakScene).toHaveBeenCalledWith(expect.objectContaining({ text: 'Chair to your left.' }));
+    expect(testable.speech.speakScene).not.toHaveBeenCalled();
+    expect(testable.speech.speakMobility).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringMatching(/^Stop\./) }));
   });
 });

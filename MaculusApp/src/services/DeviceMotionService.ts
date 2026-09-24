@@ -4,6 +4,9 @@ export interface DeviceMotionState {
   available: boolean;
   monitoring: boolean;
   moving: boolean;
+  walking: boolean;
+  stationary: boolean;
+  activityConfidence: 'unknown' | 'low' | 'medium' | 'high';
   rotationRate: number;
   acceleration: number;
   sampledAt: number;
@@ -23,6 +26,9 @@ const STILL: DeviceMotionState = {
   available: false,
   monitoring: false,
   moving: false,
+  walking: false,
+  stationary: false,
+  activityConfidence: 'unknown',
   rotationRate: 0,
   acceleration: 0,
   sampledAt: 0,
@@ -52,6 +58,9 @@ class DeviceMotionService {
         available: state.available === true,
         monitoring: state.monitoring === true,
         moving: state.moving === true,
+        walking: state.walking === true,
+        stationary: state.stationary === true,
+        activityConfidence: activityConfidence(state.activityConfidence),
         rotationRate: finite(state.rotationRate),
         acceleration: finite(state.acceleration),
         sampledAt: finite(state.sampledAt),
@@ -75,6 +84,10 @@ class DeviceMotionService {
 
 function finite(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function activityConfidence(value: unknown): DeviceMotionState['activityConfidence'] {
+  return value === 'low' || value === 'medium' || value === 'high' ? value : 'unknown';
 }
 
 export const deviceMotionService = new DeviceMotionService();

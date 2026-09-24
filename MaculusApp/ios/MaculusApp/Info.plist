@@ -41,6 +41,8 @@
 	<string>Maculus connects to your Raspberry Pi for the ultrasonic distance sensor and Pi camera.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Maculus listens locally for the wake word and your guidance commands.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Maculus uses iPhone motion sensors to tell whether you are walking or standing still during guidance.</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

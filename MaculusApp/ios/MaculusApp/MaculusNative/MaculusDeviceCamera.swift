@@ -267,6 +267,7 @@ final class MaculusDeviceCamera: NSObject, AVCaptureVideoDataOutputSampleBufferD
 @objc(MaculusDeviceMotion)
 final class MaculusDeviceMotion: NSObject {
   private let manager = CMMotionManager()
+  private let activityManager = CMMotionActivityManager()
   private let queue: OperationQueue = {
     let queue = OperationQueue()
     queue.name = "com.maculus.device-motion"
@@ -279,11 +280,15 @@ final class MaculusDeviceMotion: NSObject {
   private var peakRotationRate = 0.0
   private var peakAcceleration = 0.0
   private var lastSampleAt = 0.0
+  private var activityWalking = false
+  private var activityStationary = false
+  private var activityConfidence = "unknown"
 
   @objc static func requiresMainQueueSetup() -> Bool { false }
 
   deinit {
     manager.stopDeviceMotionUpdates()
+    activityManager.stopActivityUpdates()
   }
 
   @objc func startMonitoring(
@@ -327,6 +332,23 @@ final class MaculusDeviceMotion: NSObject {
       self.lastSampleAt = Date().timeIntervalSince1970 * 1000
       self.lock.unlock()
     }
+    if CMMotionActivityManager.isActivityAvailable() {
+      activityManager.startActivityUpdates(to: queue) { [weak self] activity in
+        guard let self, let activity else { return }
+        let confidence: String
+        switch activity.confidence {
+        case .high: confidence = "high"
+        case .medium: confidence = "medium"
+        default: confidence = "low"
+        }
+        self.lock.lock()
+        self.activityWalking = activity.walking || activity.running
+        self.activityStationary = activity.stationary && !self.activityWalking
+        self.activityConfidence = confidence
+        self.lastSampleAt = Date().timeIntervalSince1970 * 1000
+        self.lock.unlock()
+      }
+    }
     resolve(["available": true, "started": true, "alreadyStarted": false])
   }
 
@@ -339,13 +361,19 @@ final class MaculusDeviceMotion: NSObject {
     let acceleration = peakAcceleration
     let sampledAt = lastSampleAt
     let active = monitoring
+    let walking = activityWalking
+    let stationary = activityStationary
+    let confidence = activityConfidence
     peakRotationRate = 0
     peakAcceleration = 0
     lock.unlock()
     resolve([
       "available": manager.isDeviceMotionAvailable,
       "monitoring": active,
-      "moving": active && (rotationRate >= 0.12 || acceleration >= 0.08),
+      "moving": active && (walking || (!stationary && (rotationRate >= 0.12 || acceleration >= 0.08))),
+      "walking": active && walking,
+      "stationary": active && stationary,
+      "activityConfidence": confidence,
       "rotationRate": rotationRate,
       "acceleration": acceleration,
       "sampledAt": sampledAt,
@@ -357,11 +385,15 @@ final class MaculusDeviceMotion: NSObject {
     rejecter _: @escaping RCTPromiseRejectBlock
   ) {
     manager.stopDeviceMotionUpdates()
+    activityManager.stopActivityUpdates()
     lock.lock()
     monitoring = false
     peakRotationRate = 0
     peakAcceleration = 0
     lastSampleAt = 0
+    activityWalking = false
+    activityStationary = false
+    activityConfidence = "unknown"
     lock.unlock()
     resolve(nil)
   }

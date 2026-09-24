@@ -9,7 +9,7 @@ const target = (cx = .5): NextSceneEntity => ({ id: 7, label: 'person', confiden
 const sensor = (distanceCm = 100): SafetyState => ({ health: distanceCm <= 40 ? 'emergency' : 'healthy',
   distanceCm, obstacle: distanceCm < 100, lastValidAt: 1000, sequence: 1, message: '' });
 const depth = (left: number, center: number, right: number): DepthEstimation => {
-  const values = Array.from({ length: 24 }, (_, y) => Array.from({ length: 32 }, (_, x) => {
+  const values = Array.from({ length: 24 }, (_row, y) => Array.from({ length: 32 }, (_column, x) => {
     const base = x < 11 ? left : x < 21 ? center : right;
     return Math.min(1, base + y * .002);
   })).flat();
@@ -23,7 +23,7 @@ test('avoids a blocked centre while retaining the tracked target goal', () => {
   const result = planner.plan(target(), sensor(), 1100);
   expect(result.mode).toBe('OBSTACLE_IN_PATH');
   expect(result.direction).toBe('left');
-  expect(result.instruction).toContain('Obstacle ahead');
+  expect(result.instruction).toContain('path ahead is blocked');
 });
 
 test('reacquires forward path after avoidance and stops on lost target or ultrasonic emergency', () => {
@@ -42,4 +42,16 @@ test('rejects metric depth rather than treating metres as normalized clearance',
   const metric = depth(.2, .2, .2); metric.grid!.units = 'metres';
   expect(planner.observe(metric, target(), 'pi', 1000)).toBeNull();
   expect(planner.plan(target(), sensor(), 1100).status).toBe('unavailable');
+});
+
+test('guides open walking without requiring an object target', () => {
+  const planner = new TargetAwareLocalPlanner();
+  planner.observe(depth(.25, .15, .3), undefined, 'pi', 1000);
+
+  const waiting = planner.plan(undefined, sensor(), 1100, 'walk', { moving: false, walking: false });
+  expect(waiting).toMatchObject({ status: 'ready', direction: 'center', mode: 'FREE_WALK' });
+  expect(waiting.instruction).toBe('Path ahead looks open. Move forward.');
+
+  const walking = planner.plan(undefined, sensor(), 1150, 'walk', { moving: true, walking: true });
+  expect(walking.instruction).toBe('Keep going forward.');
 });

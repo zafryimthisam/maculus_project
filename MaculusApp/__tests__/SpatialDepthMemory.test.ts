@@ -17,7 +17,7 @@ function depth(values: number[]): DepthEstimation {
 }
 
 function grid(background: number, object = background): number[] {
-  return Array.from({ length: HEIGHT }, (_, y) => Array.from({ length: WIDTH }, (_, x) =>
+  return Array.from({ length: HEIGHT }, (_row, y) => Array.from({ length: WIDTH }, (_column, x) =>
     x >= 7 && x <= 10 && y >= 4 && y <= 9 ? object : background)).flat();
 }
 

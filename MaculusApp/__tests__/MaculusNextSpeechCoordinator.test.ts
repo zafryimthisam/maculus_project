@@ -144,6 +144,18 @@ describe('MaculusNext SpeechCoordinator', () => {
       source: 'safety',
     });
   });
+
+  it('marks a stop from the walking planner as urgent mobility guidance', async () => {
+    const coordinator = new SpeechCoordinator();
+    await coordinator.initialize();
+
+    coordinator.speakMobility({
+      key: 'route:stop', kind: 'path-blocked', text: 'Stop. I cannot see a safe path.',
+      timestamp: 1000, speak: true,
+    });
+
+    expect(spoken[0]).toMatchObject({ priority: 1, source: 'mobility' });
+  });
 });
 
 function sceneChange(): SceneChange {

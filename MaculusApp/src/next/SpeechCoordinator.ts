@@ -143,6 +143,13 @@ export class SpeechCoordinator {
     this.speak(change.text, change.kind === 'path-blocked' ? 1 : 0, 'ambient', change.key, false);
   }
 
+  speakMobility(change: SceneChange): void {
+    if (!change.speak || this.isConversationActive()) {return;}
+    const urgent = change.kind === 'path-blocked' || change.text.startsWith('Stop.');
+    if (urgent && this.hapticsEnabled) {Vibration.vibrate([0, 120, 80, 180]);}
+    this.speak(change.text, urgent ? 1 : 0, 'mobility', change.key, false);
+  }
+
   speakConversation(text: string, key: string = `conversation:${Date.now()}`): void {
     this.speak(text, 0, 'conversation', key, false);
   }

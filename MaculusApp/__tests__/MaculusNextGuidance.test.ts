@@ -187,6 +187,10 @@ describe('Outdoor ambient guidance', () => {
     expect(guide.next({ ...scene([obstacle], 20000), pathBlocked: true }, 20000, true)?.kind).toBe('path-blocked');
     expect(guide.next(scene([obstacle], 24000), 24000, true)).toBeNull();
   });
+  it('keeps ordinary object inventory silent while mobility guidance is active', () => {
+    const guide = new AmbientGuide();
+    expect(guide.next(scene([entity(1, 'chair')]), 10000, false, null, true)).toBeNull();
+  });
 });
 
 

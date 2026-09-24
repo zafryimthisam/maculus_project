@@ -201,6 +201,15 @@ export default function MaculusNextApp(): React.JSX.Element {
           <Text style={styles.diagnosticText}>
             Clearance summarizes a nine-lane temporal surface map; it is not a measurement in centimetres.
           </Text>
+          <Text style={styles.cardBody}>
+            iPhone motion: {state.userMotion.walking
+              ? 'Walking'
+              : state.userMotion.stationary
+                ? 'Standing still'
+                : state.userMotion.moving
+                  ? 'Moving'
+                  : state.userMotion.available ? 'Waiting for movement' : 'Unavailable'}
+          </Text>
         </View>
 
         <TouchableOpacity
@@ -223,7 +232,7 @@ export default function MaculusNextApp(): React.JSX.Element {
             />
             <ActionButton label="Repeat guidance" onPress={repeatLast} />
             <ActionButton
-              label={state.guidanceActive ? 'Pause camera' : 'Resume camera'}
+              label={state.guidanceActive ? 'Pause walking guidance' : 'Start walking guidance'}
               onPress={() => setGuidanceActive(!state.guidanceActive)}
             />
             <ActionButton

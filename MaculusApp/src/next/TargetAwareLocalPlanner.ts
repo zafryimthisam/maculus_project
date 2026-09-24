@@ -3,13 +3,18 @@ import { NextSceneEntity, SafetyState } from './domain';
 import { SpatialDepthFrame, SpatialDepthMemory } from './SpatialDepthMemory';
 
 export type RouteDirection = 'left' | 'center' | 'right';
+export type LocalGuidanceMode = 'walk' | 'target';
+export interface WalkingMotion {
+  moving: boolean;
+  walking: boolean;
+}
 export interface ClearanceReading { left: number; center: number; right: number; observedAt: number; source: CameraSource }
 export interface TargetRouteResult {
   status: 'ready' | 'blocked' | 'arrived' | 'unavailable';
   instruction: string;
   direction: RouteDirection | null;
   reason: string;
-  mode: 'FOLLOW_TARGET' | 'OBSTACLE_IN_PATH' | 'REACQUIRE_TARGET_PATH' | 'TARGET_LOST' | 'WAIT_FOR_CLEARANCE' | 'ARRIVED';
+  mode: 'FREE_WALK' | 'FOLLOW_TARGET' | 'OBSTACLE_IN_PATH' | 'REACQUIRE_TARGET_PATH' | 'TARGET_LOST' | 'WAIT_FOR_CLEARANCE' | 'ARRIVED';
 }
 
 interface LaneAssessment {
@@ -69,8 +74,14 @@ export class TargetAwareLocalPlanner {
     return this.reading;
   }
 
-  plan(target: NextSceneEntity | undefined, sensor: SafetyState, now: number): TargetRouteResult {
-    const stop = (status: 'blocked' | 'unavailable', reason: string, instruction = 'Stop. I cannot confirm a clear route.'): TargetRouteResult =>
+  plan(
+    target: NextSceneEntity | undefined,
+    sensor: SafetyState,
+    now: number,
+    guidanceMode: LocalGuidanceMode = 'target',
+    motion: WalkingMotion = { moving: false, walking: false },
+  ): TargetRouteResult {
+    const stop = (status: 'blocked' | 'unavailable', reason: string, instruction = 'Stop. I cannot see a safe path.'): TargetRouteResult =>
       ({ status, reason, instruction, direction: null,
         mode: reason.includes('target') ? 'TARGET_LOST' : 'WAIT_FOR_CLEARANCE' });
     if (sensor.lastValidAt === null || now - sensor.lastValidAt > 750 || ['unknown', 'stale', 'fault'].includes(sensor.health)) {
@@ -79,27 +90,30 @@ export class TargetAwareLocalPlanner {
     if (sensor.health === 'emergency' || (sensor.distanceCm !== null && sensor.distanceCm <= 40)) {
       return stop('blocked', 'Ultrasonic emergency stop.', 'Stop. Obstacle very close.');
     }
-    if (!target || now - target.lastSeenAt > 750) {return stop('unavailable', 'Tracked target is lost.', 'Stop. Target lost.');}
+    if (guidanceMode === 'target' && (!target || now - target.lastSeenAt > 750)) {
+      return stop('unavailable', 'Tracked target is lost.', 'Stop. I cannot see the target.');
+    }
     if (!this.reading || !this.lanes.length || now - this.reading.observedAt > DEPTH_STALE_MS) {
       return stop('unavailable', 'Continuous relative depth is unavailable or stale.');
     }
-    if (target.zone === 'ahead' && target.confirmed &&
+    if (guidanceMode === 'target' && target && target.zone === 'ahead' && target.confirmed &&
         (target.nearScore >= 0.78 || Math.max(target.w, target.h) >= 0.65)) {
       return { status: 'arrived', reason: '', instruction: 'The target is nearby. Stop here.', direction: null, mode: 'ARRIVED' };
     }
 
     const candidates = this.lanes.map(lane => {
       const direction = directionFor(lane.centerX);
-      const alignment = 1 - Math.min(1, Math.abs(lane.centerX - target.cx) / 0.72);
+      const desiredX = guidanceMode === 'target' && target ? target.cx : 0.5;
+      const alignment = 1 - Math.min(1, Math.abs(lane.centerX - desiredX) / 0.72);
       const stability = this.previousLaneX === null ? 0 : 1 - Math.min(1, Math.abs(lane.centerX - this.previousLaneX) * 4);
       const score = alignment * 0.4 + lane.clearance * 0.27 + lane.groundSafety * 0.2 +
         lane.confidence * 0.08 + stability * 0.05 - lane.semanticRisk * 0.24 - lane.approachRisk * 0.2;
       const safe = lane.clearance >= 0.24 && lane.groundSafety >= 0.38 && lane.confidence >= 0.18 &&
-        lane.semanticRisk < 0.78 && lane.approachRisk < 0.72;
+        lane.semanticRisk < 0.78 && lane.approachRisk < 0.55;
       return { ...lane, direction, score, safe };
     }).filter(candidate => candidate.safe).sort((a, b) => b.score - a.score);
     if (!candidates.length) {
-      return stop('blocked', 'No traversable surface is sufficiently clear and stable.', 'Stop. No clear path.');
+      return stop('blocked', 'No traversable surface is sufficiently clear and stable.', 'Stop. I cannot see a safe path.');
     }
 
     const prior = this.previous;
@@ -122,8 +136,14 @@ export class TargetAwareLocalPlanner {
     const centerClear = candidates.some(candidate => candidate.direction === 'center');
     const approaching = choice.approachRisk >= 0.42;
     const instruction = direction === 'center'
-      ? `${approaching ? 'Moving obstacle detected. ' : ''}Move forward slowly.`
-      : `${!centerClear ? 'Obstacle ahead. ' : ''}Move ${direction} one step, then stop.`;
+      ? approaching
+        ? 'Slow down. Something is moving nearby.'
+        : prior && prior !== 'center'
+          ? 'You are back in the middle. Keep going forward.'
+          : motion.walking
+            ? 'Keep going forward.'
+            : 'Path ahead looks open. Move forward.'
+      : `${!centerClear ? 'The path ahead is blocked. ' : ''}Move a little to the ${direction}.`;
     return {
       status: 'ready',
       reason: '',
@@ -131,7 +151,9 @@ export class TargetAwareLocalPlanner {
       direction,
       mode: direction !== 'center' && !centerClear
         ? 'OBSTACLE_IN_PATH'
-        : direction === 'center' && prior && prior !== 'center' ? 'REACQUIRE_TARGET_PATH' : 'FOLLOW_TARGET',
+        : direction === 'center' && prior && prior !== 'center'
+          ? 'REACQUIRE_TARGET_PATH'
+          : guidanceMode === 'target' ? 'FOLLOW_TARGET' : 'FREE_WALK',
     };
   }
 }

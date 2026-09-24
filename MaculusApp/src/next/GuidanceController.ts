@@ -283,7 +283,13 @@ export class AmbientGuide {
     while (this.announced.size > 256) {this.announced.delete(this.announced.keys().next().value!);}
   }
 
-  next(scene: NextSceneSnapshot, now: number, goalActive: boolean = false, selectedTargetId: number | null = null): SceneChange | null {
+  next(
+    scene: NextSceneSnapshot,
+    now: number,
+    goalActive: boolean = false,
+    selectedTargetId: number | null = null,
+    mobilityActive: boolean = false,
+  ): SceneChange | null {
     this.observe(scene, now);
     const visible = scene.visibleEntities.filter(e => now - e.lastSeenAt <= 1200);
     if (scene.pathBlocked && visible.some(e => e.inPath) && now - this.lastPathWarningAt > 12000) {
@@ -291,6 +297,10 @@ export class AmbientGuide {
       this.lastPathWarningAt = now;
       return { key: `path:${now}`, kind: 'path-blocked', text: 'Possible obstacle ahead. Pause.', timestamp: now, speak: true };
     }
+    // Walking mode is action-first. The local planner names a relevant object
+    // only when it changes the safe action; general inventory remains available
+    // through the explicit scene-description command.
+    if (mobilityActive) {return null;}
     // Retain the last *spoken* position, not transient frame events. This also
     // survives TTS/AI busy periods. Direction is relative to the camera; it
     // does not prove that the person, rather than the camera, moved.

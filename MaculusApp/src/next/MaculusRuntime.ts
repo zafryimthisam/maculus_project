@@ -13,6 +13,7 @@ import { depthService } from '../services/DepthService';
 import { detectionService } from '../services/DetectionService';
 import { deviceCameraService } from '../services/DeviceCameraService';
 import { deviceMotionService } from '../services/DeviceMotionService';
+import type { DeviceMotionState } from '../services/DeviceMotionService';
 import { keepAwakeService } from '../services/KeepAwakeService';
 import { modelAssetService, ModelAssetStatus } from '../services/ModelAssetService';
 import { reIdService } from '../services/ReIdService';
@@ -90,6 +91,10 @@ export class MaculusRuntime {
   private lastGoalAnalysisAt = 0;
   private lastGoalAnalysisCandidates = '';
   private sensorFaultAnnounced = false;
+  private latestMotion: DeviceMotionState = {
+    available: false, monitoring: false, moving: false, walking: false, stationary: false,
+    activityConfidence: 'unknown', rotationRate: 0, acceleration: 0, sampledAt: 0,
+  };
 
   getState(): NextRuntimeState {return this.state;}
 
@@ -198,6 +203,10 @@ export class MaculusRuntime {
     this.lastGoalAnalysisAt = 0;
     this.lastGoalAnalysisCandidates = '';
     this.sensorFaultAnnounced = false;
+    this.latestMotion = {
+      available: false, monitoring: false, moving: false, walking: false, stationary: false,
+      activityConfidence: 'unknown', rotationRate: 0, acceleration: 0, sampledAt: 0,
+    };
     const preservedModel = this.state.model;
     this.update({
       ...cloneInitialState(),
@@ -236,9 +245,15 @@ export class MaculusRuntime {
       try {
         await deviceCameraService.start();
         deviceCameraReady = true;
-        await deviceMotionService.start();
       } catch (error: any) {
         console.warn('[MaculusNext] Phone fallback camera startup failed:', error?.message || error);
+      }
+      try {
+        // The iPhone is the body-motion sensor even when all vision frames come
+        // from the Pi camera. Camera availability must not gate walking state.
+        await deviceMotionService.start();
+      } catch (error: any) {
+        console.warn('[MaculusNext] iPhone walking sensor startup failed:', error?.message || error);
       }
       const [knownPeople] = await identityReady;
       this.scene.setKnownPeople(knownPeople);
@@ -264,6 +279,8 @@ export class MaculusRuntime {
 
       if (cameraReady) {
         this.startVisionLoop(generation);
+        this.restoreDepthAfterVision(true, generation)
+          .catch(error => console.warn('[Depth] Walking guidance startup failed:', error));
       }
       const voiceStarted = await voiceCommandService.start(
         this.handleVoiceTurn,
@@ -294,7 +311,7 @@ export class MaculusRuntime {
       }
       this.speech.speakSystem(
         cameraReady
-          ? `Maculus is ready. Say ${WAKE_WORD_LABEL}, then ask naturally.`
+          ? `Maculus is ready. Walking guidance is on. Say ${WAKE_WORD_LABEL} when you need to ask something.`
           : 'Maculus started in degraded mode. Camera guidance is unavailable.',
         cameraReady ? 0 : 1,
         'session-ready',
@@ -418,9 +435,13 @@ export class MaculusRuntime {
       guidanceGoal: active ? this.activeGuidanceGoal : null,
       guidanceStatus: this.guide.status,
       ...(!active ? { descriptionInProgress: false } : {}),
-      message: active ? 'Visual guidance active' : 'Visual guidance paused; safety sensor remains active',
+      message: active ? 'Walking guidance active' : 'Walking guidance paused; safety sensor remains active',
     });
-    this.speech.speakSystem(active ? 'Visual guidance resumed.' : 'Visual guidance paused. Obstacle sensor monitoring remains active.');
+    if (active) {
+      this.restoreDepthAfterVision(true, this.generation)
+        .catch(error => console.warn('[Depth] Walking guidance resume failed:', error));
+    }
+    this.speech.speakSystem(active ? 'Walking guidance is on.' : 'Walking guidance is paused. The close obstacle sensor is still on.');
   }
 
   setPreviewEnabled(enabled: boolean): void {
@@ -630,15 +651,22 @@ export class MaculusRuntime {
         const [rawDetections, routeDepth, motion] = await Promise.all([
           detectionService.detectObjects(frame.base64),
           depthDue ? depthService.estimateDepth(frame.base64, []) : Promise.resolve(null),
-          frame.source === 'device' ? deviceMotionService.sample() : Promise.resolve({
-            available: false, monitoring: false, moving: false, rotationRate: 0, acceleration: 0, sampledAt: frameReceivedAt,
-          }),
+          deviceMotionService.sample(),
         ]);
         if (!this.running || generation !== this.generation) {break;}
         const spatialDepth = routeDepth ? this.spatialDepth.observe(routeDepth, rawDetections, frame.source,
           frameReceivedAt, motion) : null;
         const detections = attachDepthToDetections(rawDetections, spatialDepth);
         const now = Date.now();
+        this.latestMotion = motion;
+        this.update({ userMotion: {
+          available: motion.available,
+          moving: motion.moving,
+          walking: motion.walking,
+          stationary: motion.stationary,
+          confidence: motion.activityConfidence,
+          sampledAt: motion.sampledAt || now,
+        } });
         const embeddings = this.state.descriptionInProgress ? [] : await this.personEmbeddings(frame, detections, now);
         const cameraMoving = motion.moving;
         if (!this.running || generation !== this.generation) {break;}
@@ -718,19 +746,35 @@ export class MaculusRuntime {
       this.refreshGoalSelection().catch(error => console.warn('[MaculusNext] Goal review failed:', error));
     }
     if (this.speech.canSpeakScene() && this.safety.getState().health !== 'emergency') {
-      const ambient = this.ambient.next(snapshot, now, Boolean(this.activeGuidanceGoal), this.guide.targetId);
+      const ambient = this.ambient.next(snapshot, now, Boolean(this.activeGuidanceGoal), this.guide.targetId, true);
       let routeCue = null;
       const target = snapshot.visibleEntities.find(entity => entity.id === this.guide.targetId && now - entity.lastSeenAt <= 750);
-      if (this.routeRequested && this.guide.targetId !== null) {
-        const result = this.routePlanner.plan(this.guide.status === 'tracking' ? target : undefined,
-          this.safety.getState(), now);
-        if (now - this.lastRouteCueAt >= (result.instruction === this.lastRouteCue ? 6000 : 2000)) {
-          routeCue = { key: `route:${now}`, kind: 'moved' as const, text: result.instruction, timestamp: now, speak: true };
+      const targetRouteActive = this.routeRequested && this.guide.targetId !== null;
+      {
+        const result = this.routePlanner.plan(
+          targetRouteActive && this.guide.status === 'tracking' ? target : undefined,
+          this.safety.getState(),
+          now,
+          targetRouteActive ? 'target' : 'walk',
+          this.latestMotion,
+        );
+        const routeCueDelay = result.instruction === this.lastRouteCue
+          ? 6000
+          : result.status === 'blocked' || result.status === 'unavailable' ? 0 : 800;
+        if (now - this.lastRouteCueAt >= routeCueDelay) {
+          routeCue = { key: `route:${now}`, kind: result.status === 'ready' || result.status === 'arrived'
+            ? 'moved' as const : 'path-blocked' as const,
+          text: result.instruction, timestamp: now, speak: true };
           this.lastRouteCue = result.instruction; this.lastRouteCueAt = now;
         }
       }
-      const speakable = (routeCue?.text.startsWith('Stop.') ? routeCue : null) || ambient || routeCue || this.guide.next(snapshot, now);
-      if (speakable) {this.speech.speakScene(speakable);}
+      const goalCue = this.guide.next(snapshot, now);
+      const urgentRoute = routeCue?.text.startsWith('Stop.') ? routeCue : null;
+      const speakable = urgentRoute || goalCue || routeCue || ambient;
+      if (speakable) {
+        if (speakable === routeCue) {this.speech.speakMobility(speakable);}
+        else {this.speech.speakScene(speakable);}
+      }
     }
     this.update({ guidanceStatus: this.guide.status });
   }
@@ -829,8 +873,8 @@ export class MaculusRuntime {
   };
 
   private initializeOptionalModels = async (generation: number): Promise<void> => {
-    // Keep depth unloaded until route guidance needs it. The VLM and its
-    // projector need this memory headroom when the first visual request arrives.
+    // The conversational model remains lazy. Walking depth is managed by the
+    // guidance lifecycle and is temporarily released for a visual question.
     await this.prepareModelAssets();
     if (!this.running || generation !== this.generation) {
       await this.conversation.destroy();
@@ -1091,7 +1135,6 @@ export class MaculusRuntime {
         }
         this.activeGuidanceGoal = null;
         this.routeRequested = false;
-        depthService.release().catch(error => console.warn('[Depth] Release failed', error));
         this.routePlanner.reset();
         this.spatialDepth.reset();
         this.guide.reset();
@@ -1117,7 +1160,7 @@ export class MaculusRuntime {
   }
 
   private async suspendDepthForVision(): Promise<boolean> {
-    const restore = this.routeRequested && this.state.model.supported;
+    const restore = this.state.guidanceActive && this.state.cameraReady;
     if (depthService.isReady()) {
       try {
         await depthService.release();
@@ -1133,15 +1176,16 @@ export class MaculusRuntime {
   }
 
   private async restoreDepthAfterVision(restore: boolean, generation: number): Promise<void> {
-    if (!restore || !this.running || generation !== this.generation || !this.routeRequested) {return;}
+    if (!restore || !this.running || generation !== this.generation ||
+        !this.state.guidanceActive || !this.state.cameraReady) {return;}
     try {
       // Route depth and the LFM projector must not be resident together on
       // memory-constrained phones. The next visual question reloads LFM lazily.
-      await this.conversation.releaseModelForRouteGuidance();
-      if (!this.running || generation !== this.generation || !this.routeRequested || !this.state.model.supported) {return;}
+      await this.conversation.releaseModelForRouteGuidance?.();
+      if (!this.running || generation !== this.generation || !this.state.guidanceActive) {return;}
       this.update({ conversationReady: false });
       await depthService.loadModel();
-      if (!this.running || generation !== this.generation || !this.routeRequested) {await depthService.release();}
+      if (!this.running || generation !== this.generation || !this.state.guidanceActive) {await depthService.release();}
     } catch (error) {
       console.warn('[Depth] Could not restore route depth after vision inference', error);
     }
