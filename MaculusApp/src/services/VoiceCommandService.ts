@@ -287,6 +287,19 @@ export class VoiceCommandService {
     }
   }
 
+  /**
+   * Opens one private command capture from an explicit UI action. This enters
+   * the same prompt, Whisper, emergency-interruption, and wake re-arm path as
+   * a real wake-word detection; it does not create a second microphone flow.
+   */
+  async activateManually(): Promise<boolean> {
+    if (!this.enabled || this.commandBusy || this.safetyInterrupted || !MaculusVoiceCommand) {
+      return false;
+    }
+    await this.handleWakeDetected({name: 'manual'});
+    return true;
+  }
+
   async interruptForEmergency(): Promise<void> {
     this.safetyInterrupted = true;
     this.commandBusy = false;

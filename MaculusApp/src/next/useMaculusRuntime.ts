@@ -28,6 +28,7 @@ export function useMaculusRuntime() {
     start: () => maculusRuntime.start(),
     stop: () => maculusRuntime.stop(),
     describeScene: () => maculusRuntime.describeScene(),
+    activateVoiceCommand: () => maculusRuntime.activateVoiceCommand(),
     repeatLast: () => maculusRuntime.repeatLast(),
     setGuidanceActive: (active: boolean) => maculusRuntime.setGuidanceActive(active),
     setPreviewEnabled: (enabled: boolean) => maculusRuntime.setPreviewEnabled(enabled),

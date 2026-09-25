@@ -90,6 +90,20 @@ describe('VoiceCommandService private Whisper capture', () => {
     expect(service.getStatus()).toBe('speaking');
   });
 
+  it('uses the same capture path for the manual Talk to Maculus button', async () => {
+    const service = new VoiceCommandService() as any;
+    service.enabled = true;
+    service.commandBusy = false;
+    const capture = jest.spyOn(service, 'handleWakeDetected').mockResolvedValue(undefined);
+
+    await expect(service.activateManually()).resolves.toBe(true);
+    expect(capture).toHaveBeenCalledWith({name: 'manual'});
+
+    service.commandBusy = true;
+    await expect(service.activateManually()).resolves.toBe(false);
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
+
   it('requires a new wake phrase after every completed answer', async () => {
     const service = new VoiceCommandService() as any;
     service.enabled = true;

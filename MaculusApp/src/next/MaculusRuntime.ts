@@ -426,6 +426,25 @@ export class MaculusRuntime {
     }
   }
 
+  async activateVoiceCommand(): Promise<boolean> {
+    if (!this.running || ['starting', 'stopping'].includes(this.state.phase)) {return false;}
+    if (this.safety.getState().health === 'emergency') {
+      this.speech.speakSystem('Voice is paused until the close obstacle is clear.', 1, 'voice-safety-hold');
+      return false;
+    }
+    const started = await voiceCommandService.activateManually();
+    if (!started && !this.speech.isConversationActive()) {
+      this.speech.speakSystem(
+        this.state.voiceStatus === 'unavailable' || this.state.voiceStatus === 'error'
+          ? 'Voice commands are unavailable.'
+          : 'Voice is busy. Please try again in a moment.',
+        0,
+        'manual-voice-unavailable',
+      );
+    }
+    return started;
+  }
+
   setGuidanceActive(active: boolean): void {
     if (!this.running) {return;}
     if (!active) {

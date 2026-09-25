@@ -8,6 +8,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Vibration,
   View,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -16,12 +17,15 @@ import { DetectionPreview } from '../components/DetectionPreview';
 import { whisperCommandService } from '../services/WhisperCommandService';
 import { useMaculusRuntime } from './useMaculusRuntime';
 
+type InterfaceMode = 'user' | 'developer';
+
 export default function MaculusNextApp(): React.JSX.Element {
   const {
     state,
     start,
     stop,
     describeScene,
+    activateVoiceCommand,
     repeatLast,
     setGuidanceActive,
     setPreviewEnabled,
@@ -30,6 +34,9 @@ export default function MaculusNextApp(): React.JSX.Element {
     cancelPrivateVisionModelDownload,
     deletePrivateVisionModel,
   } = useMaculusRuntime();
+  const [interfaceMode, setInterfaceMode] = React.useState<InterfaceMode>('user');
+  const autoStartAttempted = React.useRef(false);
+  const [autoStartRequested, setAutoStartRequested] = React.useState(false);
   const [piAddress, setPiAddress] = React.useState('');
   const [piConnecting, setPiConnecting] = React.useState(false);
   const [whisperState, setWhisperState] = React.useState(whisperCommandService.getState());
@@ -55,6 +62,10 @@ export default function MaculusNextApp(): React.JSX.Element {
     'command_listening',
     'processing',
   ].includes(state.voiceStatus);
+  const userSessionReady = state.phase === 'running' || state.phase === 'degraded';
+  const voiceBusy = ['wake_detected', 'command_listening', 'processing', 'speaking', 'paused']
+    .includes(state.voiceStatus);
+  const voiceUnavailable = ['off', 'unavailable', 'error'].includes(state.voiceStatus);
   const modelPercent = state.model.totalBytes > 0
     ? Math.min(100, Math.round(state.model.downloadedBytes * 100 / state.model.totalBytes))
     : 0;
@@ -62,6 +73,13 @@ export default function MaculusNextApp(): React.JSX.Element {
   React.useEffect(() => {
     return whisperCommandService.subscribe(setWhisperState);
   }, []);
+
+  React.useEffect(() => {
+    if (interfaceMode !== 'user' || state.phase !== 'idle' || autoStartAttempted.current) {return;}
+    autoStartAttempted.current = true;
+    setAutoStartRequested(true);
+    start().catch(error => console.warn('[MaculusNext] Automatic user-mode start failed:', error));
+  }, [interfaceMode, start, state.phase]);
 
   React.useEffect(() => {
     if (state.piConnection === 'connected' && state.piUrl) {
@@ -102,6 +120,80 @@ export default function MaculusNextApp(): React.JSX.Element {
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <StatusBar barStyle="light-content" backgroundColor="#07111f" />
         <ScrollView contentContainerStyle={styles.content}>
+        <View style={styles.modeSelector} accessibilityRole="tablist">
+          <ModeButton
+            label="User"
+            selected={interfaceMode === 'user'}
+            onPress={() => setInterfaceMode('user')}
+          />
+          <ModeButton
+            label="Developer"
+            selected={interfaceMode === 'developer'}
+            onPress={() => setInterfaceMode('developer')}
+          />
+        </View>
+
+        {interfaceMode === 'user' ? (
+          <View style={styles.userMode}>
+            <Text style={styles.userTitle} accessibilityRole="header">Maculus</Text>
+            <Text style={styles.userStatus} accessibilityLiveRegion="polite">
+              {userStatusText(state.phase, state.guidanceActive)}
+            </Text>
+
+            {!userSessionReady ? (
+              <UserButton
+                label={state.phase === 'error'
+                  ? 'Retry Maculus'
+                  : state.phase === 'idle' && autoStartRequested
+                    ? 'Start Maculus'
+                    : state.phase === 'stopping' ? 'Stopping Maculus…' : 'Starting Maculus…'}
+                accessibilityHint="Starts camera, voice, and available guidance. The iPhone camera works when the Pi is not connected."
+                disabled={busy || (state.phase === 'idle' && !autoStartRequested)}
+                onPress={() => start()}
+                color="#2ed3b7"
+                darkText
+              />
+            ) : (
+              <>
+                <UserButton
+                  label={state.guidanceActive ? 'Pause Walking Guidance' : 'Start Walking Guidance'}
+                  accessibilityHint={state.guidanceActive
+                    ? 'Pauses camera and depth walking instructions'
+                    : 'Starts camera and depth walking instructions'}
+                  onPress={() => setGuidanceActive(!state.guidanceActive)}
+                  color={state.guidanceActive ? '#d97706' : '#087f5b'}
+                  accessibilityState={{selected: state.guidanceActive}}
+                />
+                <UserButton
+                  label={state.descriptionInProgress ? 'Describing Scene…' : 'Describe Scene'}
+                  accessibilityHint="Describes what is in front of you once"
+                  disabled={state.descriptionInProgress || state.sensor.health === 'emergency'}
+                  onPress={describeScene}
+                  color="#4f46e5"
+                />
+                <UserButton
+                  label={state.voiceStatus === 'command_listening'
+                    ? 'Listening…'
+                    : state.voiceStatus === 'processing' || state.voiceStatus === 'speaking'
+                      ? 'Processing…'
+                      : voiceUnavailable ? 'Voice Unavailable' : 'Talk to Maculus'}
+                  accessibilityHint="Starts listening now. You do not need to say Hey LiveKit."
+                  disabled={voiceBusy || voiceUnavailable || state.sensor.health === 'emergency'}
+                  onPress={() => {activateVoiceCommand().catch(error =>
+                    console.warn('[MaculusNext] Manual voice activation failed:', error));}}
+                  color="#0e7490"
+                />
+                <UserButton
+                  label="End Maculus"
+                  accessibilityHint="Stops the camera, microphone, guidance, and temporary scene memory"
+                  onPress={stop}
+                  color="#dc2626"
+                />
+              </>
+            )}
+          </View>
+        ) : (
+          <>
         <Text style={styles.eyebrow}>PRIVATE ON-DEVICE GUIDE</Text>
         <Text style={styles.title} accessibilityRole="header">Maculus Next</Text>
         <Text style={styles.subtitle}>{state.message}</Text>
@@ -432,9 +524,59 @@ export default function MaculusNextApp(): React.JSX.Element {
         <Text style={styles.disclaimer}>
           Maculus is an assistive aid, not a replacement for a cane, guide dog, or orientation and mobility training.
         </Text>
+          </>
+        )}
         </ScrollView>
       </SafeAreaView>
     </SafeAreaProvider>
+  );
+}
+
+function ModeButton({label, selected, onPress}: {
+  label: string;
+  selected: boolean;
+  onPress(): void;
+}): React.JSX.Element {
+  return (
+    <TouchableOpacity
+      accessibilityRole="tab"
+      accessibilityLabel={`${label} mode`}
+      accessibilityState={{selected}}
+      onPress={onPress}
+      style={[styles.modeButton, selected && styles.modeButtonSelected]}
+    >
+      <Text style={[styles.modeButtonText, selected && styles.modeButtonTextSelected]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function UserButton({label, onPress, accessibilityHint, disabled = false, color, darkText = false,
+  accessibilityState}: {
+  label: string;
+  onPress(): void;
+  accessibilityHint: string;
+  disabled?: boolean;
+  color: string;
+  darkText?: boolean;
+  accessibilityState?: {selected?: boolean};
+}): React.JSX.Element {
+  const handlePress = () => {
+    Vibration.vibrate(15);
+    onPress();
+  };
+  return (
+    <TouchableOpacity
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={accessibilityHint}
+      accessibilityState={{...accessibilityState, disabled}}
+      disabled={disabled}
+      onPress={handlePress}
+      activeOpacity={0.72}
+      style={[styles.userButton, {backgroundColor: color}, disabled && styles.disabledButton]}
+    >
+      <Text style={[styles.userButtonText, darkText && styles.userButtonDarkText]}>{label}</Text>
+    </TouchableOpacity>
   );
 }
 
@@ -480,6 +622,23 @@ function sensorTitle(health: string): string {
   if (health === 'warning') {return 'CAUTION';}
   if (health === 'healthy') {return 'MONITORING';}
   return 'DEGRADED';
+}
+
+function userStatusText(phase: string, guidanceActive: boolean): string {
+  if (phase === 'starting') {return 'Starting Maculus.';}
+  if (phase === 'stopping') {return 'Stopping Maculus.';}
+  if (phase === 'error') {return 'Maculus needs attention. Try again or open Developer mode.';}
+  if (phase === 'degraded') {
+    return guidanceActive
+      ? 'Maculus is running with limited guidance.'
+      : 'Maculus is running with walking guidance paused.';
+  }
+  if (phase === 'running') {
+    return guidanceActive
+      ? 'Maculus is ready. Walking guidance is on.'
+      : 'Maculus is ready. Walking guidance is paused.';
+  }
+  return 'Maculus is stopped.';
 }
 
 function voiceStatusTitle(status: string): string {
@@ -550,7 +709,18 @@ function safetyStyle(health: string) {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#07111f' },
-  content: { paddingHorizontal: 22, paddingTop: 28, paddingBottom: 40 },
+  content: { flexGrow: 1, paddingHorizontal: 22, paddingTop: 18, paddingBottom: 40 },
+  modeSelector: { flexDirection: 'row', gap: 8, borderRadius: 16, backgroundColor: '#0d1a2a', padding: 6, marginBottom: 22 },
+  modeButton: { flex: 1, minHeight: 56, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'transparent' },
+  modeButtonSelected: { backgroundColor: '#2ed3b7', borderColor: '#8fe4d7' },
+  modeButtonText: { color: '#c8d4e3', fontSize: 19, fontWeight: '800' },
+  modeButtonTextSelected: { color: '#06131d' },
+  userMode: { flex: 1, width: '100%', justifyContent: 'center', paddingBottom: 18 },
+  userTitle: { color: '#ffffff', fontSize: 42, lineHeight: 48, fontWeight: '900', textAlign: 'center' },
+  userStatus: { color: '#c8d4e3', fontSize: 19, lineHeight: 27, textAlign: 'center', marginTop: 8, marginBottom: 20 },
+  userButton: { width: '100%', minHeight: 96, borderRadius: 20, paddingHorizontal: 22, paddingVertical: 18, alignItems: 'center', justifyContent: 'center', marginVertical: 8, borderWidth: 2, borderColor: 'rgba(255,255,255,0.24)' },
+  userButtonText: { color: '#ffffff', fontSize: 27, lineHeight: 33, fontWeight: '900', textAlign: 'center' },
+  userButtonDarkText: { color: '#06131d' },
   eyebrow: { color: '#66d9c7', fontSize: 13, fontWeight: '800', letterSpacing: 1.4 },
   title: { color: '#ffffff', fontSize: 38, lineHeight: 44, fontWeight: '800', marginTop: 6 },
   subtitle: { color: '#b9c7d8', fontSize: 18, lineHeight: 25, marginTop: 8, marginBottom: 22 },
